@@ -102,7 +102,12 @@ def main() -> int:
     rc = C.main()
     took = time.time() - t0
 
-    commit = subprocess.run(["git", "-C", str(LLAMA), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    try:   # a release bundle ships the converter's files without git: its COMMIT file names the commit
+        commit = subprocess.run(["git", "-C", str(LLAMA), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    except OSError:
+        commit = ""
+    if not commit and (LLAMA / "COMMIT").exists():
+        commit = (LLAMA / "COMMIT").read_text(encoding="utf-8").strip()
     manifest = {
         "source": str(model),
         "llama_cpp_commit": commit,
