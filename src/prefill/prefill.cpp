@@ -1537,6 +1537,23 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                         cudaMemcpyAsync(m.slot_dev, m.slot_host.data(), (size_t) T * K * 4, cudaMemcpyHostToDevice, m.cs);
                         cudaMemcpyAsync(m.src_dev, m.src_host.data(), (size_t) T * K * 4, cudaMemcpyHostToDevice, m.cs);
                     }
+                    // Diagnostics: STRATA_DUMP_MOE_INPUT=path, STRATA_DUMP_MOE_LAYER=l - the first chunk's MoE input
+                    // of layer l ({T, N, K} int64, T x N floats, T x K expert ids) for testing products on real rows
+                    static const char* dump_moe = std::getenv("STRATA_DUMP_MOE_INPUT");
+                    static bool dumped_moe = false;
+                    if (dump_moe && !dumped_moe && l == std::atoi(std::getenv("STRATA_DUMP_MOE_LAYER") ? std::getenv("STRATA_DUMP_MOE_LAYER") : "0")) {
+                        dumped_moe = true;
+                        std::vector<float> x((size_t) (T * N));
+                        cudaMemcpyAsync(x.data(), m.mixed, x.size() * sizeof(float), cudaMemcpyDeviceToHost, m.cs);
+                        cudaStreamSynchronize(m.cs);
+                        if (std::FILE* f = std::fopen(dump_moe, "wb")) {
+                            const int64_t hdr[3] = {(int64_t) T, (int64_t) N, (int64_t) K};
+                            std::fwrite(hdr, sizeof hdr, 1, f);
+                            std::fwrite(x.data(), sizeof(float), x.size(), f);
+                            std::fwrite(ids_h, sizeof(int32_t), (size_t) (T * K), f);
+                            std::fclose(f);
+                        }
+                    }
                     // the experts, in id order: resident ones from VRAM, the others through the staging ring
                     std::vector<int32_t> order;
                     for (int32_t e = 0; e < m.g->n_expert; ++e) if (m.cnt[(size_t) e] > 0) order.push_back(e);
@@ -1665,6 +1682,8 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                             dn.ld_dst = N;
                             dn.y_scale = mmq::fp4_activations(mmq_dt) ? m.Hscale : nullptr;
                             m.mmq_ctx->run(dn, m.cs);
+                            if (lay.native && lay.fmt[(size_t) l].tail_off)
+                                mmq::scale_down_rows(m.Dm + r0 * N, N, dn.bounds, ngx, m.grp_tail, nr, m.cs);
                             return true;
                         }
                         const int q = (int) (j % DQ);
@@ -1674,7 +1693,8 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                             strata::kernels::iq_dequant_gu_f16(f.gu_type, blob_dev, blob_dev + f.up_off, f.n_ff, f.n_embd,
                                                                m.dq_gu[q], m.cs,
                                                                f.tail_off ? (const float*) (blob_dev + f.tail_off) : nullptr);
-                            strata::kernels::iq_dequant_f16(f.d_type, blob_dev + f.down_off, f.n_embd * f.n_ff, m.dq_d[q], m.cs);
+                            strata::kernels::iq_dequant_f16(f.d_type, blob_dev + f.down_off, f.n_embd * f.n_ff, m.dq_d[q], m.cs,
+                                                            f.tail_off ? (const float*) (blob_dev + f.tail_off) + 2 : nullptr);
                         } else {
                             blob_dequant_f16(blob_dev, m.dq_gu[q], m.dq_d[q], m.cs);
                         }

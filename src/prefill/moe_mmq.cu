@@ -9,6 +9,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 namespace strata::prefill::mmq {
 namespace {
@@ -87,15 +88,33 @@ unsigned blocks(int64_t n) { return (unsigned) ((n + 255) / 256); }
 
 }  // namespace
 
+// mmq_nvfp4_w4a8.cu: mmq.cuh's int8 NVFP4 path, compiled for this GPU with Blackwell's FP4 MMA hidden
+void run_nvfp4_w4a8(ggml_backend_cuda_context& ctx, const mmq_args& a, cudaStream_t s);
+
 bool built() { return true; }
+
+Nvfp4Mode nvfp4_mode() {
+    static const Nvfp4Mode m = [] {
+        const char* e = std::getenv("STRATA_PREFILL_NVFP4");
+        if (e == nullptr || std::strcmp(e, "w4a8") == 0) return Nvfp4Mode::W4A8;
+        if (std::strcmp(e, "w4a4") == 0) return Nvfp4Mode::W4A4;
+        if (std::strcmp(e, "fp16") == 0) return Nvfp4Mode::FP16;
+        std::fprintf(stderr, "STRATA_PREFILL_NVFP4=%s: expected w4a8, w4a4 or fp16\n", e);
+        std::exit(1);
+    }();
+    return m;
+}
 
 bool supported(int t) {
     switch ((ggml_type) t) {
         case GGML_TYPE_Q2_0: case GGML_TYPE_IQ2_XXS: case GGML_TYPE_IQ2_XS: case GGML_TYPE_IQ2_S:
         case GGML_TYPE_IQ3_XXS: case GGML_TYPE_IQ3_S: case GGML_TYPE_IQ4_NL: case GGML_TYPE_IQ4_XS:
         case GGML_TYPE_Q8_0:   // the draft layer's dense matrices (E-9)
-        case GGML_TYPE_NVFP4:
             return true;
+#if !defined(GGML_USE_HIP)
+        case GGML_TYPE_NVFP4:
+            return nvfp4_mode() != Nvfp4Mode::FP16;
+#endif
         default:
             return false;
     }
@@ -124,14 +143,23 @@ __global__ void scale_gu_rows_kernel(float* __restrict__ gu, int64_t ld, int64_t
     const int64_t r = row0 + blockIdx.x;
     int q = 0;
     while (q + 1 < n && r >= bounds[q + 1]) ++q;
-    const float sg = tails[4 * q], su = tails[4 * q + 1] * tails[4 * q + 2];
+    const float sg = tails[4 * q], su = tails[4 * q + 1];
     float* row = gu + r * ld;
     for (int64_t k = threadIdx.x; k < 2 * n_ff; k += blockDim.x) row[k] *= k < n_ff ? sg : su;
+}
+__global__ void scale_down_rows_kernel(float* __restrict__ d, int64_t ld, const int32_t* __restrict__ bounds, int n,
+                                       const float* __restrict__ tails) {
+    const int64_t r = blockIdx.x;
+    int q = 0;
+    while (q + 1 < n && r >= bounds[q + 1]) ++q;
+    const float sd = tails[4 * q + 2];
+    float* row = d + r * ld;
+    for (int64_t k = threadIdx.x; k < ld; k += blockDim.x) row[k] *= sd;
 }
 }  // namespace
 
 bool fp4_activations(int t) {
-    if (t != GGML_TYPE_NVFP4) return false;
+    if (t != GGML_TYPE_NVFP4 || nvfp4_mode() != Nvfp4Mode::W4A4) return false;
     static const bool on = [] {
         int* d = nullptr;
         int h = 0;
@@ -149,6 +177,12 @@ void scale_gu_rows(float* gu, int64_t ld, int64_t n_ff, const int32_t* bounds, i
     if (nrows <= 0 || n <= 0) return;
     scale_gu_rows_kernel<<<(unsigned) nrows, 256, 0, (cudaStream_t) stream>>>(gu, ld, n_ff, bounds, n, tails, row0);
     ck(cudaGetLastError(), "scale_gu_rows");
+}
+
+void scale_down_rows(float* d, int64_t ld, const int32_t* bounds, int n, const float* tails, int64_t nrows, void* stream) {
+    if (nrows <= 0 || n <= 0) return;
+    scale_down_rows_kernel<<<(unsigned) nrows, 256, 0, (cudaStream_t) stream>>>(d, ld, bounds, n, tails);
+    ck(cudaGetLastError(), "scale_down_rows");
 }
 
 void quantize(const float* x, const int32_t* ids, void* xq, int t, int64_t cols, int64_t ld, int64_t rows, void* stream,
@@ -194,7 +228,12 @@ void Context::run(const Product& p, void* stream) {
         case GGML_TYPE_IQ4_NL: mul_mat_q_case<GGML_TYPE_IQ4_NL>(ctx, a, s); break;
         case GGML_TYPE_IQ4_XS: mul_mat_q_case<GGML_TYPE_IQ4_XS>(ctx, a, s); break;
         case GGML_TYPE_Q8_0: mul_mat_q_case<GGML_TYPE_Q8_0>(ctx, a, s); break;
-        case GGML_TYPE_NVFP4: mul_mat_q_case<GGML_TYPE_NVFP4>(ctx, a, s); break;
+#if !defined(GGML_USE_HIP)   // NVFP4: CUDA only (no HIP instance, no W4A8 unit)
+        case GGML_TYPE_NVFP4:
+            if (fp4_activations(t)) mul_mat_q_case<GGML_TYPE_NVFP4>(ctx, a, s);
+            else run_nvfp4_w4a8(ctx, a, s);
+            break;
+#endif
         default:
             std::fprintf(stderr, "prefill mmq: type %d is not covered\n", (int) t);
             std::exit(1);

@@ -398,11 +398,12 @@ __global__ void __launch_bounds__(256) native_gu_kernel(const unsigned long long
     const uint8_t* blob = (const uint8_t*) grp_ptr[g];
     const uint8_t* wr = blob + (is_up ? L.up_off : 0) + (size_t) r * L.gu_row;
     const int nb = (int) (L.n_embd / Fmt<TG>::qk), xb = (int) (L.n_embd / 32);
-    // NVFP4: the expert's global scales from the blob's tail; s_down rides on up (down is linear)
+    // NVFP4: the expert's global scales from the blob's tail; s_down goes on the down output (native_down_kernel):
+    // folded into up it left the hidden near 1e-5, whose q8_1 block scale is an FP16 subnormal
     float scale = 1.0f;
     if (L.tail_off) {
         const float* tail = (const float*) (blob + L.tail_off);
-        scale = is_up ? tail[1] * tail[2] : tail[0];
+        scale = is_up ? tail[1] : tail[0];
     }
     const int e0 = grp_start[g], e1 = grp_start[g + 1];
     for (int e = e0; e < e1; ++e) {
@@ -434,10 +435,11 @@ __global__ void __launch_bounds__(256) native_down_kernel(const unsigned long lo
     const uint8_t* blob = (const uint8_t*) grp_ptr[g];
     const uint8_t* wr = blob + L.down_off + (size_t) r * L.d_row;
     const int nb = (int) (L.n_ff / Fmt<TD>::qk), hb = (int) (L.n_ff / 32);
+    const float sd = L.tail_off ? ((const float*) (blob + L.tail_off))[2] : 1.0f;   // NVFP4: s_down
     const int e0 = grp_start[g], e1 = grp_start[g + 1];
     for (int e = e0; e < e1; ++e) {
         const float s = row_dot<TD>(wr, hq + (size_t) e * hb, nb, lane);
-        if (lane == 0) out[(size_t) ent_dst[e] * L.n_embd + r] = s;
+        if (lane == 0) out[(size_t) ent_dst[e] * L.n_embd + r] = s * sd;
     }
 }
 
@@ -654,9 +656,18 @@ __device__ __forceinline__ void dq_dispatch(int ty, const void* vx, int64_t ibs,
 
 // flat: superblock i -> y + 256 i
 template<typename dst_t>
-__global__ void dequant_flat_kernel(int ty, const void* __restrict__ vx, dst_t* __restrict__ y) {
+__global__ void dequant_flat_kernel(int ty, const void* __restrict__ vx, dst_t* __restrict__ y,
+                                    const float* __restrict__ scale) {
     const int64_t i = blockIdx.x;
     dq_dispatch<dst_t>(ty, vx, i, y + i * QK_K, threadIdx.x);
+    if (scale != nullptr) {       // NVFP4 down: s_down (the weights stay in FP16's normal range)
+        __syncwarp();
+        const float sc = *scale;
+        for (int k = 0; k < 8; ++k) {
+            const int j = threadIdx.x * 8 + k;
+            y[i * QK_K + j] = cvt<dst_t>((float) y[i * QK_K + j] * sc);
+        }
+    }
 }
 // gate/up: superblock i of a role matrix (n_embd/256 per row) -> interleaved row 2r + parity
 __global__ void dequant_gu_kernel(int ty, const void* __restrict__ gate, const void* __restrict__ up, int64_t per_row,
@@ -666,9 +677,9 @@ __global__ void dequant_gu_kernel(int ty, const void* __restrict__ gate, const v
     const int64_t r = i / per_row, c = i % per_row;
     __half* dst = y + ((2 * r + parity) * per_row + c) * QK_K;
     dq_dispatch<__half>(ty, parity ? up : gate, i, dst, threadIdx.x);
-    if (tail != nullptr) {        // NVFP4: gate * s_gate, up * (s_up * s_down)
+    if (tail != nullptr) {        // NVFP4: gate * s_gate, up * s_up (s_down on the down output: FP16 would underflow)
         __syncwarp();
-        const float sc = parity ? tail[1] * tail[2] : tail[0];
+        const float sc = parity ? tail[1] : tail[0];
         for (int k = 0; k < 8; ++k) {
             const int j = threadIdx.x * 8 + k;
             dst[j] = __float2half(__half2float(dst[j]) * sc);
@@ -730,9 +741,9 @@ void iq_mmvq(int t, const void* w, const void* x_q8_1, float* y, int n_in, int n
     check("iq_mmvq");
 }
 
-void iq_dequant_f16(int t, const void* src, int64_t n, uint16_t* dst, void* stream) {
+void iq_dequant_f16(int t, const void* src, int64_t n, uint16_t* dst, void* stream, const float* scale) {
     if (n % 256 != 0 || !is_iq(t)) { std::fprintf(stderr, "iq_dequant_f16: bad arguments\n"); std::exit(1); }
-    dequant_flat_kernel<__half><<<(unsigned) (n / 256), 32, 0, (cudaStream_t) stream>>>(t, src, (__half*) dst);
+    dequant_flat_kernel<__half><<<(unsigned) (n / 256), 32, 0, (cudaStream_t) stream>>>(t, src, (__half*) dst, scale);
     check("iq_dequant_f16");
 }
 
@@ -757,7 +768,7 @@ void iq_embed_rows(int t, const void* table, size_t row_bytes, const int32_t* to
 
 void iq_dequant_f32(int t, const void* src, int64_t n, float* dst, void* stream) {
     if (n % 256 != 0 || !is_iq(t)) { std::fprintf(stderr, "iq_dequant_f32: bad arguments\n"); std::exit(1); }
-    dequant_flat_kernel<float><<<(unsigned) (n / 256), 32, 0, (cudaStream_t) stream>>>(t, src, dst);
+    dequant_flat_kernel<float><<<(unsigned) (n / 256), 32, 0, (cudaStream_t) stream>>>(t, src, dst, nullptr);
     check("iq_dequant_f32");
 }
 
