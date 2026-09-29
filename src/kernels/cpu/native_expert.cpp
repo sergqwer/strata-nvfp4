@@ -12,6 +12,7 @@
 
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 
 namespace strata::kernels::cpu {
@@ -58,6 +59,14 @@ bool native_fmt(int gu_type, int d_type, int64_t n_embd, int64_t n_ff, NativeFmt
     f.up_off = f.gu_row * (size_t) n_ff;
     f.down_off = 2 * f.up_off;
     f.bytes = f.down_off + f.d_row * (size_t) n_embd;
+    if (gu_type == kNvfp4Type || d_type == kNvfp4Type) {
+        if (gu_type != kNvfp4Type || d_type != kNvfp4Type) {
+            err = "native experts: NVFP4 must cover gate, up and down alike (one scale tail per blob)";
+            return false;
+        }
+        f.tail_off = f.bytes;
+        f.bytes += kNvfp4Tail;
+    }
     f.act_bytes = ggml_row_size(tg->vec_dot_type, n_embd);
     f.h_bytes = ggml_row_size(td->vec_dot_type, n_ff);
     if (f.act_bytes > kNativeActBytes || f.h_bytes > kNativeHBytes) {
@@ -96,6 +105,14 @@ void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* 
     }
     const ggml_vec_dot_t dot = traits(f.gu_type)->vec_dot;
     const int n = (int) f.n_embd;
+    // NVFP4: the per-expert global scales from the blob's tail (1 and 1 otherwise). s_down is folded into up.
+    float sg = 1.f, su = 1.f;
+    if (f.tail_off) {
+        float tail[4];
+        std::memcpy(tail, blob + f.tail_off, sizeof tail);
+        sg = tail[0];
+        su = tail[1] * tail[2];
+    }
     for (int r = r0; r < r1; ++r) {
         const uint8_t* gr = blob + (size_t) r * f.gu_row;
         const uint8_t* ur = blob + f.up_off + (size_t) r * f.gu_row;
@@ -103,6 +120,8 @@ void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* 
             float g = 0.f, u = 0.f;
             dot(n, &g, 0, gr, 0, act[t], 0, 1);
             dot(n, &u, 0, ur, 0, act[t], 0, 1);
+            g *= sg;
+            u *= su;
             ff[t][r] = (g / (1.f + std::exp(-g))) * u;
         }
     }
