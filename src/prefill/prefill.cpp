@@ -52,14 +52,18 @@ bool supported(int) { return false; }
 bool fits(int, int64_t) { return false; }
 size_t matrix_bytes(int, int64_t, int64_t) { return 0; }
 size_t q8_bytes(int64_t, int64_t) { return 0; }
-void quantize(const float*, const int32_t*, void*, int, int64_t, int64_t, int64_t, void*) {}
+void quantize(const float*, const int32_t*, void*, int, int64_t, int64_t, int64_t, void*, float*) {}
+bool fp4_activations(int) { return false; }
 Context::Context() {}
 Context::~Context() {}
 void Context::run(const Product&, void*) {}
-void gather_native(const void*, const void*, size_t, const void*, size_t, void*, void*, void*) {}
-bool gather_native_group(const GatherGroup&, size_t, size_t, size_t, size_t, void*, size_t, void*, size_t, void*) { return false; }
+void gather_native(const void*, const void*, size_t, const void*, size_t, void*, void*, void*, const void*, void*, size_t) {}
+bool gather_native_group(const GatherGroup&, size_t, size_t, size_t, size_t, void*, size_t, void*, size_t, void*, size_t,
+                         void*, size_t) { return false; }
 void gather_strata_q2(const uint8_t*, void*, void*, void*) {}
 void swiglu(const float*, float*, int64_t, int64_t, bool, void*) {}
+void swiglu_scaled(const float*, float*, int64_t, int64_t, const int32_t*, int, const float*, int64_t, void*) {}
+void down_row_scales(float*, const int32_t*, int, const float*, int64_t, void*) {}
 void iota(int32_t*, int64_t, void*) {}
 }  // namespace strata::prefill::mmq
 #endif
@@ -519,6 +523,8 @@ struct Prefill::Impl {
     float* H = nullptr;
     int32_t *ids_identity = nullptr, *bounds_dev = nullptr;
     uint8_t *grp_gu = nullptr, *grp_d = nullptr;
+    float *Xscale = nullptr, *Hscale = nullptr, *grp_tail = nullptr;   // NVFP4: activation scales, expert tails
+    float* row_sd = nullptr;          // NVFP4 in MMQ: each Dm row's s_down, applied by the combine as it reads the row
     std::vector<int32_t> bounds_host;
     std::unique_ptr<mmq::Context> mmq_ctx;
     std::vector<int32_t> ids_host, slot_host, src_host, cnt, off;
@@ -723,6 +729,8 @@ uint64_t moe_set_bytes(size_t T, int64_t n_expert, bool fused) {
         a.take<uint8_t>(mb.xq, ok);
         a.take<float>(mb.h, ok);
         a.take<uint8_t>(mb.hq, ok);
+        a.take<float>(T * K, ok); a.take<float>(T * K, ok); a.take<float>(MMQ_GROUP * 4, ok);
+        a.take<float>(T * K, ok);
     }
     return a.used;
 }
@@ -901,6 +909,9 @@ bool Prefill::carve(size_t T, void* alloc) {
             m.Xq = c.take<uint8_t>(mb.xq, ok);
             m.H = c.take<float>(mb.h, ok);
             m.Hq = c.take<uint8_t>(mb.hq, ok);
+            m.Xscale = c.take<float>(T * K, ok); m.Hscale = c.take<float>(T * K, ok);
+            m.grp_tail = c.take<float>(MMQ_GROUP * 4, ok);
+            m.row_sd = c.take<float>(T * K, ok);
         }
         if (base == nullptr) ok = false;
     }
@@ -1253,6 +1264,11 @@ bool Prefill::set_peer(core::PeerExperts* peer, int64_t cap_rows, std::string& e
     if (peer == nullptr || !peer->valid()) { m.pp.reset(); return true; }
     if (!peer->p2p()) { err = "prefill peer: the two GPUs cannot access each other (no P2P)"; return false; }
     if (!mmq_plan().any) { err = "prefill peer: needs the MMQ prompt path"; return false; }
+    {   // NVFP4: the peer's MMQ products have no per-expert scales (grp_tail, row_sd); its decode rows do
+        const auto& lay = strata::kernels::cpu::expert_layout();
+        for (const auto& f : lay.fmt)
+            if (lay.native && f.tail_off) { err = "prefill peer: not for NVFP4 experts yet"; return false; }
+    }
     auto pp = std::make_unique<PeerPrefill>();
     pp->peer = peer;
     pp->T_max = m.T_max;
@@ -2400,6 +2416,23 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             cudaMemcpyAsync(m.slot_dev, m.slot_host.data(), (size_t) T * K * 4, cudaMemcpyHostToDevice, m.cs);
                             cudaMemcpyAsync(m.src_dev, m.src_host.data(), (size_t) T * K * 4, cudaMemcpyHostToDevice, m.cs);
                         }
+                        // Diagnostics: STRATA_DUMP_MOE_INPUT=path, STRATA_DUMP_MOE_LAYER=l - the first chunk's MoE input
+                        // of layer l ({T, N, K} int64, T x N floats, T x K expert ids) for testing products on real rows
+                        static const char* dump_moe = std::getenv("STRATA_DUMP_MOE_INPUT");
+                        static bool dumped_moe = false;
+                        if (dump_moe && !dumped_moe && l == std::atoi(std::getenv("STRATA_DUMP_MOE_LAYER") ? std::getenv("STRATA_DUMP_MOE_LAYER") : "0")) {
+                            dumped_moe = true;
+                            std::vector<float> x((size_t) (T * N));
+                            cudaMemcpyAsync(x.data(), m.mixed, x.size() * sizeof(float), cudaMemcpyDeviceToHost, m.cs);
+                            cudaStreamSynchronize(m.cs);
+                            if (std::FILE* f = std::fopen(dump_moe, "wb")) {
+                                const int64_t hdr[3] = {(int64_t) T, (int64_t) N, (int64_t) K};
+                                std::fwrite(hdr, sizeof hdr, 1, f);
+                                std::fwrite(x.data(), sizeof(float), x.size(), f);
+                                std::fwrite(ids_h, sizeof(int32_t), (size_t) (T * K), f);
+                                std::fclose(f);
+                            }
+                        }
                         // the experts, in id order: resident ones from VRAM, the others through the staging ring
                         std::vector<int32_t> order, order_peer;
                         for (int32_t e = 0; e < m.g->n_expert; ++e)
@@ -2413,7 +2446,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         pt.mark(kPfGather, cs);
                         if (use_mmq) {
                             // step 2b: the layer's activations as q8_1 rows in expert order, straight from `mixed`
-                            mmq::quantize(m.mixed, m.src_dev, m.Xq, mmq_gt, N, N, T * K, m.cs);
+                            mmq::quantize(m.mixed, m.src_dev, m.Xq, mmq_gt, N, N, T * K, m.cs, m.Xscale);
                             // each group's rows: absolute bounds (gate/up reads the layer's rows), relative ones (down
                             // reads the group's own quantized H)
                             const size_t n = order.size(), ng = (n + MMQ_GROUP - 1) / MMQ_GROUP;
@@ -2702,7 +2735,8 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         mmq::GatherGroup gg;
                         int gg_slots[MMQ_GROUP];
                         int gg_nslots = 0;   // ring slots gathered by the next flush
-                        auto flush = [&]() {
+                        // `zero`: the MMQ tail zeroed after the gathered experts (the group's last flush)
+                        auto flush = [&](size_t zero) {
                             if (gg.n <= gg.first) return;
                             const auto& f = lay.fmt[(size_t) l];
                             if (gg_nslots > 0) {   // the copies land in order: the last one covers the others
@@ -2710,12 +2744,16 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 cudaStreamWaitEvent(m.cs, m.copied[gg_slots[gg_nslots - 1]], 0);
                                 pt.mark(kPfDequant, cs);
                             }
+                            // NVFP4: each expert's scales go next to its group slot in the same launch
                             if (!mmq::gather_native_group(gg, f.up_off, mmq_gub / 2, f.down_off, mmq_db, m.grp_gu, mmq_gub,
-                                                          m.grp_d, mmq_db, m.cs)) {
+                                                          m.grp_d, mmq_db, m.cs, f.tail_off,
+                                                          f.tail_off ? m.grp_tail : nullptr, zero)) {
                                 for (int i = gg.first; i < gg.n; ++i) {   // not 16-byte aligned: one at a time
                                     const uint8_t* b = gg.blob[i];
                                     mmq::gather_native(b, b + f.up_off, mmq_gub / 2, b + f.down_off, mmq_db,
-                                                       m.grp_gu + i * mmq_gub, m.grp_d + i * mmq_db, m.cs);
+                                                       m.grp_gu + i * mmq_gub, m.grp_d + i * mmq_db, m.cs,
+                                                       f.tail_off ? b + f.tail_off : nullptr,
+                                                       f.tail_off ? m.grp_tail + i * 4 : nullptr, i + 1 == gg.n ? zero : 0);
                                 }
                             }
                             if (gg_nslots > 0) {
@@ -2734,19 +2772,28 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             if (use_mmq) {
                                 // gather the expert into its group slot (GGUF blocks, unchanged or converted)
                                 const size_t q = j % MMQ_GROUP;
+                                // the group's last expert also zeroes the MMQ tail after its slot (see MMQ_TAIL)
+                                const bool last_of_group = q + 1 == MMQ_GROUP || j + 1 == order.size();
                                 if (group_gather) {
                                     gg.blob[q] = blob_dev;
                                     gg.n = (int) q + 1;
                                     if (slot >= 0) gg_slots[gg_nslots++] = slot;
-                                    if (q + 1 < MMQ_GROUP && j + 1 < order.size()) return true;
-                                    flush();
+                                    if (!last_of_group) return true;
+                                    flush(MMQ_TAIL);
                                     gg = mmq::GatherGroup{};
                                 } else if (lay.native) {
                                     const auto& f = lay.fmt[(size_t) l];
+                                    // NVFP4: this expert's scales go next to its group slot in the same launch
                                     mmq::gather_native(blob_dev, blob_dev + f.up_off, mmq_gub / 2, blob_dev + f.down_off,
-                                                       mmq_db, m.grp_gu + q * mmq_gub, m.grp_d + q * mmq_db, m.cs);
+                                                       mmq_db, m.grp_gu + q * mmq_gub, m.grp_d + q * mmq_db, m.cs,
+                                                       f.tail_off ? blob_dev + f.tail_off : nullptr,
+                                                       f.tail_off ? m.grp_tail + q * 4 : nullptr, last_of_group ? MMQ_TAIL : 0);
                                 } else {
                                     mmq::gather_strata_q2(blob_dev, m.grp_gu + q * mmq_gub, m.grp_d + q * mmq_db, m.cs);
+                                    if (last_of_group) {
+                                        cudaMemsetAsync(m.grp_gu + (size_t) (q + 1) * mmq_gub, 0, MMQ_TAIL, m.cs);
+                                        cudaMemsetAsync(m.grp_d + (size_t) (q + 1) * mmq_db, 0, MMQ_TAIL, m.cs);
+                                    }
                                 }
                                 if (slot >= 0 && !group_gather) { cudaEventRecord(m.used[slot], m.cs); m.used_of[slot] = slot; }
                                 if (q + 1 < MMQ_GROUP && j + 1 < order.size()) return true;
@@ -2757,23 +2804,28 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 int64_t maxr = 0;
                                 for (size_t i = j0; i <= j; ++i) maxr = std::max<int64_t>(maxr, m.cnt[(size_t) order[i]]);
                                 pt.mark(kPfGemmGU, cs);
-                                // the zeroed tail after the group's last expert (see MMQ_TAIL)
-                                cudaMemsetAsync(m.grp_gu + (size_t) ngx * mmq_gub, 0, MMQ_TAIL, m.cs);
-                                cudaMemsetAsync(m.grp_d + (size_t) ngx * mmq_db, 0, MMQ_TAIL, m.cs);
                                 mmq::Product gu;
                                 gu.w = m.grp_gu; gu.type = mmq_gt; gu.w_rows = 1280; gu.w_cols = N; gu.expert_bytes = mmq_gub;
                                 gu.n = ngx; gu.xq = m.Xq; gu.bounds = m.bounds_dev + j0; gu.ids = m.ids_identity;
                                 gu.total_rows = T * K; gu.max_rows = maxr; gu.dst = m.GU; gu.ld_dst = 1280;
+                                gu.y_scale = mmq::fp4_activations(mmq_gt) ? m.Xscale : nullptr;
                                 m.mmq_ctx->run(gu, m.cs);
-                                mmq::swiglu(m.GU + r0 * 1280, m.H + r0 * 640, nr, 640, !lay.native, m.cs);
+                                if (lay.native && lay.fmt[(size_t) l].tail_off)   // gate/up scales applied as read
+                                    mmq::swiglu_scaled(m.GU + r0 * 1280, m.H + r0 * 640, nr, 640, m.bounds_dev + j0, ngx,
+                                                       m.grp_tail, r0, m.cs);
+                                else
+                                    mmq::swiglu(m.GU + r0 * 1280, m.H + r0 * 640, nr, 640, !lay.native, m.cs);
                                 pt.mark(kPfGemmD, cs);
-                                mmq::quantize(m.H + r0 * 640, nullptr, m.Hq, mmq_dt, 640, 640, nr, m.cs);
+                                mmq::quantize(m.H + r0 * 640, nullptr, m.Hq, mmq_dt, 640, 640, nr, m.cs, m.Hscale);
                                 mmq::Product dn;
                                 dn.w = m.grp_d; dn.type = mmq_dt; dn.w_rows = N; dn.w_cols = 640; dn.expert_bytes = mmq_db;
                                 dn.n = ngx; dn.xq = m.Hq; dn.bounds = m.bounds_dev + n + 1 + g * (MMQ_GROUP + 1);
                                 dn.ids = m.ids_identity; dn.total_rows = nr; dn.max_rows = maxr; dn.dst = m.Dm + r0 * N;
                                 dn.ld_dst = N;
+                                dn.y_scale = mmq::fp4_activations(mmq_dt) ? m.Hscale : nullptr;
                                 m.mmq_ctx->run(dn, m.cs);
+                                if (lay.native && lay.fmt[(size_t) l].tail_off)   // s_down: applied by the combine
+                                    mmq::down_row_scales(m.row_sd + r0, dn.bounds, ngx, m.grp_tail, nr, m.cs);
                                 return true;
                             }
                             const int q = (int) (j % DQ);
@@ -2781,8 +2833,10 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 // plan v0.3 P6: a native pack's layer, dequantized by llama.cpp's own formulas
                                 const auto& f = lay.fmt[(size_t) l];
                                 strata::kernels::iq_dequant_gu_f16(f.gu_type, blob_dev, blob_dev + f.up_off, f.n_ff, f.n_embd,
-                                                                   m.dq_gu[q], m.cs);
-                                strata::kernels::iq_dequant_f16(f.d_type, blob_dev + f.down_off, f.n_embd * f.n_ff, m.dq_d[q], m.cs);
+                                                                   m.dq_gu[q], m.cs,
+                                                                   f.tail_off ? (const float*) (blob_dev + f.tail_off) : nullptr);
+                                strata::kernels::iq_dequant_f16(f.d_type, blob_dev + f.down_off, f.n_embd * f.n_ff, m.dq_d[q], m.cs,
+                                                                f.tail_off ? (const float*) (blob_dev + f.tail_off) + 2 : nullptr);
                             } else {
                                 blob_dequant_f16(blob_dev, m.dq_gu[q], m.dq_d[q], m.cs);
                             }
@@ -2820,7 +2874,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             const size_t kend = seq_start[(size_t) l + 1];
                             auto release_to = [&](int32_t e_stop) {
                                 while (k < kend && seq[k].e < e_stop) {
-                                    if (gg_nslots > 0) flush();   // the open group's slots get their event first
+                                    if (gg_nslots > 0) flush(0);   // the open group's slots get their event first
                                     const int sl = (int) (k % (size_t) m.ring);
                                     cudaEventRecord(m.used[sl], m.cs);
                                     m.used_of[sl] = sl;
@@ -2860,7 +2914,8 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         if (!m.pp->p2p)
                             copy_f32_wide(m.Dm + (size_t) m.pp->back_at * N, m.pp->host_rows, m.pp->back_rows * N, m.cs);
                     }
-                    moe_combine(m.Dm, m.slot_dev, m.w, m.shared, m.sg, m.bo, T, m.cs);
+                    moe_combine(m.Dm, m.slot_dev, m.w, m.shared, m.sg, m.bo, T, m.cs,
+                                use_mmq && !fused_l && lay.native && lay.fmt[(size_t) l].tail_off ? m.row_sd : nullptr);
                     // debug: STRATA_DBG_NAN=1 reports the first layer of a chunk whose MoE produced non-finite values
                     if (static const bool dbg = std::getenv("STRATA_DBG_NAN") != nullptr; dbg) {
                         cudaStreamSynchronize(m.cs);
