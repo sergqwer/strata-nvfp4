@@ -901,7 +901,7 @@ if (st.kv_hybrid) {
     kv_append_q8_step(st.k_q, st.k_q, st.k_scale, st.k_scale, st.page_table, st.step, b.kcur, b.kcur, s, stream, nullptr);   // mode 0: no host mirror
     strata::kernels::kv_append_q4_step(st.v_q4, st.v_q4, st.page_table, st.step, b.vcur, b.vcur, s, stream, nullptr);
 } else {
-if (st.kv_rot) {   // rotated K and V (kv_q4.hpp): Q4_0, and INT8 unless STRATA_KV_ROT=0
+if (st.kv_rot) {   // rotated K and V (kv_q4.hpp): Q4_0, and INT8 with STRATA_KV_ROT=1
     strata::kernels::fwht256_inplace_cuda(b.kcur, g.n_head_kv, stream);
     strata::kernels::fwht256_inplace_cuda(b.vcur, g.n_head_kv, stream);
 }
