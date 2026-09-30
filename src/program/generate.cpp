@@ -1213,7 +1213,11 @@ int main(int argc, char** argv) {
         return 2;
     }
     strata::core::qsa_set_kv_int8(o.kv == "int8");
-    strata::core::qsa_set_kv_q4(o.kv == "q4_0");   // PR #21: 4-bit codes after a Hadamard rotation (kv_q4.hpp)
+    strata::core::qsa_set_kv_q4(o.kv == "q4_0");
+    // INT8 K/V through the Hadamard rotation --kv q4_0 already uses (attention output error 0.306% -> 0.265% on
+    // real K/V, the same memory); STRATA_KV_ROT=0 stores them as they are
+    const char* kv_rot = std::getenv("STRATA_KV_ROT");
+    strata::core::qsa_set_kv_int8_rotate(kv_rot == nullptr || kv_rot[0] != '0');   // PR #21: 4-bit codes after a Hadamard rotation (kv_q4.hpp)
     strata::core::qsa_set_kv_hybrid(o.kv == "k8v4");   // K8V4: INT8 K + rotated Q4_0 V, 816 B/cell
     if (o.kv_resident < 0) {
         std::fprintf(stderr, "strata generate: --kv-resident must be >= 0\n");
