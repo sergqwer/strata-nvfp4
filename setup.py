@@ -2671,7 +2671,9 @@ def main() -> int:
     if budget is not None:     # UD-Q4_K_XL: the experts read from the GGUF in place, the most-used N GiB kept in RAM
         args += ["--resident-budget-gib", str(budget)]
     if vision != "none":
-        args += ["--vision", "--vram-reserve-mib", str(VISION[vision]["reserve_mib"])]
+        # Windows: at least the engine's own default (1500): with less, the desktop's VRAM use stalls the GPU
+        reserve = max(VISION[vision]["reserve_mib"], 1500) if WIN else VISION[vision]["reserve_mib"]
+        args += ["--vision", "--vram-reserve-mib", str(reserve)]
     if esp is not None:
         # the package's profile, with llama.cpp's flags (the engine takes the same ones)
         args += ["--control-vector-scaled", f"{esp}:1.0", "--control-vector-layer-range", "4", "44",
