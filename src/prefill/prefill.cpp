@@ -289,6 +289,7 @@ struct Prefill::Impl {
     float* H = nullptr;
     int32_t *ids_identity = nullptr, *bounds_dev = nullptr;
     uint8_t *grp_gu = nullptr, *grp_d = nullptr;
+    float *Xscale = nullptr, *Hscale = nullptr, *grp_tail = nullptr;   // NVFP4: activation scales, expert tails
     std::vector<int32_t> bounds_host;
     std::unique_ptr<mmq::Context> mmq_ctx;
     std::vector<int32_t> ids_host, slot_host, src_host, cnt, off;
@@ -456,6 +457,7 @@ uint64_t moe_set_bytes(size_t T, int64_t n_expert) {
         a.take<uint8_t>(mmq::q8_bytes((int64_t) (T * K), N), ok);
         a.take<float>(T * K * 640, ok);
         a.take<uint8_t>(mmq::q8_bytes((int64_t) (T * K), 640), ok);
+        a.take<float>(T * K, ok); a.take<float>(T * K, ok); a.take<float>(MMQ_GROUP * 4, ok);
     }
     return a.used;
 }
@@ -623,6 +625,8 @@ bool Prefill::carve(size_t T, void* alloc) {
             m.Xq = c.take<uint8_t>(mmq::q8_bytes((int64_t) (T * K), N), ok);
             m.H = c.take<float>(T * K * 640, ok);
             m.Hq = c.take<uint8_t>(mmq::q8_bytes((int64_t) (T * K), 640), ok);
+            m.Xscale = c.take<float>(T * K, ok); m.Hscale = c.take<float>(T * K, ok);
+            m.grp_tail = c.take<float>(MMQ_GROUP * 4, ok);
         }
         if (base == nullptr) ok = false;
     }
@@ -1545,7 +1549,7 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                     pt.mark(kPfGather, cs);
                     if (use_mmq) {
                         // step 2b: the layer's activations as q8_1 rows in expert order, straight from `mixed`
-                        mmq::quantize(m.mixed, m.src_dev, m.Xq, mmq_gt, N, N, T * K, m.cs);
+                        mmq::quantize(m.mixed, m.src_dev, m.Xq, mmq_gt, N, N, T * K, m.cs, m.Xscale);
                         // each group's rows: absolute bounds (gate/up reads the layer's rows), relative ones (down
                         // reads the group's own quantized H)
                         const size_t n = order.size(), ng = (n + MMQ_GROUP - 1) / MMQ_GROUP;
@@ -1626,6 +1630,8 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                                 const auto& f = lay.fmt[(size_t) l];
                                 mmq::gather_native(blob_dev, blob_dev + f.up_off, mmq_gub / 2, blob_dev + f.down_off,
                                                    mmq_db, m.grp_gu + q * mmq_gub, m.grp_d + q * mmq_db, m.cs);
+                                if (f.tail_off)       // NVFP4: this expert's scales, next to its group slot
+                                    cudaMemcpyAsync(m.grp_tail + q * 4, blob_dev + f.tail_off, 16, cudaMemcpyDeviceToDevice, m.cs);
                             } else {
                                 mmq::gather_strata_q2(blob_dev, m.grp_gu + q * mmq_gub, m.grp_d + q * mmq_db, m.cs);
                             }
@@ -1645,15 +1651,19 @@ bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& e
                             gu.w = m.grp_gu; gu.type = mmq_gt; gu.w_rows = 1280; gu.w_cols = N; gu.expert_bytes = mmq_gub;
                             gu.n = ngx; gu.xq = m.Xq; gu.bounds = m.bounds_dev + j0; gu.ids = m.ids_identity;
                             gu.total_rows = T * K; gu.max_rows = maxr; gu.dst = m.GU; gu.ld_dst = 1280;
+                            gu.y_scale = mmq::fp4_activations(mmq_gt) ? m.Xscale : nullptr;
                             m.mmq_ctx->run(gu, m.cs);
+                            if (lay.native && lay.fmt[(size_t) l].tail_off)
+                                mmq::scale_gu_rows(m.GU, 1280, 640, m.bounds_dev + j0, ngx, m.grp_tail, r0, nr, m.cs);
                             mmq::swiglu(m.GU + r0 * 1280, m.H + r0 * 640, nr, 640, !lay.native, m.cs);
                             pt.mark(kPfGemmD, cs);
-                            mmq::quantize(m.H + r0 * 640, nullptr, m.Hq, mmq_dt, 640, 640, nr, m.cs);
+                            mmq::quantize(m.H + r0 * 640, nullptr, m.Hq, mmq_dt, 640, 640, nr, m.cs, m.Hscale);
                             mmq::Product dn;
                             dn.w = m.grp_d; dn.type = mmq_dt; dn.w_rows = N; dn.w_cols = 640; dn.expert_bytes = mmq_db;
                             dn.n = ngx; dn.xq = m.Hq; dn.bounds = m.bounds_dev + n + 1 + g * (MMQ_GROUP + 1);
                             dn.ids = m.ids_identity; dn.total_rows = nr; dn.max_rows = maxr; dn.dst = m.Dm + r0 * N;
                             dn.ld_dst = N;
+                            dn.y_scale = mmq::fp4_activations(mmq_dt) ? m.Hscale : nullptr;
                             m.mmq_ctx->run(dn, m.cs);
                             return true;
                         }

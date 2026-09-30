@@ -94,6 +94,7 @@ bool supported(int t) {
         case GGML_TYPE_Q2_0: case GGML_TYPE_IQ2_XXS: case GGML_TYPE_IQ2_XS: case GGML_TYPE_IQ2_S:
         case GGML_TYPE_IQ3_XXS: case GGML_TYPE_IQ3_S: case GGML_TYPE_IQ4_NL: case GGML_TYPE_IQ4_XS:
         case GGML_TYPE_Q8_0:   // the draft layer's dense matrices (E-9)
+        case GGML_TYPE_NVFP4:
             return true;
         default:
             return false;
@@ -108,10 +109,60 @@ size_t q8_bytes(int64_t rows, int64_t cols) {
     return (size_t) rows * (size_t) pad512(cols) * sizeof(block_q8_1_mmq) / (4 * QK8_1) + 128 * sizeof(block_q8_1_mmq);
 }
 
-void quantize(const float* x, const int32_t* ids, void* xq, int t, int64_t cols, int64_t ld, int64_t rows, void* stream) {
+namespace {
+// 1 when this translation unit's device code was compiled with BLACKWELL_MMA_AVAILABLE - the same condition under
+// which mmq.cuh gives NVFP4 its FP4 x FP4 tile loader - so the activations match whatever the kernel expects.
+__global__ void fp4_probe_kernel(int* out) {
+#if defined(BLACKWELL_MMA_AVAILABLE)
+    *out = 1;
+#else
+    *out = 0;
+#endif
+}
+__global__ void scale_gu_rows_kernel(float* __restrict__ gu, int64_t ld, int64_t n_ff, const int32_t* __restrict__ bounds,
+                                     int n, const float* __restrict__ tails, int64_t row0) {
+    const int64_t r = row0 + blockIdx.x;
+    int q = 0;
+    while (q + 1 < n && r >= bounds[q + 1]) ++q;
+    const float sg = tails[4 * q], su = tails[4 * q + 1] * tails[4 * q + 2];
+    float* row = gu + r * ld;
+    for (int64_t k = threadIdx.x; k < 2 * n_ff; k += blockDim.x) row[k] *= k < n_ff ? sg : su;
+}
+}  // namespace
+
+bool fp4_activations(int t) {
+    if (t != GGML_TYPE_NVFP4) return false;
+    static const bool on = [] {
+        int* d = nullptr;
+        int h = 0;
+        ck(cudaMalloc(&d, sizeof(int)), "fp4 probe");
+        fp4_probe_kernel<<<1, 1>>>(d);
+        ck(cudaMemcpy(&h, d, sizeof(int), cudaMemcpyDeviceToHost), "fp4 probe");
+        cudaFree(d);
+        return h == 1;
+    }();
+    return on;
+}
+
+void scale_gu_rows(float* gu, int64_t ld, int64_t n_ff, const int32_t* bounds, int n, const float* tails,
+                   int64_t row0, int64_t nrows, void* stream) {
+    if (nrows <= 0 || n <= 0) return;
+    scale_gu_rows_kernel<<<(unsigned) nrows, 256, 0, (cudaStream_t) stream>>>(gu, ld, n_ff, bounds, n, tails, row0);
+    ck(cudaGetLastError(), "scale_gu_rows");
+}
+
+void quantize(const float* x, const int32_t* ids, void* xq, int t, int64_t cols, int64_t ld, int64_t rows, void* stream,
+              float* yscale) {
     if (rows <= 0) return;
-    quantize_mmq_q8_1_cuda(x, ids, xq, (ggml_type) t, cols, ld, rows * ld, rows * ld, pad512(cols), rows, 1, 1,
-                           (cudaStream_t) stream);
+    if (fp4_activations(t)) {
+        if (yscale == nullptr) { std::fprintf(stderr, "prefill mmq: NVFP4 activations need a scale buffer\n"); std::exit(1); }
+        const bool aligned = ((uintptr_t) x % 32 == 0) && ((size_t) ld * sizeof(float)) % 32 == 0;
+        quantize_mmq_fp4_cuda(x, ids, xq, yscale, (ggml_type) t, aligned, cols, ld, rows * ld, rows * ld, pad512(cols),
+                              rows, 1, 1, (cudaStream_t) stream);
+    } else {
+        quantize_mmq_q8_1_cuda(x, ids, xq, (ggml_type) t, cols, ld, rows * ld, rows * ld, pad512(cols), rows, 1, 1,
+                               (cudaStream_t) stream);
+    }
     ck(cudaGetLastError(), "quantize");
 }
 
@@ -126,7 +177,7 @@ void Context::run(const Product& p, void* stream) {
     if (p.n <= 0 || p.max_rows <= 0) return;
     const ggml_type t = (ggml_type) p.type;
     const int64_t qk = ggml_blck_size(t), bpr = p.w_cols / qk;
-    const mmq_args a = {(const char*) p.w, t, (const int*) p.xq, p.ids, p.bounds, p.dst, nullptr,
+    const mmq_args a = {(const char*) p.w, t, (const int*) p.xq, p.ids, p.bounds, p.dst, p.y_scale,
                         p.w_cols, p.w_rows, p.total_rows, bpr, p.total_rows, p.ld_dst,
                         p.n, p.n, (int64_t) (p.expert_bytes / ggml_type_size(t)), 0, 0,
                         1, 1, 0, 0, 0,
@@ -143,6 +194,7 @@ void Context::run(const Product& p, void* stream) {
         case GGML_TYPE_IQ4_NL: mul_mat_q_case<GGML_TYPE_IQ4_NL>(ctx, a, s); break;
         case GGML_TYPE_IQ4_XS: mul_mat_q_case<GGML_TYPE_IQ4_XS>(ctx, a, s); break;
         case GGML_TYPE_Q8_0: mul_mat_q_case<GGML_TYPE_Q8_0>(ctx, a, s); break;
+        case GGML_TYPE_NVFP4: mul_mat_q_case<GGML_TYPE_NVFP4>(ctx, a, s); break;
         default:
             std::fprintf(stderr, "prefill mmq: type %d is not covered\n", (int) t);
             std::exit(1);

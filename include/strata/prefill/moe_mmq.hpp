@@ -22,7 +22,16 @@ size_t q8_bytes(int64_t rows, int64_t cols);
 /// q8_1 activations for MMQ against weights of `ggml_type`: row i of the output is row ids[i] of x (or row i when
 /// ids is null); `x` has `ld` floats per row.
 void quantize(const float* x, const int32_t* ids, void* xq, int ggml_type, int64_t cols, int64_t ld, int64_t rows,
-              void* stream);
+              void* stream, float* yscale = nullptr);
+/// NVFP4 on Blackwell: the MMQ kernel is compiled to multiply FP4 x FP4 (W4A4, the regime ModelOpt calibrated
+/// the checkpoint in), so its activations are NVFP4 too, with one float scale per row that `quantize` writes to
+/// `yscale` and the product reads as Product::y_scale.  Decided by a device probe of the same compile.
+bool fp4_activations(int ggml_type);
+/// NVFP4 expert tails: GU rows [row0, row0 + nrows) of a group of `n` experts (absolute `bounds`, n + 1 of them,
+/// on the device) scaled by their expert's {s_gate, s_up, s_down, 0} (`tails`, 4 floats each, on the device): the
+/// gate half by s_gate, the up half by s_up * s_down - down is linear, so its scale rides on its input.
+void scale_gu_rows(float* gu, int64_t ld, int64_t n_ff, const int32_t* bounds, int n, const float* tails,
+                   int64_t row0, int64_t nrows, void* stream);
 
 /// One launch over n experts whose weights lie `expert_bytes` apart from `w`: for expert e, the activation rows
 /// [bounds[e], bounds[e+1]) of `xq` (bounds on the device, n+1 entries) times its [w_rows, w_cols] matrix into
@@ -40,6 +49,7 @@ struct Product {
     int64_t total_rows = 0, max_rows = 0;
     float* dst = nullptr;
     int64_t ld_dst = 0;
+    const float* y_scale = nullptr;     ///< NVFP4 on Blackwell: the per-row activation scales (fp4_activations)
 };
 
 /// The launch context (llama.cpp's MMQ keeps a small scratch pool for its stream-k fixup).  One per prompt path.
