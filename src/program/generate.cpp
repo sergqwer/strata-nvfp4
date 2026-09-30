@@ -3060,8 +3060,8 @@ int main(int argc, char** argv) {
     // prompt: 4096 791 tok/s, 6144 878, 8192 973 with 69% of the slots lent).  A request lends only what its own
     // prompt needs (Prefill::relayout), so a big chunk costs short prompts nothing.  0 = none fits.
     auto plan_lend = [&](int64_t& chunk) -> int64_t {
-        // 32768 and 16384: a 32K prompt on the NVFP4 pack (RTX 5090, 7.5K slots at 262K context) read at 3535 tok/s
-        // in 8192-token chunks, 4675 in 16384 and 5201 in one 32768 chunk (75K -> 23K experts streamed)
+        // 32768 and 16384: a 32K prompt with IQ2_XS (RTX 5090, 64K context) read at 5,624 tok/s in 8192-token chunks
+        // and 6,465 in one 32768 chunk (40K -> 18K experts streamed; an NVFP4 pack at 262K: 3,535 -> 5,201)
         static constexpr int64_t kAutoChunks[] = {32768, 16384, 8192, 6144, 4096, 3072, 2048, 1024, 512, 256};
         // at 8192-token chunks nearly every expert streams anyway, so a lent slot costs little: 90% when the
         // copies are DMA from pinned RAM (Q2_0 8192 + a 384-slot ring: 1283 tok/s), 85% when host copies are the
