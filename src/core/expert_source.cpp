@@ -1213,14 +1213,43 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
         lbytes.push_back(lay.blob_bytes(l) * (uint64_t) n_expert);
     }
     bounds.push_back(want);
-    PinnedArena* a = new PinnedArena(want + (uint64_t) blob, bounds, max_pinned_bytes);
+    // Unbuffered straight into the arena when the pack's ranges are sector-aligned, with the per-layer CUDA
+    // registration running on a thread ahead of the readers (STRATA_BUFFERED_LOAD=1: the buffered reader after
+    // a whole-arena registration, the A/B arm). 16 readers keep a PCIe 5 drive's queue full.
+    const bool try_direct = !from_gguf && max_pinned_bytes == 0 && std::getenv("STRATA_BUFFERED_LOAD") == nullptr;
+    const auto t_reserve = std::chrono::steady_clock::now();
+    PinnedArena* a = try_direct ? new PinnedArena(want + (uint64_t) blob, bounds, PinnedArena::Deferred{})
+                                : new PinnedArena(want + (uint64_t) blob, bounds, max_pinned_bytes);
     if (!a->valid()) {
         delete a;
         err = "ArenaExpertSource: the arena could not be reserved (" + std::to_string(want) + " B)";
         return false;
     }
-    const LoadStats st = from_gguf ? load_experts_gguf(gguf_, a->data(), lay, threads)
-                                   : load_experts_ranges(path, a->data(), loff, lbytes, threads, /*chunk=*/8u << 20);
+    const double reserve_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_reserve).count();
+    LoadStats st;
+    bool direct = false;
+    if (try_direct) {
+        std::atomic<int> ready{0};
+        std::thread reg([&] { a->register_slices(ready); });
+        // The readers wait for each slice's registration EVEN ON LARGE PAGES: reading while cudaHostRegister runs on
+        // the same slice corrupted the arena (measured 2026-09-30, WDDM, 2 MB pages: STRATA_VERIFY_ARENA gave a
+        // different wrong checksum on every run, 11.8 vs 10.2 GiB/s). The ~0.9 s it would save is not available.
+        st = load_experts_direct(path, a->data(), loff, lbytes, /*threads=*/16, /*chunk=*/8u << 20, &ready);
+        if (!st.ok) ready.store((int) n_layers);        // a refused read: let the registration thread finish
+        reg.join();
+        direct = st.ok;
+        if (!st.ok && !st.error.empty()) {
+            delete a;
+            err = "ArenaExpertSource: the unbuffered load failed: " + st.error;
+            return false;
+        }
+        if (!st.ok) {   // not sector-aligned: registered already, so the buffered reader fills it as before
+            st = load_experts_ranges(path, a->data(), loff, lbytes, threads, /*chunk=*/8u << 20);
+        }
+    }
+    if (!try_direct)
+        st = from_gguf ? load_experts_gguf(gguf_, a->data(), lay, threads)
+                       : load_experts_ranges(path, a->data(), loff, lbytes, threads, /*chunk=*/8u << 20);
     if (!st.ok) {
         delete a;
         err = "ArenaExpertSource: the expert load was refused: " + (st.error.empty() ? std::string("unknown") : st.error);
@@ -1252,7 +1281,30 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
     blobs_ = n_layers * n_expert;
     n_expert_ = n_expert;
     reads_ = 0;
-    note_ = a->note;
+    // STRATA_VERIFY_ARENA=1: a checksum of the loaded arena (per layer, combined), to compare two loaders
+    if (std::getenv("STRATA_VERIFY_ARENA") != nullptr) {
+        std::vector<uint64_t> h((size_t) n_layers, 0);
+        std::atomic<int64_t> nl{0};
+        std::vector<std::thread> ths;
+        for (int t = 0; t < 16; ++t)
+            ths.emplace_back([&] {
+                for (int64_t l; (l = nl.fetch_add(1)) < n_layers;) {
+                    const uint64_t* w = (const uint64_t*) (a->data() + loff[(size_t) l]);
+                    uint64_t s = 0;
+                    for (uint64_t i = 0; i < lbytes[(size_t) l] / 8; ++i) s += w[i] * (2 * i + 1);
+                    h[(size_t) l] = s;
+                }
+            });
+        for (auto& t : ths) t.join();
+        uint64_t all = 0;
+        for (int64_t l = 0; l < n_layers; ++l) all = all * 1099511628211ull + h[(size_t) l];
+        std::fprintf(stderr, "strata generate: STRATA_VERIFY_ARENA %016llx (%s load)\n", (unsigned long long) all,
+                     direct ? "unbuffered" : "buffered");
+    }
+    char timing[160];
+    std::snprintf(timing, sizeof timing, "; reserved%s in %.1f s, read %s in %.1f s", try_direct ? "" : "+registered",
+                  reserve_s, direct ? "unbuffered (registration alongside)" : "buffered", st.seconds);
+    note_ = a->note + timing;
     gib_per_s_ = st.gib_per_second();
     load_seconds_ = st.seconds;
     load_read_s_ = st.read_seconds;
