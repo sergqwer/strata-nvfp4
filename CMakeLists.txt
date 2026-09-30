@@ -79,6 +79,9 @@ if(STRATA_ENABLE_CUDA)
                       "CUDA 12.8 crashed on long prompts on these cards (issues #220, #224). Use CUDA 13.0 or newer.")
     endif()
   endforeach()
+  # RTX 50's FP4 MMA (the NVFP4 experts' opt-in W4A4 prompt path) exists only in the arch-specific target: 120 -> 120a,
+  # as ggml's own CMake does (its CUDA backend is off here), so "75;86;89;120" builds every card with its full feature set
+  list(TRANSFORM CMAKE_CUDA_ARCHITECTURES REPLACE "^(12[0-9])(-real|-virtual)?$" "\\1a\\2")
   message(STATUS "Strata: CUDA enabled, arch ${CMAKE_CUDA_ARCHITECTURES}")
   set(_strata_gpu_runtime_target CUDA::cudart)
   set(_strata_gpu_blas_target CUDA::cublas)
