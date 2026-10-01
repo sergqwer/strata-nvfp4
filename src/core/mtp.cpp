@@ -731,7 +731,7 @@ bool MtpDrafter::record_front(int T, int row0, cudaStream_t cs, std::string& err
                 else rope_neox_apply(kc, kc, (int) NKV, (int) HD, (int) s.n_rot, st_.cos_tab, st_.sin_tab, pos + t * NH, cs);
             }
         }
-        if (st_.kv_rot) {   // rotated K and V (kv_q4.hpp): Q4_0, and INT8 with STRATA_KV_ROT=1
+        if (st_.kv_rot) {   // rotated K and V (kv_q4.hpp): Q4_0, and INT8 unless STRATA_KV_ROT=0 (the fork's default)
             fwht256_inplace_cuda(kcur_, (int64_t) T * NKV, cs);
             fwht256_inplace_cuda(vcur_, (int64_t) T * NKV, cs);
         }
