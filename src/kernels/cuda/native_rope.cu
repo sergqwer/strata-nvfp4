@@ -148,11 +148,12 @@ bool same_scaling(const RopeScaling& a, const RopeScaling& b) {
            a.orig_ctx == b.orig_ctx && a.ext_factor == b.ext_factor && a.attn_factor == b.attn_factor &&
            a.beta_fast == b.beta_fast && a.beta_slow == b.beta_slow;
 }
-// opt-in: STRATA_ROPE_TABLE=1 (the table's angles differ from the fast-math ones in the last bits, so outputs move)
+// upstream: opt-in (STRATA_ROPE_TABLE=1). On by default in this fork: the fast-math angles are 0.0014 rad off at
+// 32K and the prompt path and decode disagree (first-token KL 0.0063 on the NVFP4 pack); STRATA_ROPE_TABLE=0: off
 bool rope_table_enabled() {
     static const bool on = [] {
         const char* e = std::getenv("STRATA_ROPE_TABLE");
-        return e != nullptr && e[0] == '1';
+        return e == nullptr || e[0] != '0';
     }();
     return on;
 }
