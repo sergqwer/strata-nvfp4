@@ -162,4 +162,8 @@ bool gemm_dequant_side();
 
 
 
+/// #285: creates a cuBLAS handle on a thread (the first one initialises cuBLAS and cuBLASLt); the next Gemm::init
+/// / init_external takes it. Call once the device is current, early in the load.
+void gemm_prewarm();
+
 }  // namespace strata::prefill
