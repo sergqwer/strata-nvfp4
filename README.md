@@ -58,6 +58,12 @@ upstream's; the original README is kept as [README.upstream.md](README.upstream.
   against an FP32 reference, was up to 11% off (ggml-cuda's FP16 flash attention); this one is 0.1% off.
 - **Fixes:** a scale fold that left NVFP4 hidden activations in FP16's subnormals (2-12% expert error), and the
   batched verify path skipping the query rotation of rotated KV caches.
+- **A more accurate experts pack, re-quantized from the BF16 checkpoint** (optional, `tools/requant.py`):
+  - The 4-bit part is NVFP4 by GPTQ on the model's own activations instead of ModelOpt's rounding to the nearest value. It has the same format and the same speed.
+  - In 27 of the 48 layers the down projection is Q8_0. These are the layers where it removes the most error per byte.
+  - The result is 73.8 GiB of experts instead of 63.3 GiB. Against an all-Q8_0 reference, the answers' KL is half of the ModelOpt pack's, about 2.6x less once run-to-run noise is taken out, for 12-15% of the decode speed.
+  - GPTQ alone, without the 8-bit layers, is 1.7x closer at no speed cost.
+  - docs/NVFP4.md, "Re-quantized from BF16", has the method and every measurement.
 - **On upstream Strata 0.1.32.** Upstream added faster layer-split prompts, AMD/RDNA4 work, Unsloth UD-Q4_K_XL in
   setup, a fix for a subagent evicting its parent's parked conversation, a lazy server start, model aliases and
   CORS. 0.1.32 took this fork's first wave of pull requests (#276-#293), some of it as opt-ins that the fork keeps
@@ -119,6 +125,7 @@ RTX 5090 (32 GB, PCIe 5 x16), Ryzen 9 9950X3D, 128 GB DDR5-5600, Samsung 9100 PR
 | --- | ---: |
 | Writes a chat answer (~520 tokens, to its end) | 138 tokens/s on average, 125-146 in 6 runs; 18.2 ms a round |
 | Writes a ~1,000-token answer after a 32K prompt | 132 tokens/s on average, 130-133 in 4 runs; 20.0 ms a round |
+| The same with the re-quantized pack (GPTQ + Q8_0 down in 27 layers) | chat 126 tokens/s (-12%), after a 32K prompt 116 (-15%), the prompt read as fast |
 | Reads a 32K prompt | 6,740-6,930 tokens/s (0.1.31-nvfp4.1: 5,400-5,900) |
 | Start: the expert arena loaded | ~7 s (63 GiB of experts read at 10-11 GiB/s) |
 
@@ -184,6 +191,23 @@ copy data\draft_vocab.bin mtp-orca\rt\
 ```
 
 Put `packs\` and the GGUF on the fastest drive you have: the start is a 63 GiB read.
+
+**Optional: the more accurate experts pack.** It needs the BF16 checkpoint (360 GB) and ~2 hours on an RTX 5090. The pack from step 4 stays the dense, index and tokenizer source.
+
+```bat
+hf download orcarouter/Qwen3.8-Flash-Next-Uncensored --local-dir models\orca-bf16
+:: calibration: the engine's own MoE inputs of every layer for the four token files in data\requant_calib (uk, en, code, chat)
+set STRATA_DUMP_MOE_INPUT=calib\d
+set STRATA_DUMP_MOE_LAYER=all
+build\strata.exe <the usual arguments> --tokens-file data\requant_calib\calib_uk.txt --max-new 1   (and en, code, chat)
+:: errors per layer and method, then the plan for a size budget
+.venv\Scripts\python tools\requant.py analyze --bf16 models\orca-bf16 --calib calib\d --out calib\errors.jsonl
+.venv\Scripts\python tools\requant_plan.py calib\errors.jsonl calib 74
+:: the pack: GPTQ NVFP4, Q8_0 down in the planned layers
+.venv\Scripts\python tools\requant.py pack --bf16 models\orca-bf16 --calib calib\d --plan calib\plan_d8_74.json --base packs\orca-nvfp4 --out packs\orca-nvfp4-gptq-q8d
+```
+
+Then run with `--pack packs\orca-nvfp4-gptq-q8d`. The engine reads mixed expert formats from 0.1.32-nvfp4.2.
 
 ## Run
 
