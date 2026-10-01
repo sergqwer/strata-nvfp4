@@ -1,78 +1,23 @@
 # NVFP4 routed experts
 
-The engine can serve a Qwen3.8-Flash-Next whose routed experts are NVFP4, as NVIDIA's ModelOpt stores them: 64-value
-blocks of E2M1 codes with four UE4M3 sub-block scales, plus one FP32 `weight_scale_2` per expert and projection.
-Everything else (attention, GDN, shared experts, routers, the head) stays in the formats the native path already
-reads. Measured on Windows 11, RTX 5090 (32 GB), Ryzen 9 9950X3D, 128 GB DDR5-5600.
+Measured on Windows 11 with an RTX 5090 (32 GB, sm_120), Ryzen 9 9950X3D and 128 GB DDR5-5600, 2026-09-29.
 
-## Getting a model
-
-```
-python tools/nvfp4_convert.py --model <ModelOpt NVFP4 checkpoint dir> --outfile <model>.gguf
-python tools/iq_pack.py --gguf <model>.gguf --out <pack dir>
-```
-
-- `nvfp4_convert.py` runs llama.cpp's own converter (`third_party/llama.cpp`, the commit setup pins) with the type
-  policy the engine needs. The experts are repacked without loss: `tools/nvfp4_verify.py` compares them with the
-  checkpoint bit for bit, and `tools/nvfp4_verify_gguf.py` checks the GGUF.
-  - The small projections the BF16 kernels read (routers, SSM gates, indexer, PLE and hyper-connection projections)
-    are written as BF16.
-  - Everything served natively goes to Q8_0: attention, `ssm_out`, the shared experts, the output head, and the
-    token embedding.
-  - The 51.2e9-value PLE table is left out.
-- `iq_pack.py` writes `experts.bin` for an NVFP4 GGUF by itself. Each blob is `[gate | up | down]` plus a 16-byte
-  tail `{s_gate, s_up, s_down, 0}`. The GGUF has no room for these scales, so the engine reads NVFP4 experts from
-  `experts.bin` only.
-
-Run it like an IQ pack, with the GGUF as its own dense-weight source and the PLE table from an IQ GGUF's PLE shard:
-
-```
-strata --pack <pack dir> --native <model>.gguf --native-dense-gguf <model>.gguf \
-       --ple-gguf <an IQ model's shard with per_layer_token_embd> --mtp <mtp/rt> \
-       --expert-profile data/expert-profile.bin --expert-cache auto --prefill auto --spec 4 ...
-```
-
-The NVFP4 checkpoints change only the routed experts. The PLE table, the MTP layer and the expert profile of the
-original model therefore work as they are.
-
-Tested end to end with `jpezzulli/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-ModelOpt-NVFP4`. By its
-`hf_quant_config.json`, NVIDIA's `nvidia/Qwen3.8-Flash-Next-NVFP4` quantizes the routed experts the same way
-(NVFP4, group 16; the other layers BF16, the PLE table FP8, the MTP experts FP8), so it takes the same path. It has
-not been run here.
-
-## Measured
-
-RTX 5090, 64K context, int8 K/V, `--vram-reserve-mib 1500`:
-
-| | NVFP4 pack | IQ2_XS, same engine |
-| --- | ---: | ---: |
-| experts in RAM | 63.3 GiB | 33.0 GiB |
-| expert cache slots | ~8,350 | ~17,300 |
-| decode, 400-token answer | 114-116 tokens/s | 132-139 tokens/s |
-| a 32K prompt | 3,900 tokens/s | 5,600 tokens/s |
-
-An NVFP4 expert blob is 2.76 MB, against 1.51 MB for IQ2_XS: the cache holds half as many, and a miss costs twice
-the bytes over PCIe. The PCIe share of the missed experts is therefore 0.25 for an NVFP4 pack, not the usual 0.55.
-At 0.55 the copy kernel was 40% of all GPU kernel time (nsys, 300-token decode). A sweep at 262K context gave the
-following decode rates:
-
-| PCIe share | short prompt | 32K prompt |
-| --- | ---: | ---: |
-| 0.55 | 103 tokens/s | 105 |
-| 0.40 | 110 | 117 |
-| 0.25 | 117 | 124 |
-| 0.10 | 112 | 118 |
+The target is a ModelOpt NVFP4 checkpoint of Qwen3.8-Flash-Next (OrcaRouter's abliteration,
+`jpezzulli`'s quantization). `tools/nvfp4_convert.py` repacks it without loss into a GGUF whose routed
+experts are NVFP4 (64-value blocks: four UE4M3 sub-block scales and 32 bytes of E2M1 codes) and whose
+per-expert `weight_scale_2` lands in `blk.N.ffn_{gate,up,down}_exps.scale`. `tools/iq_pack.py` writes
+each expert blob as `[gate | up | down]` plus a 16-byte tail `{s_gate, s_up, s_down, 0}`.
 
 ## Where the global scales go
 
 Each scale multiplies its own projection's FP32 output, as llama.cpp applies `.scale`:
 `h = silu(s_gate * (G x)) * (s_up * (U x))`, `y = s_down * (D h)`.
 
-The scales are ~1e-4 each. Folding `s_down` into up is algebraically the same, but it leaves the hidden near 1e-5.
-The hidden is then rounded to Q8_0 (CPU) or q8_1 (GPU) blocks with an FP16 scale, and `amax / 127` lands deep in
-FP16's subnormals: one expert's output was off by 2-12% instead of 1.1% (`nvfp4_avx512_parity --expert`). The FP16
-prompt path had the same problem in its dequantized up weights (~1e-8). Any future fold must be checked against
-FP16's range.
+The scales are ~1e-4 each. An earlier revision folded `s_down` into up, which is algebraically the same
+but leaves the hidden near 1e-5. The hidden is then rounded to Q8_0 (CPU) or q8_1 (GPU) blocks whose
+scale is FP16, and `amax / 127` lands deep in FP16's subnormals: one expert's output was off by 2-12%
+instead of 1.1% (`nvfp4_avx512_parity --expert`). The FP16 prompt path had the same problem in its
+dequantized up weights (~1e-8). Any future fold must be checked against FP16's range.
 
 ## Prompt path precision
 
@@ -88,11 +33,10 @@ FP16's range.
 device code and the host's tile config, so it is the same on every architecture; decode already multiplies at this
 precision. The FP4 MMA exists only in the arch-specific target, so `src/prefill/mmq_nvfp4_w4a4.cu` (the FP4 x FP4
 kernel and its FP4 activation quantizer) is the one unit CMake builds with `12x` -> `12xa` (`strata_mmq_w4a4`);
-the rest of the engine keeps the architectures as given and runs on sm_121 too. A card without that unit's image
-(another architecture, or sm_121 against a 120a build) falls back to `w4a8` with a note.
+a card without that unit's image falls back to `w4a8` with a note.
 
-First-token KL divergence against `fp16`, 8 prompts (code and prose, 1K-8K tokens). The noise floor is the same
-`fp16` path cut into 4096-token chunks instead of 8192: another summation order, same arithmetic.
+First-token KL divergence against `fp16`, 8 prompts (code and prose, 1K-8K tokens); the noise floor is the
+same `fp16` path cut into 4096-token chunks instead of 8192 (another summation order, same arithmetic):
 
 | mode | KL mean | KL median | KL max | top-1 agreement | prefill, 4-8K prompts |
 |---|---|---|---|---|---|
@@ -101,25 +45,91 @@ First-token KL divergence against `fp16`, 8 prompts (code and prose, 1K-8K token
 | `w4a4` | 0.0080 | 0.0027 | 0.040 | 7/8 | 2,904 tok/s |
 | `fp16` | reference | | | | 1,905 tok/s |
 
-`w4a8` is the default. It is 4.5x closer to the reference than `w4a4`, at 86% of its speed, and it is the precision
+`w4a8` keeps the default: 4.5x closer to the reference than `w4a4` at 86% of its speed, and the precision
 every generated token already runs at. `fp16` is the choice when the prompt must be read exactly.
 
-`STRATA_DUMP_MOE_INPUT` + `mmq_nvfp4_parity --real` test one product on a real prompt's rows: layer 20, its 12
-busiest experts, max|x|/rms 4 median and 9 at most. The errors:
+On a real prompt's rows (`STRATA_DUMP_MOE_INPUT` + `mmq_nvfp4_parity --real`, layer 20, its 12 busiest
+experts, max|x|/rms 4 median and 9 at most) one product is off by: `w4a8` 0.46% (gate/up) and 0.90% (down, whose
+SwiGLU input has the heavier tails), `w4a4` 7.2% and 8.4%, `fp16` 0.017% and 0.021%.
 
-| mode | gate/up | down (heavier SwiGLU tails) |
-| --- | ---: | ---: |
-| `w4a8` | 0.46% | 0.90% |
-| `w4a4` | 7.2% | 8.4% |
-| `fp16` | 0.017% | 0.021% |
+## The n-gram (PLE) table
+
+Layer 1 adds 16 rows of a 320,001,536 x 160 n-gram table per token. Qwen ships it in FP8 E4M3 (128 shards of
+[2500012, 160] and one scale, 51.2 GB); no source holds more precision (OrcaRouter's BF16 copy is this FP8
+widened). Strata read only IQ4_NL (ISTA-DASLab's shard 2, 28.8 GB), which is 8.1% off the FP8 values per row -
+correlation 0.996-0.997 on rows from every shard, so the same table in the same order, and the abliteration left it
+alone. `tools/ple_fp8_pack.py` copies the FP8 bytes into a GGUF (I8, `strata.ple.format` = f8_e4m3,
+`strata.ple.scale`); `ple_fp8_parity` checks the engine's rows against torch's decode of the checkpoint, bit for bit.
+
+| first-token KL, 8 prompts (1K-8K) | mean | median | max | top-1 |
+| --- | ---: | ---: | ---: | ---: |
+| noise floor (summation order) | 0.00023 | 0.00003 | 0.0016 | 8/8 |
+| w4a8 prompt path vs fp16 | 0.0018 | 0.0010 | 0.0096 | 8/8 |
+| **IQ4_NL PLE vs FP8 PLE** | **0.0026** | **0.0012** | **0.013** | 8/8 |
+
+It costs 22 GB more disk and nothing else: the table stays on the SSD (16 page reads a token either way; a row is
+160 B instead of 90) and the row cache grows from ~95 to ~160 MB. Prompt reading speed was unchanged.
+
+## Where precision is still lost (audit, 2026-09-29)
+
+First-token KL on the 8 prompts above plus one of 32K tokens; the first token runs through the decode path
+(a verify window), so it sees the decode arithmetic and the KV cache. Noise floor: the same configuration twice.
+
+| source | vs | KL mean | median | 32K | cost of the exact version |
+| --- | --- | ---: | ---: | ---: | --- |
+| noise (same config twice) | - | 0.00012 | 0.000007 | 0 | - |
+| KV int8 (before) | fp16 KV | 0.0017 | 0.00034 | 0.0068 | 1,189 expert slots at 262K, decode -12% (116.5 -> 102.7 tok/s) |
+| **KV int8 + Hadamard (now)** | fp16 KV | 0.0011 | 0.00038 | 0.0038 | - |
+| decode experts, q8_1 activations | FP32 activations | 0.00076 | 0.000085 | 0.00065 | new GPU and AVX-512 BF16 kernels |
+| prompt path w4a8 | fp16 | 0.0018 | 0.0010 | - | prompt reading -24% |
+| token embedding Q8_0 (before) | BF16 (`--embd-gguf`, now) | 0.0025 | 0.00042 | 0.0041 | 0.6 GB of host RAM |
+| RoPE: fast-math float angles (before) | the float64 table (now) | - | - | 0.0063 (also at 125K) | - |
+| prompt path: BF16 activations into BF16 projections (before) | hi + lo split, all | 0.0023 | 0.00031 | 0.0093 | - |
+| split without the hyper-connection (now) | hi + lo split, all | 0.0011 | 0.0012 | 0.0029 | the full split: -9% prompt reading |
+
+- **RoPE.** The native rope kernels computed `pos * powf(...)` with fast-math `cosf/sinf` (0.0014 rad off at 32K,
+  ~0.02 at 262K), the prompt path the same in precise float, and the session's float64 angle table was read only by
+  the non-native path. All of them read the table now (`rope_table_set`, `mrope.hpp`). `STRATA_ROPE_LEGACY=1`
+  restores the old angles for A/B.
+- **Prompt path BF16 activations.** Decode feeds FP32 x to the BF16-weight projections (router, indexer, SSM
+  alpha/beta, shared gate, PLE key/value, hyper-connection); the prompt path fed BF16. `STRATA_PREFILL_BF16X2`
+  (default 2) adds each activation's BF16 remainder as a second GEMM for all but the hyper-connection, whose
+  10240-wide activations make the split cost ~9% of prompt reading (`=1` turns it on anyway, `=0` off).
+- Found by a read-only audit with a fresh context (all checked here): the above, a FP16-saturating SwiGLU in the
+  prompt path's shared expert, `log1pf` in the non-fused GDN softplus, and a stale NVFP4 tail comment. Checked and
+  left: int8 KV group scales (the smallest V group amax on real K/V is 0.25, FP16's subnormals start at 7.8e-3).
+
+- **Token embedding.** The converter stored `embed_tokens` as Q8_0 (0.55% off per row). `tools/embd_bf16_pack.py`
+  copies the checkpoint's BF16 table into its own GGUF and `--embd-gguf` reads it: mapped host memory like before
+  (1.2 GiB instead of 0.6), no VRAM, decode and prompt speed unchanged, +0.2 s at start. It moved the first token
+  more than any other source here - the embedding's error rides the residual stream through every layer, where a
+  projection's error enters once.
+
+- **KV rotation.** int8 K/V now go through the 256-point Walsh-Hadamard rotation that `--kv q4_0` already used
+  (queries rotated to match, the output rotated back). On real K/V/Q (`STRATA_DUMP_QKV`, 12 QSA layers, 4K tokens,
+  dense attention of the last 512 queries) the attention output error drops from 0.306% to 0.265%; same memory,
+  decode speed unchanged. `STRATA_KV_ROT=0` stores them unrotated.
+- **Bug found on the way:** the batched verify path (`qb`, windows of 2+ tokens) never rotated its queries, which
+  is why upstream kept `--kv q4_0` off that path. With rotation it scored `<q, Hk>`: coherent text, but MTP
+  acceptance fell from 2.5 to 2.2 tokens a round. Fixed in `verify.cpp`.
+- **k8v4 (int8 K, q4_0 V) is not worth it here.** Only 12 of 48 layers keep K/V, so int8 at 262K is ~3.1 GiB;
+  V in 4 bits would free ~0.7 GiB = ~270 expert slots, and 270 fewer slots measured no change in rounds per
+  second (47.7 vs 47.5). Its attention output error is 3.15% (10x int8's); `--kv q4_0` is 3.89%.
+- **Decode activations.** `STRATA_DECODE_A16=1` computes the GPU's NVFP4 experts with FP32 activations
+  (`native_expert_grouped_f32`, an oracle: its unoptimized kernel adds ~11% GPU time). Run with `--pcie-frac 1`
+  so no expert falls to the CPU pool. The q8_1 rounding costs 12x the noise at the median; the mean is one
+  prompt's 0.0055.
+- Dense projections stay Q8_0 (the source is BF16; 0.56-0.80% off per weight): BF16 would take ~3.3 GB of VRAM
+  (~1,270 slots) and read ~7.1 GB of dense weights per round instead of ~3.8 - an estimated -15-20% decode. Router, SSM gates, indexer, PLE and shared-expert gates are already BF16 with
+  FP32 activations; the GDN state, indexer keys and norms are FP32.
 
 ## CPU experts
 
-`src/kernels/cpu/nvfp4_avx512.cpp` computes the CPU pool's NVFP4 rows in 512-bit lanes. Each 64-value block is
-decoded once for every token of a verify window: `vpdpbusd` on |E2M1| codes, with the sign moved onto the
-activation. The arithmetic is ggml-cpu's `ggml_vec_dot_nvfp4_q8_0`, with the float additions ordered differently
-(worst 4.5e-7 relative, `nvfp4_avx512_parity`). `STRATA_NO_NVFP4_512=1` falls back to ggml-cpu, which is also the
-path of CPUs without AVX-512.
+`src/kernels/cpu/nvfp4_avx512.cpp` computes the CPU pool's NVFP4 rows in 512-bit lanes: each 64-value
+block is decoded once for every token of a verify window (vpdpbusd on |E2M1| codes with the sign moved
+onto the activation). Same arithmetic as ggml-cpu's `ggml_vec_dot_nvfp4_q8_0`, only the float additions
+are ordered differently (worst 4.5e-7 relative, `nvfp4_avx512_parity`). `STRATA_NO_NVFP4_512=1` falls
+back to ggml-cpu.
 
 | tokens | ggml-cpu | AVX-512 | speedup |
 |---|---|---|---|
@@ -127,21 +137,271 @@ path of CPUs without AVX-512.
 | 4 | 0.410 ms | 0.125 ms | 3.29x |
 | 7 | 0.719 ms | 0.196 ms | 3.66x |
 
-These are one expert's gate+up (1280 rows of 2560, cache-resident). The pool itself is bound by DRAM.
+(one expert's gate+up, 1280 rows of 2560, cache-resident; the pool itself is bound by DRAM)
 
-## Other GPUs
+## Loading
 
-Only the optional `w4a4` needs Blackwell. The default `w4a8` is ggml's int8 MMQ (sm_75 and up), and decode uses the
-engine's own q8_1 kernels, which decode UE4M3/E2M1 in software. The engine was built for sm_75/86/89 as PTX and run
-on the RTX 5090 with the host answering as that generation. On those builds `mmq_nvfp4_parity` and
-`nvfp4_expert_gpu_parity` gave results identical to sm_120.
+`experts.bin` is read unbuffered (`FILE_FLAG_NO_BUFFERING`) straight into the arena by 16 readers, while a
+second thread registers the arena with CUDA one layer ahead of them (`PinnedArena::Deferred` +
+`register_slices`): registering 63 GiB of 4 KiB pages alone takes 6.6 s, and the buffered reader it replaces
+(`STRATA_BUFFERED_LOAD=1`, the A/B arm) copied through the file cache at ~3.3 GiB/s wall. From a PCIe 5 drive
+(13.4 GiB/s unbuffered) the arena now loads in 5.6-6.0 s instead of 19 s, and the session is up in ~10 s
+instead of 25. `STRATA_VERIFY_ARENA=1` prints a checksum of the loaded arena; both loaders give the same one.
 
-HIP: the decode kernels use no CUDA-only intrinsics. The NVFP4 MMQ instance and the W4A8 unit are CUDA-only and
-guarded (`GGML_USE_HIP`). Neither was built for HIP here.
+Decode A/B, 300 tokens, 262K context (median of 2): pipelined per-layer registration 103.5 tok/s, whole-arena
+registration 103.2; ggml-cpu's NVFP4 rows 105.3 (the pool is DRAM-bound, so the kernel above moves its time by
+2-3% and the decode rate not at all).
 
-## Tests
+## Tuning measured on this machine (after the fixes above)
 
-- `nvfp4_expert_gpu_parity`: the decode kernels against ggml's reference.
-- `nvfp4_avx512_parity`: the CPU rows against ggml-cpu (with `--expert`: one whole expert).
-- `mmq_nvfp4_parity`: the prompt path's products against FP64 (with `--real`: rows dumped by `STRATA_DUMP_MOE_INPUT`).
-- `tools/nvfp4_verify.py` and `tools/nvfp4_verify_gguf.py`: the conversion, bit for bit.
+Kept:
+- **PCIe share 0.25** (was 0.55): the copy kernel fetching the PCIe share was 40% of GPU kernel time and sits on
+  the GPU's critical path. Decode 103 -> 117 tok/s short, 105 -> 124 at 32K.
+- **Prefill auto chunks up to 32768**: a 32K prompt reads at 5201 tok/s instead of 3535 (TTFT 10.1 -> 7.5 s).
+- **Large pages** once the account holds SeLockMemoryPrivilege (needs a fresh logon): the CPU pool holds
+  ~7.5 ms/round where 4 KB pages wandered 7.4-11; decode itself is GPU-bound, so the rate barely moves.
+
+Tried and dropped (no gain, or worse):
+- DMA copies for the PCIe share (`--pcie-mode dma`) at 0.25 and 0.40: ~32 rounds/s either way at 32K.
+- `--spec 5/6`, `--spec-min-p 0.3/0.7`: longer windows accept more but cost more; 0.3 is 15% slower.
+- More pool workers (23, 31) or other prefetch distances: the pool sits at ~55 GB/s from DDR5-5600.
+- An expert profile ranked by this model's own routing (6 prompts x 1000 tokens): it covered 69% of the
+  traced routing against 40% for the shipped profile, but missed MORE on held-out prompts (CPU experts per layer
+  5.3 vs 4.0 short, 10.8 vs 6.6 at 32K) - it fits the traces; the shipped profile generalises.
+- A q4_0 / q8_0 MTP head: tools/mtp_pack.py writes them, but the drafter only runs Q2_0 experts.
+
+### 64 GB of RAM (2026-09-30)
+
+The resident arena holds all 24,576 experts (63.3 GiB pinned, ~69 GiB of physical RAM for the run), including the
+~7,400 the VRAM cache holds a second time, so a 64 GB PC could not run the pack. `TieredExpertSource` keeps pinned
+host copies only where the engine reads them - the experts outside VRAM (the CPU and the PCIe share compute them on
+every token), ranked by the profile, then VRAM's own experts from its last slot back (the prompt path borrows the
+cache from its end and refills it afterwards; a 32K chunk borrows ~5,300 slots) - up to the free RAM minus
+`STRATA_RAM_RESERVE_GIB` (6), and maps `experts.bin` for the rest:
+
+- a blob outside the tier is read **unbuffered** into pinned memory wherever the engine streams many (the startup's
+  VRAM fill, the prompt path's stager, the lent slots' refill): copying them through the mapped file pulled its
+  pages into the working set, Windows began trimming, and decode after a 32K prompt fell from 72 to 33 tok/s;
+- decode prefetches the few a layer computes on the CPU at `begin_layer`, buffered (the OS cache keeps them in RAM
+  nobody else uses), and trims any mapped page it handed out;
+- the adaptive tier's swaps keep it in balance: an expert leaving VRAM without a host copy is copied back from its
+  VRAM slot (D2H, before the slot is refilled) into a spare slot, or into the least-ranked member's; the expert that
+  moved into VRAM gives its slot back once its copy has landed.
+
+On by itself below 96 GB installed (`--low-ram` / `--no-low-ram`; `--ram-budget` caps it). Measured against the
+arena on the 128 GB PC, 300 greedy tokens:
+
+| | decode tok/s | RAM | commit |
+| --- | ---: | ---: | ---: |
+| the arena | 119-122 | 67-69 GiB | 97 GiB |
+| upstream's `--mmap-experts` (all experts through the OS cache) | 45 | | |
+| upstream's `--mmap-experts --resident-cpu-experts` (static cache only) | 87 | | 78 GiB |
+| the tier, whole budget, the same cache slots | 108 vs the arena's 109 | | |
+| the tier, 48 GiB | 114 | 52 GiB | 82 GiB |
+| the tier, 40 GiB (1,713 experts from the file) | 100 | 45 GiB | 74 GiB |
+
+A 64 GB PC, emulated: a ballast process locks 59-62 GiB in large pages so that 57.6 GiB stay available (a 64 GB
+PC whose Windows uses 6), `STRATA_EMULATE_RAM_GIB=64` for the automatic rule:
+
+| | RTX 5090 | 24 GB card (131K) | 16 GB card (64K) |
+| --- | ---: | ---: | ---: |
+| experts in RAM / outside VRAM | 17,085 / 17,085 + 1,966 of VRAM's | 18,987 / 19,292 | 19,083 / 22,028 |
+| decode, 600 tokens after a 60-token prompt | 112-118 tok/s (96+ GB: 112-122) | 86-90 (96+ GB: 95) | 54-56 (96+ GB: 67) |
+| a 32K prompt: read / refill / first token | 5,635 tok/s / 1.8 s / 9.3 s (arena: 5,725 / - / 5.7 s) | | |
+| decode after 32K | 70-74 tok/s (arena 77) | | |
+| peak RAM (the engine) | 53-54 GiB | 54 GiB | 53-55 GiB |
+
+With the server and the CPU image encoder beside it (the tray's setup), 57.6 GiB available before the start: ready
+in 20 s, a picture read correctly, a 31.5K-token document, the lowest free RAM 3.3 GiB. Large pages were refused
+there (the ballast had fragmented RAM), so these ran on 4 KB pages; the first run right after locking the ballast
+was slower while Windows reorganized memory, the later ones steady.
+
+Correct to the bit: with the PCIe share off and a static cache, the arena and a 38 GiB tier (2,677 experts from the
+file) generate the same 302 tokens; `STRATA_TIER_VERIFY` found all 14,602 pinned copies - including those copied
+back from VRAM - equal to the file; first-token KL to the arena with a 44 GiB tier mean 0.0007 (noise). With the
+PCIe share on the outputs part after ~30 tokens: file-backed experts cannot be DMA'd, so the CPU computes them
+where the GPU would have, rounding differently. The arena path is unchanged: KL 0 to the previous release.
+
+### Other GPUs: RTX 20, 30 and 40 (2026-09-30)
+
+Nothing on the NVFP4 path needs Blackwell except the optional `w4a4` (FP4 x FP4 MMA, sm_120a), and that already
+falls back: `w4a8` is ggml's int8 MMQ with Blackwell hidden from it (`mmq_nvfp4_w4a8.cu`), which runs from sm_75;
+decode's NVFP4 experts use `__dp4a` and a software FP8 scale decode. The release was built for `120a` only. It is now
+built for `75-real;86-real;89-real;120a-real` (114 MB instead of 44), and the engine names a card it has no code for
+instead of failing at its first kernel. CMake turns `120` into `120a` as ggml's own CMake does.
+(Since 0.1.31-nvfp4.1 the build is `120-real` and only the W4A4 unit gets `120a`; see below.)
+
+Tested on the RTX 5090 alone: an engine built as PTX for an older architecture (`86-virtual`) runs through the
+driver's JIT with `__CUDA_ARCH__` = 860 in every kernel, and `STRATA_EMULATE_CC=86` makes the host side answer as
+that card does (compute capability for ggml's MMQ configs and the QSA kernels' choice, shared memory per block:
+64 KB on Turing). cuBLAS is the one part not covered - it runs the 5090's kernels; upstream makes the same calls on
+RTX 20.
+
+| test | sm_75 | sm_86 | sm_89 |
+| --- | --- | --- | --- |
+| `mmq_nvfp4_parity` (w4a8 vs a double reference, T = 1-300) | identical to sm_120a | identical | identical |
+| `nvfp4_expert_gpu_parity` (decode experts) | identical, worst 1.160% | identical | identical |
+| `w4a4` requested | falls back to w4a8 | falls back | falls back |
+| first-token KL vs the sm_120a release, 9 prompts | mean 0.0034, max 0.027 | mean 0.0003, max 0.0012 | mean 0.0005, median 0 |
+| top-1 | 9/9 | 9/9 | 9/9 |
+
+sm_86 and sm_89 are at the noise floor (several prompts bit-identical). Turing's 1-8K prompts are too; its 32K
+prompt is not, and the cause is the same on the 5090 itself: `STRATA_QSA_WARP=1` (the pre-sm_80 QSA selection and
+prompt attention, FP32 FMAs instead of 3xTF32 and FP16 MMA) gives KL 0.029 at 32K there as well. Either kernel alone
+stays at the floor (selection 0.004, attention 0.006):
+
+| prompt | Turing's QSA kernels | control: another summation order (`STRATA_PROMPT_ATTN_V1`) |
+| --- | ---: | ---: |
+| 16K | 0.0004 | 0.0003 |
+| 32K | 0.029 | 0.005 |
+| 125K | 0.023 | 0.008 |
+
+So on RTX 20 long prompts land 3-6x further from the RTX 30+ result than an FP32-level change does, with the same
+top token; which of the two is nearer the exact function is open (both are FP32-level by design). The four-arch
+release on the 5090 against the 120a-only build: two prompts bit-identical, KL max 0.0007 (the run-to-run noise:
+the slot count follows the free VRAM at start).
+
+VRAM: the fixed part is ~7.6 GiB at 32K context and ~11 GiB at 262K (dense weights, KV, draft head, prompt
+buffers); the rest caches experts. Measured on the 5090 with each card's budget (`--vram-reserve-mib` = 700 MiB +
+the difference; a ballast process instead does not work under WDDM, which moves an idle process's VRAM to RAM):
+
+| budget | 262144 | 131072 | 65536 | 32768 |
+| --- | --- | --- | --- | --- |
+| 24 GB | 4,415 slots, 84 tok/s | 5,158, 95 | | |
+| 16 GB | 1,309, 61 | 2,051, 65 | 2,422, 67 | |
+| 12 GB | does not fit | | 869, 57 | 1,055, 59 |
+| 8 GB | | | | does not fit |
+
+Decode falls toward what the CPU pool alone carries (~57 tok/s on this CPU and DDR5-5600); a real card's own speed
+and PCIe generation come on top.
+
+### Images (2026-09-30)
+
+Upstream's vision path (`--vision`, the `strata-vision` helper on llama.cpp's mtmd, M-RoPE positions for image
+cells) was in the code already; it only needs an image encoder. The checkpoint ships its vision tower in BF16
+(`model.visual.*`, 333 tensors, excluded from quantization), and llama.cpp's converter at the pinned commit turns
+it into an mmproj (`Qwen4ExpVisionModel`). Two pictures (an 800x450 invoice with text and two coloured
+rectangles: 350 image tokens; a 3840x2400 photo: 1,000), each encoder variant against a reference (CPU, FP32 weights,
+attention without flash attention):
+
+| encoder | invoice | photo (worst row's cosine) | time |
+| --- | ---: | ---: | ---: |
+| **CPU, FP32 weights, FA** (now) | **0.09%** | **0.11%** (0.9999) | 1.8 s / 6.2 s |
+| CPU, BF16 weights | 1.7-2.3% | 2.4-2.5% (0.989) | 1.8-10 s |
+| GPU, BF16, FA (upstream's default) | 1.9% | **11.2%** (0.67) | 0.05 s / 0.18 s |
+| GPU, BF16, no FA | 2.1% | 3.1% (0.984) | 0.06 s / 0.21 s |
+| GPU, FP32, no FA | 0.45% | 2.1% (0.971) | 0.06 s / 0.22 s |
+| CPU, FP32, a native (AVX-512) ggml build under MSVC | 4.4% | 20.8% | 3.4 s / 21.6 s |
+
+ggml-cuda's flash attention (K and V in FP16) is what loses the photo's rows; the portable (AVX2) CPU build is exact
+to 0.1% and as fast as any other CPU variant. The native MSVC build of ggml-cpu is both wrong and slower - not used.
+
+What each costs the text, decode A/B (300 greedy tokens, 262K context, 3-4 interleaved runs each, medians):
+
+| | expert slots | decode tok/s |
+| --- | ---: | ---: |
+| text only | 7,352 | 114.9 |
+| `--vision` (the M-RoPE table), no encoder | 7,377 | 113.4 |
+| `--vision` + the CPU encoder resident in RAM | 7,363 | 115.2 |
+| `--vision` + upstream's GPU encoder (served, 3 answers each) | 6,684-6,805 | ~95-107 (text: ~120) |
+
+The CPU encoder costs nothing: the engine is idle while a picture is encoded. Two changes to `strata-vision` make it
+so: on the CPU it hides the GPU from itself (a CUDA build opened a context there, 0.4-0.7 GB, 150-260 slots), and
+it skips the warm-up at 1,024 tokens (that only reserves GPU buffers; on the CPU it delayed the engine's start by
+~6 s). The release builds it CPU-only (`release/build-vision.cmd`, 4.9 MB). Answers checked: the invoice's text
+exactly, the left rectangle blue and the right red (the image cells' 2-D positions are right), the photo described
+correctly, in English and Ukrainian, through the OpenAI and the Anthropic API.
+
+### Upstream 0.1.28 merged (2026-09-30)
+
+Upstream's 0.1.25-0.1.28 came in with a merge: the draft layer's prompt pass in batches (E-9), the hyper-connection
+read and write fused in the prompt path (F-1, F-2 - extended here with the BF16 remainders of the split), the
+expert grouping tables through mapped memory, K8V4 KV (`--kv k8v4`, not used here), the AMD/HIP and Turing ports,
+the WDDM cache-sizing steps, tool-call parsing and cancellation fixes. Measured against the previous release, both
+portable builds: first-token KL mean 0.0002 / median 0.00002 (noise: the cache holds 17 more experts), prompt
+reading 1K +12%, 4K +14%, 8K +8-13%, 32K +16% (4791 -> 5539 tok/s), decode unchanged (107.9 vs 106.6 tok/s).
+
+The draft head's token subset (`rt/draft_vocab.bin`, the rows the MTP head may propose) held 142 of the
+vocabulary's 18,580 Cyrillic tokens. With the whole script added (`tools/draft_vocab.py --add cyrillic`, 58,963 ids,
++50 MB of VRAM):
+
+| prompt | subset | tok/s | tokens per round |
+| --- | --- | ---: | ---: |
+| Ukrainian | English/code (upstream's) | 83.2 | 1.40 |
+| Ukrainian | + Cyrillic (now) | 108.8 | 2.11 |
+| English | English/code | 111.9 | 2.40 |
+| English | + Cyrillic | 120.5 | 2.47 |
+
+Upstream's CJK subset (106,299 ids) is not the default here: ~180 MB more of the draft head for scripts this fork's
+users do not write; `--add cjk` builds it.
+
+### Second pass (2026-09-30, two read-only audits with a fresh context, then measured)
+
+Where a decode round goes (nsys, 262K context, ~21 ms a round): the GPU runs back to back; 4.6 ms is the copy
+kernel pulling the PCIe share and 3.4 ms is spinning on the CPU pool's flags - neither overlaps other GPU work. The
+CPU pool reads DRAM at 55 GB/s against a measured ceiling of ~65 GB/s (4 x 32 GB DDR5-5600): it is memory-bound.
+
+Kept:
+- **Start: the expert arena loads on its own thread** while the dense weights, PLE, MTP and head load, and the
+  cuBLAS handle (0.9 s) is created on another: first prompt token at ~8.0 s instead of ~10.1 s.
+- **Prompt path: NVFP4 scales applied where they are read** (swiglu, combine) instead of passes over the MMQ
+  outputs, and one launch per expert gather: +5.6% prompt reading at 32K, bit-identical.
+- **The verify commit does not wait** (single GPU): it overlaps the MTP draft; +2.1% rounds/s.
+
+Tried and dropped:
+- The hyper-connection kernels (3.4 ms/round, ~5x off the weights' bandwidth): 2 or 4 warps per block instead of
+  8 (more SMs), all weight chunks loaded up front, activations read without the staged tiles - none faster, some
+  slower. Nsight Compute crashes here (0xC0000409), so the stall reasons were not measured.
+- Prefetching the next token's inputs in the prompt path's GDN recurrence: the phase -4%, the chunk unchanged.
+- Readers not waiting for the arena's per-layer registration on large pages: 0.9 s faster and a CORRUPTED arena
+  (STRATA_VERIFY_ARENA different every run). The wait stays.
+- A drafter window of 8K or 4K instead of 32K: 0.54 s less prompt reading at 32K, but decode -14% at that length.
+- The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
+  Without the tier decode drops 23%. High process priority: no change.
+
+### On upstream 0.1.31 (2026-10-01, release 0.1.31-nvfp4.1)
+
+The fork was rebuilt on upstream 0.1.31 rather than merged, from the pull requests it had sent upstream:
+- NVFP4 rebased as #353;
+- the first wave #276-#293 (most taken into upstream's 0.1.32 batch);
+- the start split into #357 (unbuffered reads) and #358 (per-layer registration);
+- the low-RAM tier ported into 0.1.31's own tier as #362.
+
+What changed on the way:
+
+- **Architectures.** The build is `75-real;86-real;89-real;120-real`. Only the FP4 x FP4 unit (`mmq_nvfp4_w4a4.cu`) is built for `120a`: CMake turns `12x` into `12xa` for it alone. At run time a probe kernel decides whether `w4a4` is available, and any card without that image takes `w4a8`.
+- **The low-RAM mode is 0.1.31's tier.** It is `--mmap-experts` with `--resident-budget-gib`: the hottest experts outside VRAM in a page-locked budget, the rest read from the files. The fork's own `TieredExpertSource` and its `STRATA_RAM_RESERVE_GIB` / `STRATA_EMULATE_RAM_GIB` / `STRATA_TIER_*` switches are gone. What the fork adds:
+  - it starts by itself below 96 GB installed, with a budget of the available RAM less 6 GiB; `--low-ram`, `--no-low-ram` and `--ram-budget` keep their meaning;
+  - `experts.bin` is read unbuffered too, as #362 reads the GGUF in place. NVFP4 needs experts.bin for the scale tails.
+- **Two findings decided how those reads are done.** Both are written up in #362:
+  - **NTFS serializes small unbuffered reads of a mapped file.** It runs a file's unbuffered reads one at a time while the file is mapped anywhere. 512 KiB reads at queue depth 48 make 10.4 GB/s on an unmapped file and 3.4 GB/s on a mapped one. So nearby windows are merged into requests of up to 32 MiB.
+  - **The cache probe cannot decide for the tier.** With 14 of 16 probe reads cached, a mapped profile fill pulled experts.bin into the working set, the budget shrank to 31 GiB and RAM ran out. The tier goes unbuffered whenever the files cannot be kept beside the budget.
+- **RoPE:** the float64 angle table (#280) is used when the session is unscaled; under 0.1.30's linear/YaRN scaling the kernels take upstream's `rope_scaled_angle`.
+- **Kept in the fork, not upstream:**
+  - INT8 K/V rotated by default (upstream keeps it opt-in);
+  - the Cyrillic draft vocabulary as `data/draft_vocab.bin`;
+  - prompt chunks up to 32K by default;
+  - the arena on its own thread with an early cuBLAS handle (#285's part 3).
+
+Against the previous release (0.1.28-nvfp4.4), RTX 5090, 128 GB, the same expert-cache size:
+
+| | 0.1.28-nvfp4.4 | 0.1.31-nvfp4.1 |
+| --- | ---: | ---: |
+| greedy tokens, 64-token smoke and 256 after a 32K prompt | | identical |
+| first-token KL | | 0.0002 (run-to-run noise 0.00013) |
+| decode, short chat (256 tokens) | 107-116 tok/s | 106-119 tok/s |
+| decode, 256 after a 32K prompt (`--pcie-frac 0.25`) | 104-112 | 106-115 |
+| a 32K prompt | 5,360-5,720 tok/s | 5,440-5,970 tok/s |
+| expert arena loaded | 6.7 s | 6.6-7.4 s |
+
+The decode rate follows the draft acceptance of the path the tokens take. With the adaptive tier's timing the tokens vary from run to run on either build, which is why the rates are ranges.
+
+The low-RAM mode on an emulated 64 GB PC (a large-page ballast leaves 58 GiB available), RTX 5090:
+- **Budget:** all 44.4 GiB of experts outside VRAM fit it.
+- **Start:** the profile fill takes 4.3 s and the complement 9.5 s (through the mapping: 17 s and 31 s).
+- **A 32K prompt:** read in 9.3 s, 3.8 s of it the lent slots' refill from the file. Then 97 tok/s (0.1.28-nvfp4.4: 9.3 s and 72 tok/s).
+- **Tokens:** the same greedy tokens as with all experts resident.
+
+The smaller cards were not measured again on this release.
+
+One measuring pitfall: right after another engine process with a 63 GiB pinned arena exits, the next start's PCIe probe can read ~17 GB/s instead of 57. The probe then cuts `--pcie-frac` to 0.17, and decode drops 3-5%. Speed A/Bs here pin `--pcie-frac 0.25` and leave 15 s between runs.

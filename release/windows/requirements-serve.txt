@@ -1,0 +1,4 @@
+# start-server.cmd: the OpenAI / Anthropic-compatible server around engine\strata.exe
+Jinja2==3.1.6
+regex
+numpy
