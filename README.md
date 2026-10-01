@@ -33,11 +33,11 @@ upstream's; the original README is kept as [README.upstream.md](README.upstream.
   expert's wait and event had left ~10 us of GPU idle, 226 ms of a 32K prompt), the n-gram rows read 256 at a time
   and beside layer 0, upstream's split hyper-connection kernels on.
 - **An adaptive VRAM tier with a longer memory:** it re-ranks the experts every 2 rounds, up to 192 swaps, and the
-  routing counts fade x0.92 per pass. Upstream re-ranks every 4 rounds, up to 96, x0.7. On the 5090 a conversation
-  misses 30-40% fewer experts, and the CPU expert pool does 20-40% less work over 12-28% less PCIe traffic. The
-  round is the same or slightly shorter. It applies where it was measured to help: a cache holding 20-60% of the
-  experts, every expert in RAM. Elsewhere upstream's settings stay; `--adapt-every`, `--adapt-swaps` and
-  `--adapt-decay` override.
+  routing counts fade x0.92 per pass. Upstream re-ranks every 4 rounds, up to 96, x0.7. In fixed 1,000-token runs on
+  the 5090 it missed 30-40% fewer experts and the round did not change measurably. About half of those runs' tokens
+  came after the answer had ended, though, where the model loops over a few experts, so the gain on an answer alone
+  is not measured yet. It applies to a cache holding 20-60% of the experts with every expert in RAM. Elsewhere
+  upstream's settings stay; `--adapt-every`, `--adapt-swaps` and `--adapt-decay` override.
 - **Tuned for NVFP4's larger experts** (PCIe share, prompt chunks up to 32K, fused scale passes, a verify commit
   that overlaps the draft) and the fine-tune's own abliterated MTP draft head.
 - **A draft vocabulary with Cyrillic:** the MTP draft head proposes only tokens of its subset, and upstream's held
@@ -58,10 +58,12 @@ upstream's; the original README is kept as [README.upstream.md](README.upstream.
   against an FP32 reference, was up to 11% off (ggml-cuda's FP16 flash attention); this one is 0.1% off.
 - **Fixes:** a scale fold that left NVFP4 hidden activations in FP16's subnormals (2-12% expert error), and the
   batched verify path skipping the query rotation of rotated KV caches.
-- **On upstream Strata 0.1.31** (sampled answers up to 40% faster, faster prompt kernels, Q4_K/Q5_K experts and
-  split GGUFs, a RAM-budget file tier, linear/YaRN RoPE scaling, a conversation cache, server fixes): rebuilt from
-  this fork's pull requests to upstream (#353, #357, #358, #362, #276-#293). Against 0.1.28-nvfp4.4 the greedy
-  tokens are identical and the first-token KL is at noise level (0.0002).
+- **On upstream Strata 0.1.32.** Upstream added faster layer-split prompts, AMD/RDNA4 work, Unsloth UD-Q4_K_XL in
+  setup, a fix for a subagent evicting its parent's parked conversation, a lazy server start, model aliases and
+  CORS. 0.1.32 took this fork's first wave of pull requests (#276-#293), some of it as opt-ins that the fork keeps
+  on. The rest is carried as rebased pull requests: #353, #357, #358, #362, #372, #374, #378, #379, #385, #407 and
+  #279. Against 0.1.31-nvfp4.3, with the same expert cache, the first token's logits and the greedy tokens are
+  identical, and the speed is the same.
 
 Each change was measured - first-token KL against a reference, and interleaved speed A/B runs;
 [docs/NVFP4.md](docs/NVFP4.md) has the numbers, and everything that was tried and dropped.
@@ -115,13 +117,15 @@ RTX 5090 (32 GB, PCIe 5 x16), Ryzen 9 9950X3D, 128 GB DDR5-5600, Samsung 9100 PR
 
 | | |
 | --- | ---: |
-| Writes answers, short chat (256 tokens) | 128-138 tokens/s (0.1.31-nvfp4.1: 106-119) |
-| Writes answers, a 1,000-token chat | 157 tokens/s on average (144 with upstream's tier settings; within ~2 sigma) |
-| Writes answers after a 32K prompt | 161-173 tokens/s in two runs (106-115); the round 22.4-23.3 ms (25.4 in 0.1.31-nvfp4.2) |
-| Reads a 32K prompt | 6,380-6,780 tokens/s (5,400-5,900) |
+| Writes a chat answer (~520 tokens, to its end) | 138 tokens/s on average, 125-146 in 6 runs; 18.2 ms a round |
+| Writes a ~1,000-token answer after a 32K prompt | 132 tokens/s on average, 130-133 in 4 runs; 20.0 ms a round |
+| Reads a 32K prompt | 6,740-6,930 tokens/s (0.1.31-nvfp4.1: 5,400-5,900) |
 | Start: the expert arena loaded | ~7 s (63 GiB of experts read at 10-11 GiB/s) |
 
-The rates vary with the draft acceptance of the path the tokens take (docs/NVFP4.md, "On upstream 0.1.31"). With
+0.1.31-nvfp4.3 measured the same in the same interleaved runs: 18.1 and 20.0 ms a round. Its notes said 161-173
+tokens/s after a 32K prompt, but that prompt's answer ends after 22 tokens. Those runs went on to a fixed 256 tokens
+with no end-of-turn stop, so that was the speed of the loop after the answer, not of an answer. The rates vary with
+the draft acceptance of the path the tokens take (docs/NVFP4.md, "On upstream 0.1.32"). With
 64 GB of RAM (the low-RAM mode): 9.3 s to the first token of a 32K prompt instead of 5.7, then 97 tokens/s.
 
 Where precision was still being lost, first-token KL divergence from the more exact variant (8 prompts of 1K-8K
@@ -254,7 +258,9 @@ either way - CUDA pins it for the GPU's copies.
 | `--embd-gguf PATH` | the token embedding from this GGUF (BF16 from `tools/embd_bf16_pack.py`) |
 | `STRATA_PREFILL_BF16X2=2\|1\|0` | exact inputs to the prompt path's BF16 projections: all but the hyper-connection (default), all (~9% slower prompt reading), off |
 | `STRATA_KV_ROT=0` | int8 K/V without the Hadamard rotation (A/B) |
-| `STRATA_ROPE_LEGACY=1` | the old float fast-math RoPE angles (A/B) |
+| `STRATA_ROPE_TABLE=0` | the fast-math RoPE angles instead of the float64 table (upstream's default; A/B) |
+| `--prefill auto:8192\|16384` | cap `--prefill auto`'s chunk (default 32768 here, 8192 upstream) |
+| config `"anthropic_thinking": "on_request"\|"model"` | an Anthropic request that does not ask for thinking renders without it (the bundle's default) / thinks as the template does (upstream's default) |
 | `STRATA_COMMIT_SYNC=1` | the verify commit waits for its graph again (A/B) |
 | `--pcie-frac F` | share of cache misses fetched over PCIe (NVFP4 default 0.25) |
 | `STRATA_NO_LARGEPAGES=1` | 4 KB pages even when large pages are allowed (A/B) |
@@ -274,7 +280,7 @@ either way - CUDA pins it for the GPU's copies.
 | `--no-kv-grow`, `STRATA_KV_GROW=0` | the K/V allocated for the whole context at start (before 0.1.31-nvfp4.2) |
 | `STRATA_KV_GROW_INIT` / `_STEP` | the K/V's cells at start (16384) and its growth step (8192) |
 | `STRATA_PREFILL_GROUP_GATHER=0` | the prompt path gathers, waits and releases one expert at a time (A/B) |
-| `STRATA_GR_V3=0` | the fused hyper-connection read kernel instead of upstream's split ones (A/B) |
+| `STRATA_GR_V3=0` | upstream's default hyper-connection read (0.1.32: #315's staged variant, `STRATA_HC_SPLIT`) instead of the split V3 kernels (A/B: 18.49 vs 18.23 ms a round) |
 | `--ple-inflight N` | outstanding n-gram row reads (default 256; 64 before 0.1.31-nvfp4.2) |
 | `--adapt-every N`, `--adapt-swaps N`, `--adapt-decay F` | the adaptive VRAM tier: re-rank every N rounds, up to N swaps, counts x F after each (default 2 / 192 / 0.92 with a cache of 20-60% of the experts and every expert in RAM, else upstream's 4 / 96 / 0.7) |
 
