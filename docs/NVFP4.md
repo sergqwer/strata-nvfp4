@@ -359,6 +359,51 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### Re-quantized from BF16 (2026-10-02, release 0.1.32-nvfp4.2)
+
+The shipped experts are ModelOpt's NVFP4: each 16-value block is scaled to its largest value and every weight rounded
+to the nearest FP4 value. Here they were re-quantized from the BF16 checkpoint (`orcarouter/Qwen3.8-Flash-Next-Uncensored`)
+and measured end to end.
+
+- **Checks first.**
+  - ModelOpt's NVFP4 is that checkpoint's: relative weight error 9.4%, gate rows first.
+  - `tools/nvfp4_codec.py` lays ModelOpt's codes out byte for byte as `experts.bin` holds them.
+  - Its round-to-nearest reproduces 100% of the block scales and 99.8-100% of the codes.
+  - ModelOpt's global scale for gate/up is shared and 2-7x amax/(6x448), which does not change the error.
+- **Calibration.**
+  - 57.5K tokens: Ukrainian and English Wikipedia, llama.cpp and Rust sources, and 16 of the model's own chat answers.
+  - The engine dumped every layer's MoE input with the routing (`STRATA_DUMP_MOE_LAYER=all`).
+  - An expert's Hessian is sum w^2 x x^T over the tokens routed to it, mixed with the layer's average as 256 pseudo-tokens.
+  - Down's Hessian comes from the hidden the quantized gate/up produce.
+- **Per layer, held-out tokens**, the routed-weighted error of the experts' whole output, summed over 48 layers:
+  - GPTQ (16-column scales searched on the updated weights, "four over six" candidates): 33.5% of ModelOpt's;
+  - an activation-weighted per-block scale search alone: about half;
+  - after GPTQ most of the error is in down. Q8_0 down removes up to ~85% in a layer, Q8_0 gate/up only ~12%.
+- **Packs:**
+  - GPTQ only, 63.3 GiB;
+  - Q8_0 down in every layer, 82.0 GiB;
+  - budgets from `tools/requant_plan.py`: 17 layers (69.9 GiB) and 27 layers (73.8 GiB: layers 4, 6, 15, 16, 19-23, 30-47). They were assembled from the first two: the GPTQ gate/up rows are byte-identical.
+- **Measured against an all-Q8_0 reference pack** built from the same BF16 (119.5 GiB, run with `--low-ram`):
+  - 12 prompts (Ukrainian, English, code; half with thinking), none in the calibration;
+  - the reference's answers teacher-forced (`STRATA_LOGPOS`, top 64, serve mode so the windows read them);
+  - the KL is taken over the answers' positions, per prompt.
+  - **The metric's own noise:** the same pack with another cache size is 0.0017 (median; GPU and CPU round differently, and the difference accumulates in the K/V and the GDN state). Over the whole 12K-token conversation it reaches 0.01, which is why the comparison is per answer.
+
+| pack | experts | median answer KL | of ModelOpt's | chat decode | after a 32K prompt |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ModelOpt NVFP4 (0.1.32-nvfp4.1) | 63.3 GiB | 0.0107 | | 17.3 ms, 142 tok/s | 19.3 ms, 136 tok/s |
+| GPTQ NVFP4 | 63.3 GiB | 0.0070 | 65% (better in 12/12 prompts) | 17.3 ms, 143 tok/s | |
+| + Q8_0 down in 17 layers | 69.9 GiB | 0.0059 | 55% | 18.3 ms, 134 tok/s (-5.5%) | 20.9 ms, 123 tok/s (-9.6%) |
+| **+ Q8_0 down in 27 layers** | 73.8 GiB | **0.0051** | **48%** | 19.3 ms, 126 tok/s (-11.6%) | 22.3 ms, 116 tok/s (-14.7%) |
+| + Q8_0 down in all 48 | 82.0 GiB | 0.0045 | 42% | 22.3 ms, 108 tok/s (-24%) | |
+
+- **Net of the noise** (0.0017): 0.0090 -> 0.0052 (GPTQ) -> 0.0042 -> 0.0034 (27 layers) -> 0.0028. Each step is better in 10 or 12 of the 12 prompts.
+- **The first token after a 32K prompt** (full vocabulary): 0.0277 -> 0.0137 (GPTQ) -> 0.0090 -> 0.0069 -> 0.0010.
+- **Speed.** Interleaved runs, cache auto, to each answer's end. The prompt path reads 32K at the same 4.37-4.41 s with every pack.
+  - The 8-bit layers cost decode in two ways: more bytes per miss (the CPU pool runs Q8_0 down through ggml's generic dot), and fewer experts in VRAM.
+  - With the 27-layer pack, 39-40 GB of the 128 GB stay free.
+- **The tray runs the 27-layer pack** (`packs\orca-nvfp4-gptq-q8d`): the most accurate one inside a 10-15% decode budget. The ModelOpt pack stays beside it.
+
 ### On upstream 0.1.32 (2026-10-01, release 0.1.32-nvfp4.1)
 
 Upstream released 0.1.32 with this fork's first wave of pull requests in it. The maintainer applied them by hand, under our name, and made some of them opt-in. The fork was rebuilt on 0.1.32 the same way as on 0.1.31:
