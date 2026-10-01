@@ -32,6 +32,11 @@ upstream's; the original README is kept as [README.upstream.md](README.upstream.
 - **Faster prompt reading:** an MMQ group's experts gathered in one launch after one wait (under WDDM every streamed
   expert's wait and event had left ~10 us of GPU idle, 226 ms of a 32K prompt), the n-gram rows read 256 at a time
   and beside layer 0, upstream's split hyper-connection kernels on.
+- **An adaptive VRAM tier with a longer memory:** it re-ranks the experts every 2 rounds, up to 192 swaps, and the
+  routing counts fade x0.92 per pass. Upstream re-ranks every 4 rounds, up to 96, x0.7. On the 5090 a conversation
+  misses 37% fewer experts and the round is ~10% shorter. It applies where it was measured to help: a cache holding
+  20-60% of the experts, every expert in RAM. Elsewhere upstream's settings stay; `--adapt-every`, `--adapt-swaps`
+  and `--adapt-decay` override.
 - **Tuned for NVFP4's larger experts** (PCIe share, prompt chunks up to 32K, fused scale passes, a verify commit
   that overlaps the draft) and the fine-tune's own abliterated MTP draft head.
 - **A draft vocabulary with Cyrillic:** the MTP draft head proposes only tokens of its subset, and upstream's held
@@ -109,9 +114,10 @@ RTX 5090 (32 GB, PCIe 5 x16), Ryzen 9 9950X3D, 128 GB DDR5-5600, Samsung 9100 PR
 
 | | |
 | --- | ---: |
-| Writes answers, short chat | 137-138 tokens/s (0.1.31-nvfp4.1: 106-119) |
-| Writes answers after a 32K prompt | 127-128 tokens/s (106-115) |
-| Reads a 32K prompt | 6,460-6,580 tokens/s (5,400-5,900) |
+| Writes answers, short chat (256 tokens) | 128-138 tokens/s (0.1.31-nvfp4.1: 106-119) |
+| Writes answers, a 1,000-token chat | 157 tokens/s on average (144 with upstream's tier settings) |
+| Writes answers after a 32K prompt | 161-173 tokens/s (106-115) |
+| Reads a 32K prompt | 6,380-6,780 tokens/s (5,400-5,900) |
 | Start: the expert arena loaded | ~7 s (63 GiB of experts read at 10-11 GiB/s) |
 
 The rates vary with the draft acceptance of the path the tokens take (docs/NVFP4.md, "On upstream 0.1.31"). With
@@ -269,6 +275,7 @@ either way - CUDA pins it for the GPU's copies.
 | `STRATA_PREFILL_GROUP_GATHER=0` | the prompt path gathers, waits and releases one expert at a time (A/B) |
 | `STRATA_GR_V3=0` | the fused hyper-connection read kernel instead of upstream's split ones (A/B) |
 | `--ple-inflight N` | outstanding n-gram row reads (default 256; 64 before 0.1.31-nvfp4.2) |
+| `--adapt-every N`, `--adapt-swaps N`, `--adapt-decay F` | the adaptive VRAM tier: re-rank every N rounds, up to N swaps, counts x F after each (default 2 / 192 / 0.92 with a cache of 20-60% of the experts and every expert in RAM, else upstream's 4 / 96 / 0.7) |
 
 ## Tests
 
