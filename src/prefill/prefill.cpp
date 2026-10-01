@@ -3188,8 +3188,29 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         // Diagnostics: STRATA_DUMP_MOE_INPUT=path, STRATA_DUMP_MOE_LAYER=l - the first chunk's MoE input
                         // of layer l ({T, N, K} int64, T x N floats, T x K expert ids) for testing products on real rows
                         static const char* dump_moe = std::getenv("STRATA_DUMP_MOE_INPUT");
+                        static const bool dump_all = dump_moe && std::getenv("STRATA_DUMP_MOE_LAYER") &&
+                                                     std::strcmp(std::getenv("STRATA_DUMP_MOE_LAYER"), "all") == 0;
                         static bool dumped_moe = false;
-                        if (dump_moe && !dumped_moe && l == std::atoi(std::getenv("STRATA_DUMP_MOE_LAYER") ? std::getenv("STRATA_DUMP_MOE_LAYER") : "0")) {
+                        // STRATA_DUMP_MOE_LAYER=all: every layer of every chunk, appended to <path>_lNN.bin as records of
+                        // {T, N, K, 2} int64, T x N floats (the MoE input), T x K expert ids, T x K routing weights
+                        // (calibration for tools/requant.py)
+                        if (dump_all) {
+                            std::vector<float> x((size_t) (T * N)), w((size_t) (T * K));
+                            cudaMemcpyAsync(x.data(), m.mixed, x.size() * sizeof(float), cudaMemcpyDeviceToHost, m.cs);
+                            cudaMemcpyAsync(w.data(), m.w, w.size() * sizeof(float), cudaMemcpyDeviceToHost, m.cs);
+                            cudaStreamSynchronize(m.cs);
+                            char path[1024];
+                            std::snprintf(path, sizeof path, "%s_l%02d.bin", dump_moe, (int) l);
+                            if (std::FILE* f = std::fopen(path, "ab")) {
+                                const int64_t hdr[4] = {(int64_t) T, (int64_t) N, (int64_t) K, 2};
+                                std::fwrite(hdr, sizeof hdr, 1, f);
+                                std::fwrite(x.data(), sizeof(float), x.size(), f);
+                                std::fwrite(ids_h, sizeof(int32_t), (size_t) (T * K), f);
+                                std::fwrite(w.data(), sizeof(float), w.size(), f);
+                                std::fclose(f);
+                            }
+                        }
+                        if (dump_moe && !dump_all && !dumped_moe && l == std::atoi(std::getenv("STRATA_DUMP_MOE_LAYER") ? std::getenv("STRATA_DUMP_MOE_LAYER") : "0")) {
                             dumped_moe = true;
                             std::vector<float> x((size_t) (T * N));
                             cudaMemcpyAsync(x.data(), m.mixed, x.size() * sizeof(float), cudaMemcpyDeviceToHost, m.cs);
