@@ -359,6 +359,29 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### Faster without changing an answer (2026-10-01, release 0.1.31-nvfp4.2)
+
+A list of speedups that keep every result was worked through, one commit each. What went in:
+
+| change | measured | results |
+| --- | --- | --- |
+| **The K/V grows with the context** (CUDA VMM): the pools and the expert-cache arena are virtual ranges; the K/V maps 2 MiB chunks as requests reach further, taken from the slots below the prompt path's loan (a hotter expert there moves into the coldest loan slot first), and hands them back after a short request (the slots refill from the profile) | cache auto at 262K: 7,060 -> 8,290 slots; short chat 20.5-21.1 -> 18.9-19.7 ms a round; served 32K document 99 -> 123-133 tok/s | bit-identical when no expert moves (grown from 4,096 cells, and mapped whole); first-token KL 0.0006 when 139 experts go to the CPU |
+| **An MMQ group gathered in one launch**, after one wait on its last copy, released by one event | 32K prompt -5.2%, 16K -7.9%, 8K -11.1% | bit-identical, the 96-slot ring too |
+| **n-gram rows read 256 at a time** (was 64) | PLE 303 -> 189-217 ms of a 32K prompt | bit-identical |
+| **the first chunk's n-gram rows read beside layer 0** | 32K prompt -7 to -9% | bit-identical |
+| **upstream's split hyper-connection kernels** (`STRATA_GR_V3`) on | rounds 3-5% shorter | within 2e-6 relative (gr_parity) |
+
+Measured and left out:
+- **The GDN recurrence with its state in registers** (GLM's KDA scan): two warp layouts, bit-identical, no faster (687-723 vs 690-697 ms per 32K prompt). Qwen's column kernel already keeps the state on chip.
+- **The PCIe share's copy kernel on its own stream:** round time unchanged, as was `--pcie-frac` 0.25-0.45. The round follows how many experts miss, not where a miss is computed.
+- **Next-layer expert prediction:** layer l's MoE input through layer l+1's router finds 53-70% of the true top-10 (GLM had 95% of its top-1). The hyper-connections change the input between layers.
+- **The VRAM cache's policy:**
+  - Replaying two decode routing traces (the replay matched the engine's misses within 3%) showed two findings.
+    - An LRU tail costs 8-9x the copies.
+    - Adapting every 2 rounds with 192 swaps misses 26-34% less. In the engine, the hit rate rose (0.871 -> 0.905), but the round time did not move measurably.
+  - A fit over 26 runs explains why: ms/round = 12.4 + 1.49 x misses per layer + 0.043 x swaps per round. A swap costs about its own PCIe time, because it shares the bus with the PCIe share.
+  - Left at upstream's settings until a replay benchmark can tell a few percent apart.
+
 ### On upstream 0.1.31 (2026-10-01, release 0.1.31-nvfp4.1)
 
 The fork was rebuilt on upstream 0.1.31 rather than merged, from the pull requests it had sent upstream:
