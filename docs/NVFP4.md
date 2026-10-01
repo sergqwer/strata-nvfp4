@@ -359,6 +359,38 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### The adaptive VRAM tier and an audit (2026-10-01, release 0.1.31-nvfp4.3)
+
+**The tier's settings.** The adaptive tier swaps the most-routed missing experts into VRAM in place of the
+least-routed resident ones, from routing counts that fade after each pass.
+
+- **Replay first.** Two recorded decode traces were replayed (`--dump-routing`); the replay matched the engine's misses within 3%.
+  - A window of the last 8-16 tokens instead of fading counts was worse, with 24-96% more misses. It forgets experts that a conversation uses rarely but steadily, and swaps them back and forth.
+  - Longer memory with more frequent steps was better: every 2 rounds, 192 swaps, x0.92 gave 31-38% fewer misses.
+  - An LRU tail cost 8-9x the copies.
+- **In the engine**, the settings alternating run by run:
+
+| cache (share of the experts) | upstream 4 / 96 / x0.7 | 2 / 192 / x0.92 |
+| --- | --- | --- |
+| NVFP4, 5090 (34%), a 1,000-token chat, 6 runs each | 4.26 misses a layer, 19.9 ms a round, 144 tok/s | **2.68, 17.8 ms, 157 tok/s** |
+| NVFP4, 5090 (34%), an 8K document + 600, 4 each | 3.46, 19.6 ms | **1.91, 17.4 ms** |
+| IQ2_XS, 5090 (70%), 6 each | 1.01, 15.38 ms | 0.84, 15.53 ms |
+| IQ2_XS, an emulated 16 GB card (14%), 4 each | 10.61, 25.1 ms | 10.36, 25.7 ms (swaps doubled) |
+
+- **Fit.** A fit over 26 runs gives ms per round = 12.4 + 1.49 x misses per layer + 0.043 x swaps per round: a swap costs about its own PCIe time.
+- **Why the faster settings pay off only in the middle:** with a cache that holds most of the experts there is little left to win, and with a small one the swaps cost more than they bring.
+- **Where they apply:** only with a cache holding 20-60% of the experts and every expert in RAM. With a RAM tier a swap can read the drive: a 64 GB run had the tier's host time double with no shorter round. Elsewhere the tier keeps upstream's settings.
+
+**An audit** (a codex read-only pass; every finding checked against the code before anything changed):
+- **The prompt path's Stager:** a generation's first jobs did not wait for the previous generation's DMA from their buffer.
+  - The window is real but narrow: no MTP, or a ring entry the routing skipped, with unpinned blobs. The audit's per-layer case is covered by the routing sync.
+  - Fixed, and sent upstream as #385.
+- **VMM:** a failed access setup left a chunk counted as mapped. It is now rolled back.
+- **The elastic K/V:** a failed growth or trim now stops the engine instead of serving on with a half-changed tier. The trim maps one run and refills the slots with one sync.
+- **Rejected:**
+  - a "redundant" sync of the verifier's copy stream (it keeps a window's host function from raising flag B in the next window);
+  - the verifier's unchecked DMA calls (a mode NVFP4 does not use; the error surfaces at the next sync).
+
 ### Faster without changing an answer (2026-10-01, release 0.1.31-nvfp4.2)
 
 A list of speedups that keep every result was worked through, one commit each. What went in:
