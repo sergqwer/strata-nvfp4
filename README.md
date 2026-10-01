@@ -25,6 +25,13 @@ upstream's; the original README is kept as [README.upstream.md](README.upstream.
 - **AVX-512 NVFP4 kernels** for the CPU share of the experts (1.8-3.7x ggml-cpu).
 - **Faster start:** experts read unbuffered into the pinned arena on their own thread, registered with CUDA one layer
   ahead of the readers, beside everything else - the arena is in at ~7 s from a PCIe 5 drive.
+- **The K/V grows with the context:** at a 262K window upstream allocates the whole context's K/V at start (3.35 GiB
+  here with the draft layer's) - room for ~1,200 more experts in VRAM. Here the K/V takes VRAM only as the requests
+  reach further, from the expert cache, and gives it back after them (CUDA virtual memory: no address moves, no graph
+  is captured again). The window is never smaller; `--no-kv-grow` allocates it whole.
+- **Faster prompt reading:** an MMQ group's experts gathered in one launch after one wait (under WDDM every streamed
+  expert's wait and event had left ~10 us of GPU idle, 226 ms of a 32K prompt), the n-gram rows read 256 at a time
+  and beside layer 0, upstream's split hyper-connection kernels on.
 - **Tuned for NVFP4's larger experts** (PCIe share, prompt chunks up to 32K, fused scale passes, a verify commit
   that overlaps the draft) and the fine-tune's own abliterated MTP draft head.
 - **A draft vocabulary with Cyrillic:** the MTP draft head proposes only tokens of its subset, and upstream's held
@@ -102,9 +109,9 @@ RTX 5090 (32 GB, PCIe 5 x16), Ryzen 9 9950X3D, 128 GB DDR5-5600, Samsung 9100 PR
 
 | | |
 | --- | ---: |
-| Writes answers, short chat | 106-119 tokens/s (in Cyrillic too: ~110) |
-| Writes answers after a 32K prompt | 106-115 tokens/s |
-| Reads a 32K prompt | 5,400-5,900 tokens/s |
+| Writes answers, short chat | 137-138 tokens/s (0.1.31-nvfp4.1: 106-119) |
+| Writes answers after a 32K prompt | 127-128 tokens/s (106-115) |
+| Reads a 32K prompt | 6,460-6,580 tokens/s (5,400-5,900) |
 | Start: the expert arena loaded | ~7 s (63 GiB of experts read at 10-11 GiB/s) |
 
 The rates vary with the draft acceptance of the path the tokens take (docs/NVFP4.md, "On upstream 0.1.31"). With
@@ -257,6 +264,11 @@ either way - CUDA pins it for the GPU's copies.
 | `--low-ram` / `--no-low-ram` | the low-RAM mode on / off (default: on with less than 96 GB installed) |
 | `--ram-budget GIB` | the low-RAM mode with at most GIB of pinned expert copies (upstream's `--resident-budget-gib`) |
 | `STRATA_RESIDENT_HEADROOM_GIB=6` | RAM the low-RAM mode leaves free |
+| `--no-kv-grow`, `STRATA_KV_GROW=0` | the K/V allocated for the whole context at start (before 0.1.31-nvfp4.2) |
+| `STRATA_KV_GROW_INIT` / `_STEP` | the K/V's cells at start (16384) and its growth step (8192) |
+| `STRATA_PREFILL_GROUP_GATHER=0` | the prompt path gathers, waits and releases one expert at a time (A/B) |
+| `STRATA_GR_V3=0` | the fused hyper-connection read kernel instead of upstream's split ones (A/B) |
+| `--ple-inflight N` | outstanding n-gram row reads (default 256; 64 before 0.1.31-nvfp4.2) |
 
 ## Tests
 
