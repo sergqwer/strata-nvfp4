@@ -16,6 +16,7 @@
   "cwd": ".",
   "tokenizer": "models/pack/tokenizer",
   "model_name": "qwen3.8-flash-next-uncensored-nvfp4",
+  "anthropic_thinking": "on_request",
   "log": "strata.log",
   "host": "127.0.0.1"
 }
