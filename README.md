@@ -34,9 +34,10 @@ upstream's; the original README is kept as [README.upstream.md](README.upstream.
   and beside layer 0, upstream's split hyper-connection kernels on.
 - **An adaptive VRAM tier with a longer memory:** it re-ranks the experts every 2 rounds, up to 192 swaps, and the
   routing counts fade x0.92 per pass. Upstream re-ranks every 4 rounds, up to 96, x0.7. On the 5090 a conversation
-  misses 37% fewer experts and the round is ~10% shorter. It applies where it was measured to help: a cache holding
-  20-60% of the experts, every expert in RAM. Elsewhere upstream's settings stay; `--adapt-every`, `--adapt-swaps`
-  and `--adapt-decay` override.
+  misses 30-40% fewer experts, and the CPU expert pool does 20-40% less work over 12-28% less PCIe traffic. The
+  round is the same or slightly shorter. It applies where it was measured to help: a cache holding 20-60% of the
+  experts, every expert in RAM. Elsewhere upstream's settings stay; `--adapt-every`, `--adapt-swaps` and
+  `--adapt-decay` override.
 - **Tuned for NVFP4's larger experts** (PCIe share, prompt chunks up to 32K, fused scale passes, a verify commit
   that overlaps the draft) and the fine-tune's own abliterated MTP draft head.
 - **A draft vocabulary with Cyrillic:** the MTP draft head proposes only tokens of its subset, and upstream's held
@@ -115,8 +116,8 @@ RTX 5090 (32 GB, PCIe 5 x16), Ryzen 9 9950X3D, 128 GB DDR5-5600, Samsung 9100 PR
 | | |
 | --- | ---: |
 | Writes answers, short chat (256 tokens) | 128-138 tokens/s (0.1.31-nvfp4.1: 106-119) |
-| Writes answers, a 1,000-token chat | 157 tokens/s on average (144 with upstream's tier settings) |
-| Writes answers after a 32K prompt | 161-173 tokens/s (106-115) |
+| Writes answers, a 1,000-token chat | 157 tokens/s on average (144 with upstream's tier settings; within ~2 sigma) |
+| Writes answers after a 32K prompt | 161-173 tokens/s in two runs (106-115); the round 22.4-23.3 ms (25.4 in 0.1.31-nvfp4.2) |
 | Reads a 32K prompt | 6,380-6,780 tokens/s (5,400-5,900) |
 | Start: the expert arena loaded | ~7 s (63 GiB of experts read at 10-11 GiB/s) |
 

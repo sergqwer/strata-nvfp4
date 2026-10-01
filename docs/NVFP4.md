@@ -377,7 +377,19 @@ least-routed resident ones, from routing counts that fade after each pass.
 | IQ2_XS, 5090 (70%), 6 each | 1.01, 15.38 ms | 0.84, 15.53 ms |
 | IQ2_XS, an emulated 16 GB card (14%), 4 each | 10.61, 25.1 ms | 10.36, 25.7 ms (swaps doubled) |
 
-- **Fit.** A fit over 26 runs gives ms per round = 12.4 + 1.49 x misses per layer + 0.043 x swaps per round: a swap costs about its own PCIe time.
+- **Fit.** A fit over 26 runs gives ms per round = 12.4 + 1.49 x misses per layer + 0.043 x swaps per round.
+  - The runs differ in their token paths, so that is a correlation, not a cost.
+- **What moves and what does not.** Measured per round, the faster settings cut:
+  - the CPU expert pool's time: NVFP4 8.7 -> 5.6 ms (chat), 7.2 -> 4.2 (document);
+  - the PCIe traffic, as the share of misses the GPU fetches plus the swaps: 156 -> 138 MB and 123 -> 89 MB.
+- **Why the round barely moves.** In most layers the GPU's work, not the CPU's, sets a layer's time, so only the smaller PCIe share shortens the round: ~1 ms. The rounds' spread between runs is larger than that, so the 19.9 -> 17.8 ms above is about two standard deviations.
+- **Unsloth UD-Q4_K_XL** (upstream #407; cache 30%, every expert in RAM), 6 pairs:
+  - misses 4.06 -> 2.79;
+  - CPU pool 9.9 -> 8.0 ms;
+  - PCIe 329 -> 256 MB;
+  - the round 32.0 +- 3.0 -> 32.3 +- 2.2 ms;
+  - with 16 busy CPU workers beside it, the round was 53.9 -> 52.2 +- 5.9 ms.
+- **Task Manager shows half the CPU busy.** The pool runs one worker per physical core on both CCDs (the even logical CPUs), and the SMT siblings stay free: the expert kernels are bound by DRAM bandwidth (~55 GB/s here), and 23 or 31 workers were no faster. During decoding the workers wait for the next layer by spinning (`_mm_pause`; a layer comes every ~0.35 ms), so their cores show ~100% whatever the work, and a lighter pool does not show there.
 - **Why the faster settings pay off only in the middle:** with a cache that holds most of the experts there is little left to win, and with a small one the swaps cost more than they bring.
 - **Where they apply:** only with a cache holding 20-60% of the experts and every expert in RAM. With a RAM tier a swap can read the drive: a 64 GB run had the tier's host time double with no shorter round. Elsewhere the tier keeps upstream's settings.
 
