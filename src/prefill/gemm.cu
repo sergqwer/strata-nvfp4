@@ -20,7 +20,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <future>
 #include <memory>
+#include <mutex>
 
 #if defined(__HIPCC__) && defined(STRATA_HIPBLASLT_AVAILABLE)
 #include "hipblaslt_tuning.hpp"
@@ -274,7 +276,35 @@ bool try_hipblaslt(void* opaque_state, strata::prefill::hipblaslt::InputType typ
 }
 #endif
 
+// #285: the first cublasCreate initialises cuBLAS and cuBLASLt; gemm_prewarm pays that on a thread while the model
+// loads, and the first Gemm takes that handle
+std::mutex g_prewarm_m;
+std::future<cublasHandle_t> g_prewarm;
+
+cublasStatus_t create_handle(cublasHandle_t* h) {
+    {
+        std::lock_guard<std::mutex> lock(g_prewarm_m);
+        if (g_prewarm.valid()) {
+            *h = g_prewarm.get();   // waits if it is still being made
+            if (*h != nullptr) return CUBLAS_STATUS_SUCCESS;
+        }
+    }
+    return cublasCreate(h);
+}
+
 }  // namespace
+
+void gemm_prewarm() {
+    std::lock_guard<std::mutex> lock(g_prewarm_m);
+    if (g_prewarm.valid()) return;
+    int dev = 0;
+    (void) cudaGetDevice(&dev);
+    g_prewarm = std::async(std::launch::async, [dev]() -> cublasHandle_t {
+        (void) cudaSetDevice(dev);
+        cublasHandle_t h = nullptr;
+        return cublasCreate(&h) == CUBLAS_STATUS_SUCCESS ? h : nullptr;
+    });
+}
 
 Gemm::~Gemm() {
 #if defined(__HIPCC__) && defined(STRATA_HIPBLASLT_AVAILABLE)
@@ -290,7 +320,7 @@ Gemm::~Gemm() {
 bool Gemm::init_external(void* stream, uint16_t* scratch, int64_t scratch_elems, void* workspace, size_t ws_bytes,
                          std::string& err) {
     cublasHandle_t h = nullptr;
-    if (const cublasStatus_t s = cublasCreate(&h); s != CUBLAS_STATUS_SUCCESS) {
+    if (const cublasStatus_t s = create_handle(&h); s != CUBLAS_STATUS_SUCCESS) {
         err = "prefill gemm: cublasCreate: cuBLAS status " + std::to_string((int) s);
         return false;
     }
@@ -326,7 +356,7 @@ void Gemm::rebind(uint16_t* scratch, int64_t scratch_elems, void* workspace, siz
 bool Gemm::init(void* stream, int64_t scratch_elems, std::string& err) {
     // #240: every failure names the call and the real status, so "no VRAM" can be told from a broken install
     cublasHandle_t h = nullptr;
-    if (const cublasStatus_t s = cublasCreate(&h); s != CUBLAS_STATUS_SUCCESS) {
+    if (const cublasStatus_t s = create_handle(&h); s != CUBLAS_STATUS_SUCCESS) {
         err = "prefill gemm: cublasCreate: cuBLAS status " + std::to_string((int) s);
         return false;
     }

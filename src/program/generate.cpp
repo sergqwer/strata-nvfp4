@@ -75,6 +75,8 @@
 #include <algorithm>
 #include <iostream>
 #include <thread>
+
+#include "strata/prefill/gemm.hpp"
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -1786,6 +1788,9 @@ int main(int argc, char** argv) {
                          "served natively)\n",
                  (unsigned long long) (pool_bytes >> 20), o.pack.c_str(), skip.size());
 
+    // #285: the first cuBLAS handle (cuBLAS and cuBLASLt initialise with it) is made on a thread from here, while the
+    // weights and the expert arena load; the prompt path's Gemm takes it instead of making its own on the critical path
+    strata::prefill::gemm_prewarm();
     strata::core::NativeDense native_dense;
     if (!o.native_dense_gguf.empty()) {
         if (!native_dense.load(o.native_dense_gguf, wt, err, o.native_ple_key)) {
