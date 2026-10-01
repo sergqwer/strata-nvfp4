@@ -5100,6 +5100,20 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "strata generate: expert cache %lld slots, %.2f GiB of VRAM; policy is\n",
                      (long long) xcache.slots(), xcache.gib());
         mem_mark("opening the expert cache");
+        // The adaptive tier's faster settings (2 / 192 / x0.92) where they were measured to help: a cache holding
+        // 20-60% of the experts.  RTX 5090, interleaved: an NVFP4 pack (34%) 19.9 -> 17.8 ms a round; IQ2_XS (70%,
+        // a 98% hit rate already) 15.38 -> 15.53; IQ2_XS on an emulated 16 GB card (14%: swaps doubled, the hit
+        // rate +1.6 points) 25.1 -> 25.7.  Elsewhere upstream's 4 / 96 / x0.7; any --adapt-* flag decides alone.
+        if (!o.adapt_given && o.adapt_every == 2) {
+            const double cover = (double) xcache.slots() / (double) (g.n_layers * g.n_expert);
+            if (cover < 0.2 || cover > 0.6) {
+                o.adapt_every = 4;
+                o.adapt_swaps = 96;
+                o.adapt_decay = 0.7f;
+            }
+            std::fprintf(stderr, "strata generate: adaptive tier every %d rounds, %d swaps, x%.2f (the cache holds %.0f%% of "
+                                 "the experts)\n", o.adapt_every, o.adapt_swaps, o.adapt_decay, 100.0 * cover);
+        }
         xcache.set_per_layer_admission(o.expert_cache_per_layer);
         // Round 328 warned here that the GPU hit path was wrong (tokens diverged from a cache-off run from
         // token 0). That fault was fixed long since (native_expert_parity, expert_parity, the grouped kernels'
