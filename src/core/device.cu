@@ -1,4 +1,5 @@
 // src/core/device.cu - P2.S1: the CUDA side of the runtime core.
+#include "strata/core/emulate.hpp"
 #include "strata/core/device.hpp"
 
 #include <cuda_runtime.h>
@@ -266,8 +267,11 @@ DeviceInfo device_info(int ordinal) {
     cudaDeviceProp p{};
     check(cudaGetDeviceProperties(&p, ordinal), "cudaGetDeviceProperties");
     d.name = p.name;
-    d.cc_major = p.major;
-    d.cc_minor = p.minor;
+    d.cc_major = cc_major_of(p.major);   // STRATA_EMULATE_CC (tests): as another generation would report
+    d.cc_minor = cc_minor_of(p.minor);
+    if (emulated_cc())
+        std::fprintf(stderr, "strata: EMULATING compute capability %d.%d on %s (sm_%d%d) - a test mode\n",
+                     d.cc_major, d.cc_minor, p.name, p.major, p.minor);
     d.multi_processor_count = p.multiProcessorCount;
 
     size_t free_b = 0, total_b = 0;

@@ -27,7 +27,7 @@ namespace strata::kernels {
 void mrope_table_set(const int32_t* device_table);
 const int32_t* mrope_table();
 
-/// #280, opt-in (STRATA_ROPE_TABLE=1): the rotation angles, 32 pairs of a 64-wide rotary slice, from the session's
+/// #280 (upstream: opt-in, STRATA_ROPE_TABLE=1; on by default in this fork, =0 off): the rotation angles, 32 pairs of a 64-wide rotary slice, from the session's
 /// float64 table (build_rope_table, [max_pos][32] cos and sin in VRAM, the rope scaling inside) of the CURRENT
 /// device.  With it the rope kernels rotate by the table's exact angles; without it they compute pos * powf(...) with cosf/sinf, which under
 /// --use_fast_math is 0.0014 rad off at 32K and ~0.02 at 262K, and the prompt path (precise libm) and decode
@@ -41,8 +41,8 @@ struct RopeTab {
 void rope_table_set(const float* cos_tab, const float* sin_tab, int max_pos, const RopeScaling& scaling);
 /// Forgets the table `cos_tab` (on every device) - before the memory that holds it is freed (session_release).
 void rope_table_release(const float* cos_tab);
-/// The registered table when STRATA_ROPE_TABLE=1 and it was built with `scaling`; otherwise none (the default: the
-/// kernels compute the angle exactly as before).
+/// The registered table when it was built with `scaling` and STRATA_ROPE_TABLE is not 0 (this fork's default);
+/// otherwise none (the kernels compute the angle as upstream's default does).
 RopeTab rope_table_for(const RopeScaling& scaling);
 
 #if defined(__CUDACC__) || defined(__HIPCC__)
