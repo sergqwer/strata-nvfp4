@@ -380,7 +380,8 @@ struct Options {
     bool ple_sync_submit = false;      ///< A/B arm: submit reads on the token thread, no I/O worker
     std::string kv = "fp16";           ///< plan v0.3 P7: KV storage, fp16 (default) or int8 (half the VRAM)
     int64_t kv_resident = 0;           ///< KV streaming: resident cells per QSA layer (0: all in VRAM)
-    bool kv_grow = false;              ///< the elastic K/V (--kv-grow, STRATA_KV_GROW=1; kvg_ensure)
+    bool kv_grow = true;               ///< the elastic K/V (kvg_ensure): on in the fork (--no-kv-grow, STRATA_KV_GROW=0)
+    bool kv_grow_given = false;        ///< --kv-grow / --no-kv-grow on the command line
     std::string dump_residual;
     /// The head input, `bb.mixed`.  It exists so the head can be SPLIT: steps 1-4 (the per-stream norm, the two
     /// bf16 projections and the stream mean) recompute cheaply in Python, and only the 794 MB GEMV does not.
@@ -679,8 +680,8 @@ void usage() {
                  "                       all of it in VRAM. A context of N cells or fewer is not streamed\n"
                  "  --kv-grow            the K/V takes VRAM only for the cells the requests reach and the expert\n"
                  "                       cache holds the rest, giving slots back as the context grows (one GPU, with\n"
-                 "                       --expert-profile; STRATA_KV_GROW=1/0 also). Default: the whole --max-context\n"
-                 "                       allocated at start\n"
+                 "                       --expert-profile; STRATA_KV_GROW=1/0 also). On by default in this fork;\n"
+                 "  --no-kv-grow         the whole --max-context allocated at start (upstream's default)\n"
                  "  --stream-token       enqueue token work on the session stream (experimental)\n"
                  "  --check-logits       copy and check all logits in the stream-token path\n"
                  "  --gr-fp32-activations  experimental CUDA-oracle GR activation precision\n"
@@ -1639,8 +1640,8 @@ int main(int argc, char** argv) {
         else if (a == "--ple-sync-submit") o.ple_sync_submit = true;
         else if (a == "--kv") o.kv = next("--kv");
         else if (a == "--kv-resident") o.kv_resident = std::atoll(next("--kv-resident"));
-        else if (a == "--kv-grow") o.kv_grow = true;
-        else if (a == "--no-kv-grow") o.kv_grow = false;
+        else if (a == "--kv-grow") { o.kv_grow = true; o.kv_grow_given = true; }
+        else if (a == "--no-kv-grow") { o.kv_grow = false; o.kv_grow_given = true; }
         else if (a == "--stream-token") o.stream_token = true;
         else if (a == "--check-logits") o.check_logits = true;
         else if (a == "--gr-fp32-activations") o.gr_fp32_activations = true;
@@ -3873,7 +3874,7 @@ int main(int argc, char** argv) {
                             strata::core::vmm_available() &&
                             // the batch slots carve their own K/V and --vram-elastic's cache is not one VMM range
                             o.batch == 0 && !o.vram_elastic && o.peer_device < 0;
-            if (asked && !on)
+            if (asked && !on && (o.kv_grow_given || (ev != nullptr && ev[0] != '\0')))
                 std::fprintf(stderr, "strata generate: --kv-grow is off (one GPU, a profile, the whole K/V in VRAM, "
                                      "every expert in RAM, no --batch, --vram-elastic or --peer-device)\n");
             const char* iv = std::getenv("STRATA_KV_GROW_INIT");
