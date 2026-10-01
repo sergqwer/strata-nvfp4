@@ -2880,7 +2880,9 @@ NativeExpertLayout native_expert_layout(int gu_type, int d_type, int64_t n_embd,
     L.up_off = (size_t) n_ff * L.gu_row;
     L.down_off = 2 * L.up_off;
     L.bytes = L.down_off + (size_t) n_embd * L.d_row;
-    if (gu_type == 40 && d_type == 40) {          // NVFP4: {s_gate, s_up, s_down, 0} after down (tools/iq_pack.py)
+    // NVFP4: {s_gate, s_up, s_down, 0} after down (tools/iq_pack.py) whenever any projection is NVFP4; a mixed
+    // expert's other projection has 1.0 there, so the kernels below multiply by it unconditionally
+    if (gu_type == 40 || d_type == 40) {
         L.tail_off = L.bytes;
         L.bytes += 16;
     }

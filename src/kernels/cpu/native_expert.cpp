@@ -61,11 +61,9 @@ bool native_fmt(int gu_type, int d_type, int64_t n_embd, int64_t n_ff, NativeFmt
     f.up_off = f.gu_row * (size_t) n_ff;
     f.down_off = 2 * f.up_off;
     f.bytes = f.down_off + f.d_row * (size_t) n_embd;
+    // NVFP4 in any projection: one scale tail per blob; a mixed expert (e.g. NVFP4 gate/up + Q8_0 down) has 1.0 for
+    // the other projection's scale (tools/iq_pack.py), so every path below multiplies by the tail unconditionally
     if (gu_type == kNvfp4Type || d_type == kNvfp4Type) {
-        if (gu_type != kNvfp4Type || d_type != kNvfp4Type) {
-            err = "native experts: NVFP4 must cover gate, up and down alike (one scale tail per blob)";
-            return false;
-        }
         f.tail_off = f.bytes;
         f.bytes += kNvfp4Tail;
     }
