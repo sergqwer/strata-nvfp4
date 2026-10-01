@@ -581,8 +581,15 @@ struct Options {
     std::string pcie_mode = "auto";   ///< auto | dma | kernel | direct
     /// Plan v0.3 P6: every `adapt_every` rounds, swap up to `adapt_swaps` of the most-routed missing experts into
     /// the VRAM tier in place of the least-routed resident ones (decayed counts).  0 = static residency.
-    int adapt_every = 4;
-    float adapt_decay = 0.7f;   ///< the usage counts are multiplied by this after each adaptation (--adapt-decay)
+    /// The fork: every 2 rounds, up to 192, counts x0.92 after each (upstream: 4, 96, x0.7).  Longer memory and
+    /// more frequent, smaller steps: replayed on two decode traces 31-38% fewer misses; in the engine (NVFP4, 262K,
+    /// interleaved) chat 1,000 tokens: misses 4.26 -> 2.68 per layer, 19.9 -> 17.8 ms a round, 144 -> 157 tok/s
+    /// (6 runs each); an 8K document + 600: misses 3.46 -> 1.91, 19.6 -> 17.4 ms (4 each).  A window of the last
+    /// 8-16 tokens instead of decayed counts was worse in the replay (+24-96% misses): it forgets experts the
+    /// conversation uses rarely but steadily and swaps them back and forth.
+    int adapt_every = 2;
+    float adapt_decay = 0.92f;  ///< the usage counts are multiplied by this after each adaptation (--adapt-decay)
+    bool adapt_given = false;   ///< an --adapt-* flag was given (the RAM-tier modes keep upstream's settings otherwise)
     /// an expert is swapped into the VRAM tier only when its decayed routing count beats the one it replaces by more than
     /// this (--adapt-min-gain; both the blocking and the asynchronous tier)
     float adapt_min_gain = 1.5f;
@@ -611,7 +618,7 @@ struct Options {
     bool serve = false;
     /// The vision path: keep a per-cell (t, h, w) rotary position table so --serve can take GENI requests.
     bool vision = false;
-    int adapt_swaps = 96;
+    int adapt_swaps = 192;
     /// --serve: how many conversation checkpoints to keep between requests (0 = every request reads its whole
     /// prompt again, the v0.1.2 behaviour).  One is the GDN recurrence of the 36 layers, the QSA indexer tails and
     /// the PLE history (~118 MB of host RAM); the KV cache itself is positional and stays where it is.
@@ -1960,8 +1967,8 @@ int main(int argc, char** argv) {
         else if (a == "--mtp") o.mtp = next("--mtp");
         else if (a == "--mtp-window") o.mtp_window = std::atoll(next("--mtp-window"));
         else if (a == "--pcie-frac") o.pcie_frac = std::atof(next("--pcie-frac"));
-        else if (a == "--adapt-every") o.adapt_every = std::atoi(next("--adapt-every"));
-        else if (a == "--adapt-decay") o.adapt_decay = (float) std::atof(next("--adapt-decay"));
+        else if (a == "--adapt-every") { o.adapt_every = std::atoi(next("--adapt-every")); o.adapt_given = true; }
+        else if (a == "--adapt-decay") { o.adapt_decay = (float) std::atof(next("--adapt-decay")); o.adapt_given = true; }
         else if (a == "--adapt-min-gain") o.adapt_min_gain = (float) std::atof(next("--adapt-min-gain"));
         else if (a == "--adapt-async") o.adapt_async = std::atoi(next("--adapt-async")) != 0 ? 1 : 0;
         else if (a == "--spec-min-p") o.spec_min_p = std::atof(next("--spec-min-p"));
@@ -2059,7 +2066,7 @@ int main(int argc, char** argv) {
             if (!parse_i64_list(next("--eos-ids"), o.eos_ids, e)) { std::fprintf(stderr, "--eos-ids: %s\n", e.c_str()); return 2; }
             o.stop_eos = true;
         }
-        else if (a == "--adapt-swaps") o.adapt_swaps = std::atoi(next("--adapt-swaps"));
+        else if (a == "--adapt-swaps") { o.adapt_swaps = std::atoi(next("--adapt-swaps")); o.adapt_given = true; }
         else if (a == "--expert-cache-cpu-order") o.expert_cache_cpu_order = true;
         else if (a == "--expert-cache-per-layer") o.expert_cache_per_layer = true;
         else if (a == "--peer-device") o.peer_device = std::atoi(next("--peer-device"));
@@ -2286,6 +2293,13 @@ int main(int argc, char** argv) {
     } else if (o.low_ram == 1 && !o.mmap_experts) {
         std::fprintf(stderr, "strata generate: --low-ram needs one GPU and an --expert-profile (and no shared arena)\n");
         return 2;
+    }
+    // the adaptive tier's faster settings were measured with every expert in RAM; with a RAM tier a swap can read
+    // an expert from the drive (a 64 GB run: the tier's host time 1.4 -> 2.7 ms a round, the round no shorter)
+    if (o.resident_cpu_experts && !o.adapt_given) {
+        o.adapt_every = 4;
+        o.adapt_swaps = 96;
+        o.adapt_decay = 0.7f;
     }
     if (o.mmap_experts && !o.shared_expert_arena.empty()) {
         std::fprintf(stderr, "strata generate: --shared-expert-arena backs the resident arena and cannot be used with --mmap-experts\n");
