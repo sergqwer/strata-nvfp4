@@ -458,9 +458,8 @@ def expert_layout(model: Model, src: pathlib.Path):
             # no room for. Each blob gets a 16-byte tail {s_gate, s_up, s_down, 0} so every consumer that already
             # moves whole blobs (the arena, the device cache, the prefill staging, a second GPU) moves the scales
             # with the weights; the gate/up kernels read it. See tools/nvfp4_convert.py.
-            if ts[0].type_name != "NVFP4" or ts[2].type_name != "NVFP4":
-                return "layer %d: NVFP4 must cover gate, up and down alike" % l
-            if any("blk.%d.ffn_%s_exps.scale" % (l, r) not in T for r in ROLES):
+            # a mixed expert (e.g. NVFP4 gate/up + Q8_0 down) has the tail too, with 1.0 for the other projection
+            if any(t.type_name == "NVFP4" and "blk.%d.ffn_%s_exps.scale" % (l, r) not in T for t, r in zip(ts, ROLES)):
                 return "layer %d: NVFP4 experts without their .scale tensors" % l
             blob += NVFP4_TAIL
         layout.append((l, ts[0].type_id, ts[2].type_id, offset, blob, ts))
@@ -538,7 +537,7 @@ def main() -> int:
         print(got)
         return 1
     layout, text, n_expert, offset = got
-    if any(ts[0].type_name == "NVFP4" for *_, ts in layout):
+    if any(t.type_name == "NVFP4" for *_, ts in layout for t in ts):
         a.experts_bin = True   # the GGUF holds the weights without the scale tails: the engine must read experts.bin
     path = out / "experts.bin"
     sidecar = out / "experts.bin.src.json"
@@ -546,8 +545,10 @@ def main() -> int:
     reuse = path.exists() and path.stat().st_size == offset and read_json(sidecar) == want
 
     def nvfp4_tails(l, ts):
-        """(n_expert, NVFP4_TAIL) bytes {s_gate, s_up, s_down, 0} of an NVFP4 layer; None for a bad scale."""
-        s = [np.frombuffer(model.bytes("blk.%d.ffn_%s_exps.scale" % (l, r)).tobytes(), dtype=np.float32) for r in ROLES]
+        """(n_expert, NVFP4_TAIL) bytes {s_gate, s_up, s_down, 0} of a layer with an NVFP4 projection; a projection in
+        another format gets exactly 1.0 (the engine multiplies by the tail unconditionally). None for a bad scale."""
+        s = [np.frombuffer(model.bytes("blk.%d.ffn_%s_exps.scale" % (l, r)).tobytes(), dtype=np.float32)
+             if t.type_name == "NVFP4" else np.ones(n_expert, dtype=np.float32) for t, r in zip(ts, ROLES)]
         tail = np.zeros((n_expert, NVFP4_TAIL // 4), dtype=np.float32)
         tail[:, 0], tail[:, 1], tail[:, 2] = s[0], s[1], s[2]
         if not np.isfinite(tail).all() or (tail[:, :3] <= 0).any():
@@ -558,7 +559,7 @@ def main() -> int:
     def layer_blobs(l, blob, ts):
         """(n_expert, blob): gate | up | down [| the NVFP4 scale tail] per expert; None for a bad NVFP4 scale."""
         parts = [model.bytes(t.name).reshape(n_expert, -1) for t in ts]
-        if ts[0].type_name == "NVFP4":
+        if any(t.type_name == "NVFP4" for t in ts):
             tail = nvfp4_tails(l, ts)
             if tail is None:
                 return None
@@ -576,7 +577,7 @@ def main() -> int:
                 for e in (0, n_expert - 1):
                     f.seek(off + e * blob)
                     want_blob = b"".join(model.bytes(t.name).reshape(n_expert, -1)[e].tobytes() for t in ts)
-                    if ts[0].type_name == "NVFP4":
+                    if any(t.type_name == "NVFP4" for t in ts):
                         tail = nvfp4_tails(l, ts)
                         want_blob += tail[e].tobytes() if tail is not None else b""
                     if f.read(blob) != want_blob:
