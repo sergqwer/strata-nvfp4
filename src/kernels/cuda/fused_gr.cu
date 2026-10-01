@@ -1681,8 +1681,11 @@ bool fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
         }
         return q8;
     }
-    // STRATA_GR_V3=1: the two-kernel read above (another summation order - opt-in)
-    static const bool v3 = [] { const char* v = std::getenv("STRATA_GR_V3"); return v != nullptr && std::atoi(v) != 0; }();
+    // the two-kernel read above: on by default in this fork (upstream: opt-in, STRATA_GR_V3=1), STRATA_GR_V3=0 the
+    // default kernels.  The same maths in another summation order, deterministic: RTX 5090, NVFP4 pack, a decode round
+    // 3-5% shorter (41 blocks of `down` on 170 SMs became 164; the norm kernel's ~16 us of latency is gone), and with
+    // the adaptive tier off the same 205 greedy tokens before a near-tie goes the other way
+    static const bool v3 = [] { const char* v = std::getenv("STRATA_GR_V3"); return v == nullptr || std::atoi(v) != 0; }();
     static int split3[64] = {};   // per device: 0 = not decided yet, 1 / 2 = column halves S, -1 = does not fit
     int dev3 = 0;
     if (v3) {
