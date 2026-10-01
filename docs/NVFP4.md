@@ -359,7 +359,60 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### On upstream 0.1.32 (2026-10-01, release 0.1.32-nvfp4.1)
+
+Upstream released 0.1.32 with this fork's first wave of pull requests in it. The maintainer applied them by hand, under our name, and made some of them opt-in. The fork was rebuilt on 0.1.32 the same way as on 0.1.31:
+
+- **Taken upstream and dropped from the fork's commits:** #276-#278, #280-#284, #287-#291, #293, and the fork's fixes from the review of those, which upstream made in its own form.
+  - **#284:** the commit wait is an event at every point that touches the session.
+  - **#280:** the table is forgotten when a session is freed.
+  - **#289:** a placeholder name when the device query fails, and HIP builds.
+- **Opt-in upstream, on in the fork,** as every 0.1.31-nvfp4.x ran:
+
+| | upstream 0.1.32 | this fork | the switch |
+| --- | --- | --- | --- |
+| INT8 K/V through the Hadamard rotation (#293) | off | on | `STRATA_KV_ROT=0` / `=1` |
+| the float64 RoPE angle table (#280) | off | on | `STRATA_ROPE_TABLE=0` / `=1` |
+| the prompt path's BF16 remainder (#283) | 0 | 2 | `STRATA_PREFILL_BF16X2` |
+| `--prefill auto`'s largest chunk (#282) | 8192 | 32768 | `--prefill auto:N`, `STRATA_PREFILL_AUTO_MAX` |
+| an Anthropic request that does not ask for thinking (#278) | thinks | does not | the config's `"anthropic_thinking"`: `"model"` / `"on_request"` (the bundle's config sets `on_request`) |
+
+- **Carried as before:** the pull requests still open, each rebased on 0.1.32. They are NVFP4 (#353), the start (#357, #358), the file tier (#362), the VRAM reserve (#279), the group gather (#372), the PLE reads (#374), the elastic K/V (#378), the stager's DMA wait (#385) and the adaptive tier (#407). The fork-only changes stay too: the low-RAM mode, the arena thread, the split hyper-connection kernels and the adaptive tier's settings.
+- **Conflicts:**
+  - **NVFP4 with 0.1.32's UD-Q4_K_XL support.** The K-quant MMQ instances and cases sit beside NVFP4's. `iq_pack`'s `layer_blobs` (#277's version) appends the NVFP4 scale tail, and so does its reuse check. Without the tail an NVFP4 pack never matched its GGUF. Checked on the real pack: an expert blob without the tail differs from experts.bin, and with it equals it.
+  - **The elastic K/V with #340's split buffers and #284's wait.** Both are kept.
+  - **The arena thread with 0.1.32's card check.** The check moves ahead of the thread in its new form (HIP, a placeholder name).
+- **Checks:**
+  - **Same output as upstream.** The fork with its own defaults switched off (`STRATA_KV_ROT=0 STRATA_ROPE_TABLE=0 STRATA_PREFILL_BF16X2=0 STRATA_GR_V3=0 --no-kv-grow --prefill auto:8192`) gives the first token's logits of upstream 0.1.32 + #353 byte for byte, after a 2K and a 32K prompt (fixed cache).
+  - **Every pull request on IQ2_XS.** Each one, rebased, gives main's logits byte for byte at 2K and 32K.
+  - **Tests.** 49 of 52 pass. The 3 others need model files this machine does not have (the Q2_0 PLE, `pack/full`).
+- **The split hyper-connection read.**
+  - 0.1.32 has #315's split and staged variants of the default read. They are bit for bit the plain read and faster than it.
+  - Against this fork's `STRATA_GR_V3` kernels, 6 interleaved chat runs each:
+    - GR_V3: 18.23 +- 0.47 ms a round, the GPU's part 8.4 ms;
+    - staged: 18.49 +- 0.29 ms, 9.3 ms.
+  - GR_V3 stays on.
+- **Against 0.1.31-nvfp4.3**, RTX 5090, 262K, cache auto, interleaved:
+
+| | 0.1.31-nvfp4.3 | 0.1.32-nvfp4.1 |
+| --- | ---: | ---: |
+| a chat answer (~520 tokens, to its end), 6 runs each: ms a round | 18.11 +- 0.65 | 18.23 +- 0.47 |
+| misses a layer / hit rate | 2.44 / 0.920 | 2.43 / 0.920 |
+| a ~1,000-token answer after a 32K prompt, 4 runs each: ms a round / tokens/s | 20.00 +- 0.12 / 131.9 | 19.99 +- 0.23 / 131.8 |
+| reading the 32K prompt | 4,640-4,690 ms | 4,630-4,750 ms |
+| first token's logits and 128 greedy tokens, fixed cache, 2K and 32K | | identical |
+
+- **The earlier "after a 32K prompt" numbers measured the wrong thing.** That prompt asks for three file names, and its answer ends after 22 tokens.
+  - The runs went on to a fixed 256 tokens with no end-of-turn stop, so 0.1.31-nvfp4.3's 161-173 tokens/s were mostly the loop after the answer.
+  - The same holds for half of the 1,000-token runs behind the adaptive tier's numbers below.
+  - `bench-tools/eot_share.py` reports how much of a run came after the first end-of-turn. Runs now pass `--stop-eos`, and the 32K test asks for a long explanation (`long_32k_explain.txt`).
+
 ### The adaptive VRAM tier and an audit (2026-10-01, release 0.1.31-nvfp4.3)
+
+> **Caveat (found with 0.1.32):** the engine runs below decoded a fixed number of tokens with no end-of-turn stop,
+> and about half of each 1,000-token run came after the answer had ended. There the model loops over a few experts,
+> which lifts the hit rate and the tokens per second in both arms. The misses' reduction on an answer alone is not
+> re-measured.
 
 **The tier's settings.** The adaptive tier swaps the most-routed missing experts into VRAM in place of the
 least-routed resident ones, from routing counts that fade after each pass.
