@@ -1,0 +1,19 @@
+Third-party components in this bundle
+=====================================
+
+Strata (engine\strata.exe, serve\, tools\, data\)
+  https://github.com/Niko1221/Strata - MIT License, Copyright (c) 2026 Niko1221 and the Strata contributors.
+  NVFP4 fork: https://github.com/sergqwer/strata-nvfp4 - same license. See LICENSE.
+
+llama.cpp / ggml (compiled into engine\strata.exe; third_party\llama.cpp\ convert_hf_to_gguf.py, conversion\,
+gguf-py\ at commit 3cf03257f219afbe7334045ff7c6a06ac68c627d)
+  https://github.com/ggml-org/llama.cpp - MIT License, Copyright (c) 2023-2026 The ggml authors.
+  See third_party\llama.cpp\LICENSE.
+
+NVIDIA CUDA runtime (statically linked) and cuBLAS (engine\cublas64_13.dll, engine\cublasLt64_13.dll), CUDA 13.3
+  Redistributed unmodified under the NVIDIA CUDA Toolkit End User License Agreement, which lists these libraries
+  as redistributable: https://docs.nvidia.com/cuda/eula/
+  Copyright (c) NVIDIA Corporation. All rights reserved.
+
+Model weights are NOT included. prepare-model.cmd downloads them from Hugging Face under their own license:
+  jpezzulli/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-ModelOpt-NVFP4
