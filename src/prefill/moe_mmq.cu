@@ -38,21 +38,26 @@ __global__ void copy16_kernel(const uint4* __restrict__ a, int64_t na, const uin
     else if (i < n + 2 * nz) c_dst[nc + (i - n - nz)] = make_uint4(0, 0, 0, 0);
     else if (i == n + 2 * nz && tail != nullptr) *tail_dst = *tail;
 }
-// copy16_kernel for an MMQ group: blockIdx.y is the expert (first + y)
+// copy16_kernel for an MMQ group: blockIdx.y is the expert (first + y); the last one (n - 1) also zeroes nz uint4
+// after its gu and d slots, and each copies its NVFP4 tail (tail_off, in uint4; tail_dst null = none)
 struct GroupArgs {
     const uint8_t* blob[kGatherGroupMax];
-    int64_t up_off, down_off, gu_stride, d_stride;   // in uint4
+    int64_t up_off, down_off, gu_stride, d_stride, tail_off;   // in uint4
 };
-__global__ void copy16_group_kernel(GroupArgs ga, int first, int64_t na, int64_t nc, uint4* __restrict__ gu_dst,
-                                    uint4* __restrict__ d_dst) {
+__global__ void copy16_group_kernel(GroupArgs ga, int first, int n, int64_t na, int64_t nc, int64_t nz,
+                                    uint4* __restrict__ gu_dst, uint4* __restrict__ d_dst, uint4* __restrict__ tail_dst) {
     const int q = first + (int) blockIdx.y;
     const uint4* src = (const uint4*) ga.blob[q];
     uint4* ab = gu_dst + (int64_t) q * ga.gu_stride;
     uint4* cd = d_dst + (int64_t) q * ga.d_stride;
     const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t m = 2 * na + nc;
     if (i < na) ab[i] = src[i];
     else if (i < 2 * na) ab[i] = src[ga.up_off + (i - na)];
-    else if (i < 2 * na + nc) cd[i - 2 * na] = src[ga.down_off + (i - 2 * na)];
+    else if (i < m) cd[i - 2 * na] = src[ga.down_off + (i - 2 * na)];
+    else if (i < m + nz) { if (q == n - 1) ab[ga.gu_stride + (i - m)] = make_uint4(0, 0, 0, 0); }
+    else if (i < m + 2 * nz) { if (q == n - 1) cd[ga.d_stride + (i - m - nz)] = make_uint4(0, 0, 0, 0); }
+    else if (i == m + 2 * nz && tail_dst != nullptr) tail_dst[q] = src[ga.tail_off];
 }
 __global__ void copy1_kernel(const uint8_t* __restrict__ a, int64_t na, const uint8_t* __restrict__ b, int64_t nb,
                              uint8_t* __restrict__ ab_dst, const uint8_t* __restrict__ c, int64_t nc, uint8_t* __restrict__ c_dst) {
@@ -374,9 +379,12 @@ void gather_native(const void* gate, const void* up, size_t gu_half_bytes, const
 }
 
 bool gather_native_group(const GatherGroup& g, size_t up_off, size_t gu_half_bytes, size_t down_off, size_t d_bytes,
-                         void* gu_dst, size_t gu_stride, void* d_dst, size_t d_stride, void* stream) {
+                         void* gu_dst, size_t gu_stride, void* d_dst, size_t d_stride, void* stream, size_t tail_off,
+                         void* tail_dst, size_t zero_bytes) {
     if (g.first < 0 || g.n <= g.first || g.n > kGatherGroupMax) return false;
-    uintptr_t a = (uintptr_t) gu_dst | (uintptr_t) d_dst | up_off | gu_half_bytes | down_off | d_bytes | gu_stride | d_stride;
+    if (tail_off == 0) tail_dst = nullptr;
+    uintptr_t a = (uintptr_t) gu_dst | (uintptr_t) d_dst | up_off | gu_half_bytes | down_off | d_bytes | gu_stride | d_stride |
+                  tail_off | (uintptr_t) tail_dst | zero_bytes;
     for (int q = g.first; q < g.n; ++q) a |= (uintptr_t) g.blob[q];
     if (a % 16 != 0) return false;
     GroupArgs ga{};
@@ -385,9 +393,11 @@ bool gather_native_group(const GatherGroup& g, size_t up_off, size_t gu_half_byt
     ga.down_off = (int64_t) down_off / 16;
     ga.gu_stride = (int64_t) gu_stride / 16;
     ga.d_stride = (int64_t) d_stride / 16;
-    const int64_t na = (int64_t) gu_half_bytes / 16, nc = (int64_t) d_bytes / 16;
-    copy16_group_kernel<<<dim3(blocks(2 * na + nc), (unsigned) (g.n - g.first)), 256, 0, (cudaStream_t) stream>>>(
-        ga, g.first, na, nc, (uint4*) gu_dst, (uint4*) d_dst);
+    ga.tail_off = (int64_t) tail_off / 16;
+    const int64_t na = (int64_t) gu_half_bytes / 16, nc = (int64_t) d_bytes / 16, nz = (int64_t) zero_bytes / 16;
+    const int64_t work = 2 * na + nc + 2 * nz + (tail_dst != nullptr ? 1 : 0);
+    copy16_group_kernel<<<dim3(blocks(work), (unsigned) (g.n - g.first)), 256, 0, (cudaStream_t) stream>>>(
+        ga, g.first, g.n, na, nc, nz, (uint4*) gu_dst, (uint4*) d_dst, (uint4*) tail_dst);
     ck(cudaGetLastError(), "gather_native_group");
     return true;
 }
