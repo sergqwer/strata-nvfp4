@@ -66,14 +66,15 @@ upstream's; the original README is kept as [README.upstream.md](README.upstream.
   - The result is 73.8 GiB of experts instead of 63.3 GiB. Against an all-Q8_0 reference, the answers' KL is half of the ModelOpt pack's, about 2.6x less once run-to-run noise is taken out, for 12-15% of the decode speed.
   - GPTQ alone, without the 8-bit layers, is 1.7x closer at no speed cost.
   - docs/NVFP4.md, "Re-quantized from BF16", has the method and every measurement.
-- **On upstream Strata 0.1.36.** Since 0.1.35 upstream added:
+- **On upstream Strata 0.1.37.** Since 0.1.35 upstream added:
   - fused int8 prompt kernels for its Q2_0 pack (on by default) and the IQ packs (opt-in);
   - decode kernels on thread-block clusters on RTX 50 cards, with the same output;
-  - `UPDATE.bat`, and an opt-in memory of the experts a user's work reads (`--expert-profile-save`).
+  - a server that restarts an engine gone silent (#481);
+  - `UPDATE.bat`, an opt-in memory of the experts a user's work reads (`--expert-profile-save`), and setup fixes.
 
-  NVFP4 layers keep the MMQ prompt path: the fused kernels do not cover NVFP4. The open pull requests (#353, #372 and
-  #407 rebased on 0.1.36) are carried here. Against 0.1.35-nvfp4.1, with the same expert cache, the first token's
-  logits and the greedy tokens are identical on both packs, and the speed is the same.
+  NVFP4 layers keep the MMQ prompt path: the fused kernels do not cover NVFP4. The open pull requests are carried here
+  (#279 and #353 rebased on 0.1.37). Against 0.1.36-nvfp4.1, with the same expert cache, the first token's logits and
+  the greedy tokens are identical on both packs, and the speed is the same.
 
 Each change was measured - first-token KL against a reference, and interleaved speed A/B runs;
 [docs/NVFP4.md](docs/NVFP4.md) has the numbers, and everything that was tried and dropped.
