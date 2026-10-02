@@ -1711,7 +1711,15 @@ int main(int argc, char** argv) {
         else if (a == "--mtp-window") o.mtp_window = std::atoll(next("--mtp-window"));
         else if (a == "--pcie-frac") o.pcie_frac = std::atof(next("--pcie-frac"));
         else if (a == "--adapt-every") { o.adapt_every = std::atoi(next("--adapt-every")); o.adapt_given = true; }
-        else if (a == "--adapt-decay") { o.adapt_decay = (float) std::atof(next("--adapt-decay")); o.adapt_given = true; }
+        else if (a == "--adapt-decay") {
+            o.adapt_decay = (float) std::atof(next("--adapt-decay"));
+            o.adapt_given = true;
+            // at 1 or more the usage counts grow without end and the swap gains turn NaN
+            if (!(o.adapt_decay > 0.0f && o.adapt_decay < 1.0f)) {
+                std::fprintf(stderr, "--adapt-decay must be between 0 and 1 (exclusive)\n");
+                return 2;
+            }
+        }
         else if (a == "--adapt-async") o.adapt_async = std::atoi(next("--adapt-async")) != 0 ? 1 : 0;
         else if (a == "--spec-min-p") o.spec_min_p = std::atof(next("--spec-min-p"));
         else if (a == "--stop-eos") o.stop_eos = true;
@@ -5346,7 +5354,21 @@ int main(int argc, char** argv) {
     auto kvg_start = [&](int64_t top) {
         kvg.on = strata::core::qsa_kv_elastic() && xcache.vmm_range() != nullptr && d_res != nullptr &&
                  !host_res.empty() && srcp != nullptr && top > kvg.floor;
-        if (!kvg.on) return;
+        if (!kvg.on) {
+            // The K/V was made elastic at session init, but this run cannot lend it cache slots (no device residency
+            // table, no slots, a loan at the floor): map the whole window now, from new memory, or the pools keep only
+            // their first cells and a longer prompt writes past them.
+            if (strata::core::qsa_kv_elastic() && strata::core::qsa_kv_elastic_cells() < o.max_context) {
+                if (!strata::core::qsa_kv_elastic_grow(o.max_context, []() -> strata::core::VmmChunk { return 0; })) {
+                    std::fprintf(stderr, "strata generate: the K/V cannot hold %lld cells in VRAM; lower --max-context "
+                                         "or start with --no-kv-grow\n", (long long) o.max_context);
+                    std::exit(1);
+                }
+                std::fprintf(stderr, "strata generate: elastic K/V off for this run (no cache slots to lend): the whole "
+                                     "window, %lld cells, mapped up front\n", (long long) o.max_context);
+            }
+            return;
+        }
         kvg.top = kvg.lo = top;
         kvg.cells = strata::core::qsa_kv_elastic_cells();
         if (const char* v = std::getenv("STRATA_KV_GROW_STEP"); v != nullptr && std::atoll(v) > 0) kvg.step = std::atoll(v);
@@ -5438,7 +5460,7 @@ int main(int argc, char** argv) {
                     if (const strata::core::VmmChunk h = r.unmap(c)) kvg.spare.push_back(h);
         }
         if (gave > 0 &&
-            cudaMemcpy(d_res, host_res.data(), host_res.size() * sizeof(int32_t), cudaMemcpyHostToDevice) != cudaSuccess) {
+            (cudaMemcpy(d_res, host_res.data(), host_res.size() * sizeof(int32_t), cudaMemcpyHostToDevice) != cudaSuccess || cudaStreamSynchronize(cudaStreamLegacy) != cudaSuccess)) {
             std::fprintf(stderr, "strata: the residency table upload failed: %s\n", cudaGetErrorString(cudaGetLastError()));
             return false;
         }
@@ -5520,7 +5542,7 @@ int main(int argc, char** argv) {
         }
         for (const auto& [i, s] : filled) host_res[i] = s;
         kvg.refilled += (int64_t) filled.size();
-        if (cudaMemcpy(d_res, host_res.data(), host_res.size() * sizeof(int32_t), cudaMemcpyHostToDevice) != cudaSuccess)
+        if ((cudaMemcpy(d_res, host_res.data(), host_res.size() * sizeof(int32_t), cudaMemcpyHostToDevice) != cudaSuccess || cudaStreamSynchronize(cudaStreamLegacy) != cudaSuccess))
             return false;
         for (const strata::core::VmmChunk h : kvg.spare) strata::core::vmm_chunk_free(h);   // new ones, if any
         kvg.spare.clear();
