@@ -359,6 +359,23 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### On upstream 0.1.35 (2026-10-02, release 0.1.35-nvfp4.1)
+
+The fork was rebuilt on upstream 0.1.35 the same way: the open pull requests and the fork's commits on top of v0.1.35.
+
+- **Upstream since 0.1.32:** #379 is in 0.1.33.
+- **Conflicts:**
+  - **#420's MMQ tile check beside NVFP4.** It finds llama.cpp's NVFP4 MMQ config, so NVFP4 keeps its prompt path (no #420 message on the 5090).
+  - **#369's per-layer cache admission beside #362's read-ahead.** The read-ahead only runs without it: that walk visits the whole profile.
+  - **0.1.35's card check, which also names the loaded HIP runtime (#468).** It moved ahead of the arena thread.
+  - **#375 and #379 in `gr_parity` / `fused_gr`.** GR_V3 stays on by default here, and Turing keeps upstream's split rule.
+- **The low-RAM mode** goes through `pin_cache_complement`, so it gets #467's working-set trim: 110 GiB available on the 128 GB box before the budget is pinned.
+- **Checks:**
+  - Against 0.1.32-nvfp4.2 at a fixed cache, the first token's logits and 32 greedy tokens are identical after a 2K and a 32K prompt, with the ModelOpt pack and with the GPTQ + Q8_0-down pack.
+  - With the fork's own defaults off, the logits equal upstream 0.1.35 + #353 byte for byte.
+  - 50 of 53 tests pass; the other 3 need model files this machine does not have.
+- **Speed** with the GPTQ + Q8_0-down pack, 4 interleaved chats each: 17.84 +- 0.27 ms a round, against 18.35 +- 1.10 for 0.1.32-nvfp4.2.
+
 ### Re-quantized from BF16 (2026-10-02, release 0.1.32-nvfp4.2)
 
 The shipped experts are ModelOpt's NVFP4: each 16-value block is scaled to its largest value and every weight rounded
