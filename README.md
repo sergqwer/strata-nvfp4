@@ -56,6 +56,8 @@ upstream's; the original README is kept as [README.upstream.md](README.upstream.
   RAM, so the expert cache keeps all its VRAM and text decodes as fast as without images; a picture takes 2-6 s.
   Upstream's GPU encoder took ~1.6 GB of VRAM (~600 cached experts, 10-20% of decode speed in served runs here) and, measured
   against an FP32 reference, was up to 11% off (ggml-cuda's FP16 flash attention); this one is 0.1% off.
+  A picture an agent opens itself (Claude Code's `Read`) reaches the encoder too: it arrives inside a tool result,
+  which the server used to turn into text only (fixed here, sent upstream as #529).
 - **Fixes:** a scale fold that left NVFP4 hidden activations in FP16's subnormals (2-12% expert error), and the
   batched verify path skipping the query rotation of rotated KV caches.
 - **A more accurate experts pack, re-quantized from the BF16 checkpoint** (optional, `tools/requant.py`):
@@ -64,17 +66,14 @@ upstream's; the original README is kept as [README.upstream.md](README.upstream.
   - The result is 73.8 GiB of experts instead of 63.3 GiB. Against an all-Q8_0 reference, the answers' KL is half of the ModelOpt pack's, about 2.6x less once run-to-run noise is taken out, for 12-15% of the decode speed.
   - GPTQ alone, without the 8-bit layers, is 1.7x closer at no speed cost.
   - docs/NVFP4.md, "Re-quantized from BF16", has the method and every measurement.
-- **On upstream Strata 0.1.35.** Since 0.1.32 upstream added:
-  - AMD on Windows;
-  - the low-RAM resident mode on 32 GB PCs (the fork's low-RAM mode now trims the working set the same way);
-  - a prompt-path fallback when MMQ has no tile for a GPU;
-  - request cancellation when a client hangs up;
-  - an MCP server for setting Strata up;
-  - per-request draft counts in /metrics.
+- **On upstream Strata 0.1.36.** Since 0.1.35 upstream added:
+  - fused int8 prompt kernels for its Q2_0 pack (on by default) and the IQ packs (opt-in);
+  - decode kernels on thread-block clusters on RTX 50 cards, with the same output;
+  - `UPDATE.bat`, and an opt-in memory of the experts a user's work reads (`--expert-profile-save`).
 
-  0.1.33 took #379; the rest is carried as pull requests (#353 and #362 rebased on 0.1.35). Against 0.1.32-nvfp4.2,
-  with the same expert cache, the first token's logits and the greedy tokens are identical on both packs, and the
-  speed is the same.
+  NVFP4 layers keep the MMQ prompt path: the fused kernels do not cover NVFP4. The open pull requests (#353, #372 and
+  #407 rebased on 0.1.36) are carried here. Against 0.1.35-nvfp4.1, with the same expert cache, the first token's
+  logits and the greedy tokens are identical on both packs, and the speed is the same.
 
 Each change was measured - first-token KL against a reference, and interleaved speed A/B runs;
 [docs/NVFP4.md](docs/NVFP4.md) has the numbers, and everything that was tried and dropped.
