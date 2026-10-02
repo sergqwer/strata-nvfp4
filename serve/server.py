@@ -2223,24 +2223,30 @@ class ByteTokenizer:
     SPECIALS = ["<|im_start|>", "<|im_end|>", "<|endoftext|>", "<|vision_start|>", "<|image_pad|>", "<|vision_end|>"]
 
     ALWAYS = ()                                     # specials matched without parse_special (type 4, as <think>)
+    max_special_len = max(len(s) for s in SPECIALS)
 
     @property
     def control_tokens(self):
         return [s for s in self.SPECIALS if s not in self.ALWAYS]
 
     def encode(self, text, parse_special=False, plain=()):
-        out, i = [], 0
+        return self.encode_marked(text, parse_special, plain)[0]
+
+    def encode_marked(self, text, parse_special=False, plain=()):
+        """encode() and its resume points (after each special), as strata_tokenizer's for PromptEncoder."""
+        out, marks, i = [], [], 0
         while i < len(text):
             for k, s in enumerate(self.SPECIALS):
                 if (parse_special or s in self.ALWAYS) and text.startswith(s, i) and not any(
                         a <= i < b for a, b in plain):
                     out.append(256 + k)
                     i += len(s)
+                    marks.append((i, len(out)))
                     break
             else:
                 out.extend(text[i].encode("utf-8"))
                 i += 1
-        return out
+        return out, marks
 
     def decode(self, ids, errors="replace"):
         raw = bytearray()
@@ -2449,6 +2455,18 @@ class Service:
         self.tool_call_recovery = False                   # opt-in: tool calls in forms next to the template's
         self.stop_ids = set(tokenizer.encode(IM_END, parse_special=True) +
                             tokenizer.encode("<|endoftext|>", parse_special=True))
+        # A prompt re-encodes only what follows the last special token it shares with a recent prompt (the same ids
+        # as a full encode: tools/strata_tokenizer.py PromptEncoder).  Tokenizers without resume points encode in full.
+        self.prompts = None
+        if hasattr(tokenizer, "encode_marked"):
+            from strata_tokenizer import PromptEncoder
+            self.prompts = PromptEncoder(tokenizer)
+
+    def encode_rendered(self, prompt: str) -> list[int]:
+        """#567: a rendered prompt's ids, from the last shared prefix (the same ids as a full encode)."""
+        if self.prompts is None:
+            return self.tok.encode(prompt, parse_special=True)
+        return self.prompts.encode(prompt)
 
     def loaded(self) -> bool:
         return not hasattr(self.engine, "alive") or self.engine.alive()
@@ -2961,7 +2979,7 @@ class Service:
         marked, marked_tools, changed = mark_think_literals(messages, tools, self.literals)
         prompt = self.render_prompt(marked, marked_tools, kwargs)
         if not changed:
-            return self.tok.encode(prompt, parse_special=True)
+            return self.encode_rendered(prompt)            # #567
         prompt, plain = unmark_think_literals(prompt, self.literals)
         return self.tok.encode(prompt, parse_special=True, plain=plain)
 
