@@ -1211,9 +1211,16 @@ void mem_mark(const char* where) {
     std::fprintf(stderr, "strata trace: %lld MiB free after %s\n", (long long) (free_b >> 20), where);
 }
 
-/// #463's A/B: STRATA_ADAPT_NOWAIT=1 lets a verify window start before the adaptive tier's copies have landed (0.1.37)
+/// #463: whether a verify window starts before the adaptive tier's copies have landed.  Upstream waits (since 0.1.38;
+/// STRATA_ADAPT_NOWAIT=1 for the A/B).  The fork does not by default: with its tier (up to 192 swaps every 2 rounds) the
+/// wait cost ~5% of decode (18.38 against 19.32 ms a round, 4 pairs), though the hit rate rose 0.898 -> 0.906.
+/// STRATA_ADAPT_WAIT=1 waits as upstream does (greedy decode then repeats exactly), with its STRATA_ADAPT_LAG.
 bool adapt_nowait() {
-    static const bool v = [] { const char* e = std::getenv("STRATA_ADAPT_NOWAIT"); return e && e[0] == '1'; }();
+    static const bool v = [] {
+        if (const char* w = std::getenv("STRATA_ADAPT_WAIT"); w != nullptr && w[0] == '1') return false;
+        const char* e = std::getenv("STRATA_ADAPT_NOWAIT");
+        return e == nullptr || e[0] != '0';
+    }();
     return v;
 }
 
