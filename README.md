@@ -76,6 +76,11 @@ upstream's; the original README is kept as [README.upstream.md](README.upstream.
   (#279 and #353 rebased on 0.1.37). Against 0.1.36-nvfp4.1, with the same expert cache, the first token's logits and
   the greedy tokens are identical on both packs, and the speed is the same.
 
+- **Fixes from a code review (0.1.37-nvfp4.2):** the prompt path borrows 1.25 GiB less VRAM at a 32K chunk; the
+  elastic K/V no longer runs past its mapped cells when it cannot lend slots; pictures Claude Code reads that the
+  server cannot read become a note instead of a 400; safer image sources. Each upstream bug went up as a pull
+  request (#546, #547, #550, #553, #554, #555); docs/NVFP4.md has the list.
+
 Each change was measured - first-token KL against a reference, and interleaved speed A/B runs;
 [docs/NVFP4.md](docs/NVFP4.md) has the numbers, and everything that was tried and dropped.
 

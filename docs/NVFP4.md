@@ -359,6 +359,42 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### Fixes from a code review (2026-10-03, release 0.1.37-nvfp4.2)
+
+Three read-only reviews (the prompt path; VRAM/RAM tiers; decode, converters and the server) found these; each was
+checked against the code before it was fixed, and each upstream bug went upstream as its own pull request.
+
+- **The prompt path borrowed 1.25 GiB too much at a 32K chunk** (upstream, #547). `bytes_needed` counted a buffer
+  `carve` allocates only under `STRATA_GR_UNFUSED=1` and missed another: 40,944 bytes a token. On IQ2_XS at 8K chunks
+  the loan went from 3,340 to 3,108 slots with byte-identical logits; at this fork's 32K chunk it is 1.25 GiB.
+- **`STRATA_PF_FUSED=1` wrote past its buffers on mixed native packs** (upstream, #546): the fused layout's smaller
+  MoE buffers were chosen when any layer was fused, while uncovered layers ran MMQ or FP16 over every row. On the
+  shipped IQ2_XS pack (three IQ1_M layers) a 32K prompt's first token was KL 3.79 off with a different top token;
+  fixed, 0.0036. NVFP4 packs never took that layout.
+- **Residency-table uploads were unordered** (upstream, #550): plain pageable copies, read by non-blocking streams.
+  They now wait for their own copy.
+- **The elastic K/V could stop at 16,384 cells** (fork and #378): with no cache slots to lend (`--no-pool`,
+  `--no-token-graph`, the dump modes, a cache of 0 slots) a longer prompt wrote K/V into unmapped memory - reproduced
+  as an illegal address on a 32K prompt. Such a run now maps the whole window up front.
+- **`--adapt-decay` of 1 or more** made the swap gains NaN; it is refused now (fork and #407).
+- **The early cuBLAS handle** (#285's part 3, fork only) went to the first Gemm on any device; under a layer split a
+  stage on another GPU got device 0's handle. It now stays on its device.
+- **A picture a tool returned that the server cannot read** gave a 400 on every later turn of a Claude Code
+  conversation (this fork's own change, #529); it becomes a note in its place.
+- **The server's image path** (upstream #553, #554, #555): network (UNC) image paths are refused before Windows
+  connects to them, URLs are capped at 32 MiB and fetched outside the request FIFO, a page of another origin cannot
+  have a local file read; marker text inside a message no longer takes a picture's place; a refused request's image
+  file is deleted.
+- **`STRATA_ADAPT_WAIT=1`** (upstream #463, opt-in here): each decode window waits for the adaptive tier's copies,
+  so greedy decode repeats exactly (3 of 3 runs identical, against 2 different outputs without); off by default
+  because with this fork's tier it cost ~5% of decode.
+- **`tools/requant.py`** checks the checkpoint's tensor shapes: a transposed one has the same byte count.
+- **Checks** (against 0.1.37-nvfp4.1's references, fixed cache): logits and 32 greedy tokens identical after 2K on
+  both packs; after 32K the GPTQ + Q8_0-down pack's first-token logits moved by KL 0.0003 (same top token, the same
+  32 tokens) - the prompt path now borrows 1.25 GiB fewer cache slots. With the fork's defaults off the logits equal
+  upstream 0.1.37 + #353 byte for byte. 54 of 57 tests (3 need absent model files), serve 180 OK.
+- **Speed**, 5 interleaved chats: 18.97 +- 0.33 ms a round against 19.22 +- 0.87 for 0.1.37-nvfp4.1.
+
 ### On upstream 0.1.37 (2026-10-02, release 0.1.37-nvfp4.1)
 
 The fork was moved to upstream 0.1.37 the same evening, with the port scripts (D:\Projects\Strata-data\port-fork.md on the build machine): the fork's commits rebased with `rerere`.
