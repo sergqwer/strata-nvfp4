@@ -51,10 +51,15 @@ class Bf16:
     def layer(self, l, dev):
         """gate_up [512, 1280, 2560] (gate rows first), down [512, 2560, 640], as bfloat16 on `dev`."""
         out = []
-        for name in ("gate_up_proj", "down_proj"):
+        for name, shape in (("gate_up_proj", (512, 1280, 2560)), ("down_proj", (512, 2560, 640))):
             k = "model.language_model.layers.%d.mlp.experts.%s" % (l, name)
             with safe_open(self.d / self.idx[k], "pt") as f:
-                out.append(f.get_tensor(k).to(dev))
+                t = f.get_tensor(k)
+            # a transposed checkpoint has the same byte count (2560 x 720 = 1280 x 1440), so RTN or an all-Q8_0 plan
+            # would write a wrong-layout pack that passes the engine's blob-size check
+            if tuple(t.shape) != shape:
+                raise SystemExit("%s: shape %s, expected %s (a transposed or different checkpoint?)" % (k, tuple(t.shape), shape))
+            out.append(t.to(dev))
         return out
 
 

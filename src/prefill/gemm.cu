@@ -348,14 +348,18 @@ bool try_hipblaslt(void* opaque_state, strata::prefill::hipblaslt::InputType typ
 #endif
 
 // #285: the first cublasCreate initialises cuBLAS and cuBLASLt; gemm_prewarm pays that on a thread while the model
-// loads, and the first Gemm takes that handle
+// loads, and the first Gemm on the same device takes that handle.  A handle belongs to the device it was made on: under
+// a layer split the stages' prompt paths start first, on their own devices, and must make their own.
 std::mutex g_prewarm_m;
 std::future<cublasHandle_t> g_prewarm;
+int g_prewarm_dev = -1;
 
 cublasStatus_t create_handle(cublasHandle_t* h) {
+    int dev = -1;
+    (void) cudaGetDevice(&dev);
     {
         std::lock_guard<std::mutex> lock(g_prewarm_m);
-        if (g_prewarm.valid()) {
+        if (g_prewarm.valid() && dev == g_prewarm_dev) {
             *h = g_prewarm.get();   // waits if it is still being made
             if (*h != nullptr) return CUBLAS_STATUS_SUCCESS;
         }
@@ -397,6 +401,7 @@ void gemm_prewarm() {
     if (g_prewarm.valid()) return;
     int dev = 0;
     (void) cudaGetDevice(&dev);
+    g_prewarm_dev = dev;
     g_prewarm = std::async(std::launch::async, [dev]() -> cublasHandle_t {
         (void) cudaSetDevice(dev);
         cublasHandle_t h = nullptr;
