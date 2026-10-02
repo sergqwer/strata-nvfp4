@@ -64,12 +64,17 @@ upstream's; the original README is kept as [README.upstream.md](README.upstream.
   - The result is 73.8 GiB of experts instead of 63.3 GiB. Against an all-Q8_0 reference, the answers' KL is half of the ModelOpt pack's, about 2.6x less once run-to-run noise is taken out, for 12-15% of the decode speed.
   - GPTQ alone, without the 8-bit layers, is 1.7x closer at no speed cost.
   - docs/NVFP4.md, "Re-quantized from BF16", has the method and every measurement.
-- **On upstream Strata 0.1.32.** Upstream added faster layer-split prompts, AMD/RDNA4 work, Unsloth UD-Q4_K_XL in
-  setup, a fix for a subagent evicting its parent's parked conversation, a lazy server start, model aliases and
-  CORS. 0.1.32 took this fork's first wave of pull requests (#276-#293), some of it as opt-ins that the fork keeps
-  on. The rest is carried as rebased pull requests: #353, #357, #358, #362, #372, #374, #378, #379, #385, #407 and
-  #279. Against 0.1.31-nvfp4.3, with the same expert cache, the first token's logits and the greedy tokens are
-  identical, and the speed is the same.
+- **On upstream Strata 0.1.35.** Since 0.1.32 upstream added:
+  - AMD on Windows;
+  - the low-RAM resident mode on 32 GB PCs (the fork's low-RAM mode now trims the working set the same way);
+  - a prompt-path fallback when MMQ has no tile for a GPU;
+  - request cancellation when a client hangs up;
+  - an MCP server for setting Strata up;
+  - per-request draft counts in /metrics.
+
+  0.1.33 took #379; the rest is carried as pull requests (#353 and #362 rebased on 0.1.35). Against 0.1.32-nvfp4.2,
+  with the same expert cache, the first token's logits and the greedy tokens are identical on both packs, and the
+  speed is the same.
 
 Each change was measured - first-token KL against a reference, and interleaved speed A/B runs;
 [docs/NVFP4.md](docs/NVFP4.md) has the numbers, and everything that was tried and dropped.
@@ -207,7 +212,7 @@ build\strata.exe <the usual arguments> --tokens-file data\requant_calib\calib_uk
 .venv\Scripts\python tools\requant.py pack --bf16 models\orca-bf16 --calib calib\d --plan calib\plan_d8_74.json --base packs\orca-nvfp4 --out packs\orca-nvfp4-gptq-q8d
 ```
 
-Then run with `--pack packs\orca-nvfp4-gptq-q8d`. The engine reads mixed expert formats from 0.1.32-nvfp4.2.
+Then run with `--pack packs\orca-nvfp4-gptq-q8d`. The engine reads mixed expert formats from 0.1.32-nvfp4.2 on.
 
 ## Run
 
