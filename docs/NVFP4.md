@@ -359,6 +359,30 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### On upstream 0.1.36 (2026-10-02, release 0.1.36-nvfp4.1)
+
+The fork was rebuilt on upstream 0.1.36 the same way: the open pull requests and the fork's commits on top of v0.1.36.
+
+- **Upstream since 0.1.35:**
+  - fused int8 prompt kernels for Q2_0, on by default, and opt-in ones for the IQ packs (#136);
+  - decode on thread-block clusters on RTX 50, bit-identical;
+  - `UPDATE.bat`, `--expert-profile-save` (#477), clearer cancel and draft-head messages.
+- **NVFP4 and the fused kernels:** the fused kernels cover Q2_0 and the IQ formats only, so an NVFP4 pack's layers keep MMQ, and its buffers stay MMQ-sized (`fused_ring()` is false for it). The combine applies `s_down` only on a layer that ran MMQ.
+- **Conflicts:**
+  - **`prefill.cpp`:** 0.1.36 moved the host grouping into the non-fused branch. The fork's lines are the same there; only their indentation changed (compared with `git diff -w`).
+  - **#372 with the fused path:** a ring slot gathered in a group is released by the group's last event (`used_of`). The fused path records one event per slot, so it now resets `used_of` too. Without that, a fused layer after a grouped MMQ layer could let the issuer wait on an older event and refill a slot the fused kernels still read. This only arises with `STRATA_PF_FUSED=1` on a pack that mixes covered and uncovered layers.
+  - **#477's routing heat beside `--adapt-decay`:** the heat is added before the decay, so it stays proportional to the routing at any decay.
+  - **The no-MMQ stubs** (a build without MMQ, e.g. HIP by default) now match the NVFP4 signatures. Before, such a build would not link.
+- **Images through Claude Code:** a picture opened with Read arrives inside a `tool_result`. The server dropped it there, and the model described an image it had not seen; it now reaches the encoder (sent upstream as #529).
+- **Checks:**
+  - Against 0.1.35-nvfp4.1 at a fixed cache, the first token's logits and 32 greedy tokens are identical after a 2K and a 32K prompt, with the ModelOpt pack and with the GPTQ + Q8_0-down pack.
+  - With the fork's own defaults off, the logits equal upstream 0.1.36 + #353 byte for byte.
+  - 54 of 57 tests pass; the other 3 need model files this machine does not have. The server's tests: 159 OK.
+- **Speed** with the GPTQ + Q8_0-down pack, 7 interleaved chats each:
+  - 18.96 +- 0.95 ms a round, against 18.78 +- 1.03 for 0.1.35-nvfp4.1.
+  - With 0.1.36's cluster kernels off (`STRATA_QSA_CLUSTER=0 STRATA_ARGMAX_MULTI=0`, 4 runs): 18.80 +- 0.79.
+  - The rounds differ run to run (the adaptive tier picks other experts), so only many runs compare.
+
 ### On upstream 0.1.35 (2026-10-02, release 0.1.35-nvfp4.1)
 
 The fork was rebuilt on upstream 0.1.35 the same way: the open pull requests and the fork's commits on top of v0.1.35.
