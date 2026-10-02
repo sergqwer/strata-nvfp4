@@ -359,6 +359,27 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### On upstream 0.1.37 (2026-10-02, release 0.1.37-nvfp4.1)
+
+The fork was moved to upstream 0.1.37 the same evening, with the port scripts (D:\Projects\Strata-data\port-fork.md on the build machine): the fork's commits rebased with `rerere`.
+
+- **Upstream since 0.1.36:**
+  - the server restarts an engine that went silent (#481);
+  - AMD on Windows counts the desktop's VRAM;
+  - a steadier PCIe probe, which changes nothing above 20 GB/s;
+  - setup's `--vram-reserve-mib` (#493) and other setup fixes.
+- **Conflicts:**
+  - #353's NVFP4 PCIe base (0.25) beside the probe's new burst report. `rerere` replayed the resolution made in the PR for the fork's copy of the commit.
+  - #279's Windows minimum (1500 MiB) in setup beside #493: the vision reserve keeps the minimum, and a `--vram-reserve-mib` given to setup still overrides it.
+- **The fork's own change is the same on both bases:** 75 of 75 files, whitespace collapsed (`port_diffcheck.py`).
+- **Checks** (each once; the previous release's logits and tokens are kept as references instead of running it again):
+  - Against 0.1.36-nvfp4.1 at a fixed cache, the first token's logits and 32 greedy tokens are identical: the GPTQ + Q8_0-down pack after 2K and 32K, and the ModelOpt pack after 2K.
+  - With the fork's own defaults off, the logits equal upstream 0.1.37 + #353 byte for byte (32K).
+  - 54 of 57 tests pass; the other 3 need model files this machine does not have. The server's tests: 173 OK.
+  - These checks ran on the release build, whose hash the bundle's engine is compared with.
+- **A flaky upstream test fixed:** `decode_cluster_parity` reported a differing token in 0-2 of its 6 graph replays, from run to run. The graph ran on a non-blocking stream right after pageable uploads, which can return before their DMA lands, as 0.1.36 found in the fused test. With a sync after the uploads: 0 failures in 20 runs.
+- **Speed** with the GPTQ + Q8_0-down pack, 5 interleaved chats each: 18.79 +- 0.73 ms a round, against 18.95 +- 0.81 for 0.1.36-nvfp4.1.
+
 ### On upstream 0.1.36 (2026-10-02, release 0.1.36-nvfp4.1)
 
 The fork was rebuilt on upstream 0.1.36 the same way: the open pull requests and the fork's commits on top of v0.1.36.
