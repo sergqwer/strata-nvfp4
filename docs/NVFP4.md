@@ -359,6 +359,35 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### On upstream 0.1.38 (2026-10-03, release 0.1.38-nvfp4.1)
+
+- **Upstream since 0.1.37:**
+  - prompts on its Q2_0 and IQ packs a few percent faster;
+  - `--kv q4_0` prompts on tensor cores;
+  - a 6 GB card that starts (#496: the reserve shrinks until the cache fits);
+  - Q5_0 experts on the GPU;
+  - `--peer-device` (a second GPU as an expert cache);
+  - the server checks the Host header and refuses cross-site browser requests when it has no API key.
+- **Upstream took these changes from this fork** (their copies here were dropped or reduced to what is still the fork's own):
+  - the group gather of the prompt path (#372);
+  - the first chunk's n-gram rows beside layer 0, 256 at a time (#374);
+  - unbuffered loads on Windows (#357, #362);
+  - `--adapt-decay` (#407's first part);
+  - the stager's first DMA of a generation (#385);
+  - its own fixes for two bugs this fork had fixed: the fused layout on mixed packs (#546; 0.1.38's fix measures the same, KL 0.0036 at 32K) and `decode_cluster_parity`'s uploads (#548).
+- **Conflicts:**
+  - 0.1.38's group gather had no NVFP4 parts. Each expert's scale tail now goes to its group slot, and the group's last flush zeroes the MMQ tail, in the same launch (the same change went into #353). The fork's logits after a 32K prompt are byte-identical to 0.1.37-nvfp4.2's, which gathered one expert at a time there.
+  - `--peer-device`'s prompt path has no NVFP4 scales, so it declines NVFP4 packs and the prompt stays on the primary GPU. The peer's decode rows do apply the scales.
+  - #463's wait is upstream's default since 0.1.38. Here it stays opt-in (`STRATA_ADAPT_WAIT=1`): with this fork's tier (192 swaps every 2 rounds) it cost 11% on 0.1.38 (5 interleaved chats each: 16.80 +- 0.10 ms a round without, 18.69 +- 0.12 with), though it does make greedy decode repeat exactly (the same 190 rounds and hit rate in every run).
+- **Port script:** `port_rebase.sh fork` now cherry-picks rel/<old>'s first-parent commits. 0.1.37-nvfp4.2's `merge -s ours` sat mid-history, and a plain `rebase --onto` carried 203 commits (every older port's copies) instead of 43.
+- **Checks** (each once, release build):
+  - Against 0.1.37-nvfp4.2's references at a fixed cache, the first token's logits and 32 greedy tokens are identical: the GPTQ + Q8_0-down pack after 2K and 32K, and the ModelOpt pack after 2K.
+  - With the fork's own defaults off, the logits equal upstream 0.1.38 + #353 byte for byte (32K).
+  - #353 equals upstream 0.1.38 on IQ2_XS (32K).
+  - 59 of 62 tests pass; the other 3 need model files this machine does not have. The server's tests: 205 OK, 7 skipped, after one fix to #553's test (below).
+- **#553's test against 0.1.38's cross-site gate:** 0.1.38 refuses a page of another site without an API key (403) before the image rule runs, so the test that expected the rule's 400 failed. The rule still matters for a page `cors_origins` lets in (`"*"`: every page), which could otherwise name any file and read the model's description of it. The test checks that case now; #553 carries the same change.
+- **Speed** with the GPTQ + Q8_0-down pack, 5 interleaved chats each: 16.82 +- 0.02 ms a round (145.1 tokens/s) against 16.92 +- 0.08 (143.6) for 0.1.37-nvfp4.2.
+
 ### Fixes from a code review (2026-10-03, release 0.1.37-nvfp4.2)
 
 Three read-only reviews (the prompt path; VRAM/RAM tiers; decode, converters and the server) found these; each was
