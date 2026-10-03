@@ -47,7 +47,7 @@ upstream's; the original README is kept as [README.upstream.md](README.upstream.
 - **64 GB of RAM is enough:** with less than 96 GB installed the engine runs upstream's file tier
   (`--mmap-experts --resident-budget-gib`) with a budget of the free RAM less 6 GiB: the experts outside VRAM,
   hottest first, pinned; the rest is read from `experts.bin` when needed - unbuffered, in merged requests (this
-  fork's addition, also sent upstream as #362). The whole 63 GiB arena needs 96 GB. On an RTX 5090 + 64 GB a 32K
+  fork's addition, upstream since 0.1.38 as #362). The whole 63 GiB arena needs 96 GB. On an RTX 5090 + 64 GB a 32K
   prompt waits 9.3 s instead of 5.7, and the answer after it runs at 97 tokens/s.
 - **Every RTX 20, 30, 40 and 50 card with 12 GB or more:** the NVFP4 path needed Blackwell only for the optional
   FP4 x FP4 prompt path, which falls back; the release carries code for all four generations, each one's own path
@@ -66,20 +66,22 @@ upstream's; the original README is kept as [README.upstream.md](README.upstream.
   - The result is 73.8 GiB of experts instead of 63.3 GiB. Against an all-Q8_0 reference, the answers' KL is half of the ModelOpt pack's, about 2.6x less once run-to-run noise is taken out, for 12-15% of the decode speed.
   - GPTQ alone, without the 8-bit layers, is 1.7x closer at no speed cost.
   - docs/NVFP4.md, "Re-quantized from BF16", has the method and every measurement.
-- **On upstream Strata 0.1.37.** Since 0.1.35 upstream added:
-  - fused int8 prompt kernels for its Q2_0 pack (on by default) and the IQ packs (opt-in);
-  - decode kernels on thread-block clusters on RTX 50 cards, with the same output;
-  - a server that restarts an engine gone silent (#481);
-  - `UPDATE.bat`, an opt-in memory of the experts a user's work reads (`--expert-profile-save`), and setup fixes.
+- **On upstream Strata 0.1.38.** Since 0.1.37 upstream added:
+  - slightly faster prompts on its own packs, and `--kv q4_0` prompts on tensor cores;
+  - a 6 GB card that starts (the reserve shrinks until the expert cache fits, #496);
+  - Q5_0 experts on the GPU, and `--peer-device`, a second GPU as an expert cache;
+  - a server that checks the Host header and refuses cross-site browser requests when it has no API key.
 
-  NVFP4 layers keep the MMQ prompt path: the fused kernels do not cover NVFP4. The open pull requests are carried here
-  (#279 and #353 rebased on 0.1.37). Against 0.1.36-nvfp4.1, with the same expert cache, the first token's logits and
-  the greedy tokens are identical on both packs, and the speed is the same.
+  Upstream also took five of this fork's changes: the one-launch group gather and the n-gram rows beside layer 0
+  (prompt path), the unbuffered loads on Windows, `--adapt-decay`, and the stager's first-DMA wait. It fixed two
+  bugs this fork had fixed (#546, `decode_cluster_parity`) its own way. The group gather carries NVFP4's scales here
+  (also in #353). Against 0.1.37-nvfp4.2, with the same expert cache, the first token's logits and the greedy tokens
+  are identical on both packs, and the speed is the same (16.8 against 16.9 ms a round).
 
 - **Fixes from a code review (0.1.37-nvfp4.2):** the prompt path borrows 1.25 GiB less VRAM at a 32K chunk; the
   elastic K/V no longer runs past its mapped cells when it cannot lend slots; pictures Claude Code reads that the
   server cannot read become a note instead of a 400; safer image sources. Each upstream bug went up as a pull
-  request (#546, #547, #550, #553, #554, #555); docs/NVFP4.md has the list.
+  request (#546, #547, #550, #553, #554, #555; 0.1.38 fixed #546 its own way); docs/NVFP4.md has the list.
 
 Each change was measured - first-token KL against a reference, and interleaved speed A/B runs;
 [docs/NVFP4.md](docs/NVFP4.md) has the numbers, and everything that was tried and dropped.
@@ -301,6 +303,7 @@ either way - CUDA pins it for the GPU's copies.
 | `STRATA_NO_NVFP4_512=1` | CPU pool on ggml-cpu's NVFP4 dot instead of the AVX-512 rows |
 | `STRATA_UNBUFFERED_LOAD=1\|0` | force the expert reads unbuffered / through the file cache (default: unbuffered only when the cache cannot keep the files) |
 | `STRATA_DEFERRED_REGISTER=0`, `STRATA_ARENA_SYNC=1` | A/B: register the arena before the load / load it after the dense weights |
+| `STRATA_ADAPT_WAIT=1` | each decode window waits for the adaptive tier's copies, so greedy decode repeats exactly (upstream's default since 0.1.38; ~11% slower with this fork's tier) |
 | `STRATA_VERIFY_ARENA=1` | print a checksum of the loaded arena |
 | `STRATA_DUMP_FIRST_LOGITS=file` | write the first generated token's logits (compare prompt paths) |
 | `STRATA_DUMP_MOE_INPUT=file`, `STRATA_DUMP_MOE_LAYER=l` | dump one layer's real MoE input rows |
