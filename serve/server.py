@@ -2875,9 +2875,9 @@ class Service:
         looped, next_loop_check = False, LOOP_CHECK_EVERY       # #728: reasoning that repeats whole passages
         raw_ids = []                                    # every generated id (STRATA_DEBUG: dump raw model text)
         emb, self.embeddings.path = getattr(self.embeddings, "path", None), None   # this run's to delete now
-        # Identity token: only a DONE line replaces engine.last, so a request that died, errored or was
-        # disconnected must not have the PREVIOUS request's decode figures recorded as its own.
-        engine_last0 = getattr(self.engine, "last", None)
+        # A reasoning-budget continuation is another native generation, not another API request.
+        # Preserve each DONE so generated reasoning cannot become this request's cached input.
+        segments = []
         trace = getattr(self.request_trace, "record", None)
         waiting = time.perf_counter()
         # #465: with "parallel" (the engine's batch slots) requests run at once: each keeps its own status and rate
@@ -2915,6 +2915,7 @@ class Service:
                     for ev in opening:
                         yield "event", ev
                     while True:
+                        segment_before = getattr(self.engine, "last", None)
                         gen = self.engine.generate(prompt, max_new - n, sampling, cancel, embeddings=emb) if emb \
                             else self.engine.generate(prompt, max_new - n, sampling, cancel)
                         recover_prompt = None
@@ -2999,6 +3000,9 @@ class Service:
                                 self._say_died(e)
                                 if not leaving and not cancel.is_set():
                                     raise
+                            segment_done = getattr(self.engine, "last", None)
+                            if segment_done is not None and segment_done is not segment_before:
+                                segments.append(dict(segment_done))
                         if recover_prompt is not None and not cancel.is_set() and n < max_new:
                             recovery_count += 1
                             # Only the two settings that keep the same words coming are raised (temperature to at
@@ -3069,10 +3073,7 @@ class Service:
                     # it is released the next request sets its own status, which this must not record or clear
                     with self.status_lock:
                         if st.get("busy"):
-                            # only this request's DONE counts: same object means no DONE arrived (death, error,
-                            # disconnect)
-                            last = dict(getattr(self.engine, "last", {}) or {}) \
-                                if getattr(self.engine, "last", None) is not engine_last0 else {}
+                            last = request_stats(segments)        # this request's DONEs only (#615)
                             started = st.get("started", time.time())
                             cvec = (getattr(self.engine, "info", {}) or {}).get("cvec", 0)
                             loaded = str(cvec) not in ("0", "", "None")
@@ -3185,6 +3186,23 @@ def request_timings(prompt_tokens: int, generated: int, last: dict) -> dict | No
             # the speculative drafts, as llama.cpp names them (from PR #83, @mikicvi): only when the engine reported them
             **({"draft_n": int(last["drafts_offered"]), "draft_n_accepted": int(last["drafts_accepted"])}
                if last.get("drafts_offered") is not None else {})}
+
+
+def request_stats(segments: list[dict]) -> dict:
+    """Keep input/cache accounting at the original API boundary and total native work across continuations."""
+    if not segments:
+        return {}
+    result = dict(segments[-1])
+    for key in ("reused", "prompt_read"):
+        if key in segments[0]:
+            result[key] = segments[0][key]
+        else:
+            result.pop(key, None)
+    for key in ("prompt_ms", "decode_ms", "generated", "drafts_offered", "drafts_accepted",
+                "hits", "lookups", "ram_blobs", "file_blobs", "file_mb"):
+        if any(segment.get(key) is not None for segment in segments):
+            result[key] = sum(segment.get(key) or 0 for segment in segments)
+    return result
 
 
 def _debug_req(api, req, messages, tools, max_new, thinking, prompt_tokens):
