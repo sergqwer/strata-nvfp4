@@ -3728,6 +3728,15 @@ class AnswerBeforeTheBody(unittest.TestCase):
     def test_a_method_with_no_handler(self):
         self.assertEqual(self.status("PUT", "/v1/chat/completions"), "HTTP/1.0 501 Unsupported method ('PUT')")
 
+    def test_a_wrong_key_big_body(self):
+        # a body over 1 MiB (a long agent conversation, a picture) was left unread and the 401 lost to the reset
+        self.svc.api_key = "secret"
+        try:
+            self.assertEqual(self.status("POST", "/v1/chat/completions", body=b'{"x": "' + b"a" * (2 << 20) + b'"}'),
+                             "HTTP/1.0 401 Unauthorized")
+        finally:
+            self.svc.api_key = ""
+
 
 class CountingEngine(MockEngine):
     """Counts the tokens the engine was asked for, so a test can see it stopped early."""
