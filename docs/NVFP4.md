@@ -359,6 +359,19 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### Other people's pull requests, measured here (2026-10-03, release 0.1.38-nvfp4.2)
+
+- **The VRAM reserve is 700 MiB again on Windows, as upstream.** On 0.1.38 (RTX 5090 driving the desktop, IQ2_XS, 5 interleaved pairs), 700 left 281 MiB free after load and no run stalled. 1500 left 1,079 MiB free, but cost 570 expert slots and 0.8% of the round (13.65 against 13.55 ms), and 3.7% on a 16 GB card emulated. The stalls that made 1500 the default on 0.1.28 no longer show. Upstream #279 was closed with these numbers.
+- **Taken from upstream pull requests:**
+  - #567: the prompt is tokenised from the last shared prefix. With this pack's tokenizer, over a conversation growing to 125K tokens, it took 6.8 ms against 128 ms (221 ms at 125K), and the ids matched a full encode at all 49 steps.
+  - #615: token accounting across a reasoning-budget continuation.
+  - #594: an answer sent before the request body was read (a 401, a 403) no longer loses itself to a reset on Windows. The drain limit here is 64 MiB instead of 1 MiB: with a 2 MiB body (a long agent conversation, a picture) the 401 was still lost, 3 of 3.
+- **Measured and not taken:**
+  - #583, the prompt path's ring as a byte budget. It gave +1.5% on Q4_K_XL at 8K chunks, but on this pack at 32K chunks it was 0.6-5.7% slower, while lending 0.8 GiB less.
+  - #500, the pool's quantization on the workers. That phase is 0.026 ms of a 6.93 ms pool call here.
+  - #603 and #575, QSA top-k past the register kernel. On the 5090 #603 is the same at 32K and +1.0% at 125K; #575 is 2.5-4.3% slower. Neither changes decode. This fork waits for upstream to pick one.
+- **Checks:** with the old 1500 MiB reserve, the logits and 32 greedy tokens are byte-identical to 0.1.38-nvfp4.1. At the new 700 the requested 8,000-slot cache fits 7,544 slots instead of 7,284 on the GPTQ + Q8_0-down pack, so the prompt path streams other experts. The first token's logits move by KL 0.0012 after 2K and 0.0004 after 32K, with the same 32 tokens; the ModelOpt pack is identical. With the tray's settings 437 MiB of VRAM stay free after load (7,494 cached experts). Server tests: OK.
+
 ### On upstream 0.1.38 (2026-10-03, release 0.1.38-nvfp4.1)
 
 - **Upstream since 0.1.37:**
