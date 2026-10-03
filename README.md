@@ -78,6 +78,11 @@ upstream's; the original README is kept as [README.upstream.md](README.upstream.
   (also in #353). Against 0.1.37-nvfp4.2, with the same expert cache, the first token's logits and the greedy tokens
   are identical on both packs, and the speed is the same (16.8 against 16.9 ms a round).
 
+- **0.1.38-nvfp4.2:** the VRAM reserve is 700 MiB again on Windows (1500 no longer avoided a stall on 0.1.38, only
+  cost expert slots). From other people's upstream pull requests: a prompt tokenised from the last shared prefix
+  (#567: 6.8 ms instead of 128 ms at 125K tokens), token accounting across reasoning continuations (#615), and no
+  lost 401/403 on Windows (#594). docs/NVFP4.md lists what else was measured and why it was not taken.
+
 - **Fixes from a code review (0.1.37-nvfp4.2):** the prompt path borrows 1.25 GiB less VRAM at a 32K chunk; the
   elastic K/V no longer runs past its mapped cells when it cannot lend slots; pictures Claude Code reads that the
   server cannot read become a note instead of a 400; safer image sources. Each upstream bug went up as a pull
