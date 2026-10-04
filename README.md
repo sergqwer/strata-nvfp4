@@ -66,17 +66,20 @@ upstream's; the original README is kept as [README.upstream.md](README.upstream.
   - The result is 73.8 GiB of experts instead of 63.3 GiB. Against an all-Q8_0 reference, the answers' KL is half of the ModelOpt pack's, about 2.6x less once run-to-run noise is taken out, for 12-15% of the decode speed.
   - GPTQ alone, without the 8-bit layers, is 1.7x closer at no speed cost.
   - docs/NVFP4.md, "Re-quantized from BF16", has the method and every measurement.
-- **On upstream Strata 0.1.38.** Since 0.1.37 upstream added:
-  - slightly faster prompts on its own packs, and `--kv q4_0` prompts on tensor cores;
-  - a 6 GB card that starts (the reserve shrinks until the expert cache fits, #496);
-  - Q5_0 experts on the GPU, and `--peer-device`, a second GPU as an expert cache;
-  - a server that checks the Host header and refuses cross-site browser requests when it has no API key.
+- **On upstream Strata 0.1.39.** Since 0.1.38 upstream added:
+  - a verify pass with fewer launches (#646);
+  - the prompt path's streamed ring sized in bytes (#583, on by default);
+  - several conversations at once (`"parallel": N`, #465);
+  - a hot VRAM resize (`--vram-elastic`, #533);
+  - the OpenAI Responses API;
+  - experimental engines for older NVIDIA cards (CUDA 12), Intel Arc and AMD gfx906.
 
-  Upstream also took five of this fork's changes: the one-launch group gather and the n-gram rows beside layer 0
-  (prompt path), the unbuffered loads on Windows, `--adapt-decay`, and the stager's first-DMA wait. It fixed two
-  bugs this fork had fixed (#546, `decode_cluster_parity`) its own way. The group gather carries NVFP4's scales here
-  (also in #353). Against 0.1.37-nvfp4.2, with the same expert cache, the first token's logits and the greedy tokens
-  are identical on both packs, and the speed is the same (16.8 against 16.9 ms a round).
+  This fork's elastic K/V is off beside `--vram-elastic` and `parallel`: each of those manages the cache's VRAM its
+  own way. #554 (the vision markers in a message's text) now uses 0.1.39's own way of keeping a quoted `<think>` as
+  text, and #567's incremental tokenizing sits behind 0.1.39's prompt encoder. Upstream's byte-sized prompt ring
+  (#583) is kept: on this pack it reads at the same speed and borrows 1.2 GiB less. Against 0.1.38-nvfp4.2, with the
+  same expert cache, the logits and tokens are identical after 2K on the GPTQ + Q8_0-down pack, and decode
+  rounds are 6.9% shorter (15.7 against 16.9 ms, upstream's #646).
 
 - **0.1.38-nvfp4.2:** the VRAM reserve is 700 MiB again on Windows (1500 no longer avoided a stall on 0.1.38, only
   cost expert slots). From other people's upstream pull requests: a prompt tokenised from the last shared prefix
