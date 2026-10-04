@@ -359,6 +359,36 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### On upstream 0.1.39 (2026-10-04, release 0.1.39-nvfp4.1)
+
+- **Upstream since 0.1.38:**
+  - the verify pass with fewer launches and host round trips (#646);
+  - the prompt path's streamed ring sized in bytes, on by default (#583);
+  - several conversations at once (`"parallel": N`, #465);
+  - a hot VRAM resize (`--vram-elastic`, #533);
+  - the OpenAI Responses API;
+  - experimental engines for older NVIDIA cards (CUDA 12), Intel Arc (SYCL) and AMD gfx906;
+  - a literal `<think>` in a message encoded as text (#537).
+- **Conflicts:**
+  - #533's segmented expert cache and this fork's elastic K/V both reserve the cache's address range in VMM, so only one runs. The elastic K/V is off beside `--vram-elastic` and `parallel`; the cache's open and close take the segments, else the K/V's range, else one cudaMalloc.
+  - #554 (vision markers in a message's text stay text) now takes #537's path. The markers join `<think>` / `</think>` as literal tags (`frontend.VISION_TAGS`), marked before the template and encoded as text through the tokenizer's plain spans. This replaces the placeholder tokenizing #554 had. The tokenizer keeps both #537's plain spans and #567's resume marks.
+  - #567's incremental tokenizing is `Service.encode_rendered`. 0.1.39's `encode_prompt` calls it when no literal tag was marked.
+  - #547 is reduced to its last part: `bytes_needed` takes the same expert-source flag as `init` (0.1.39 took the rest with #583).
+  - The 1500 MiB reserve commit and its revert were dropped.
+- **#583 on this pack:** on 0.1.38 it was 0.6-5.7% slower here. 0.1.39's version (the byte ring only where it gains) measured the same speed (two rounds each):
+  - 32K: 6,886 tokens/s with it, 6,867 without;
+  - 125K: 7,378 with it, 7,391 without;
+  - the prompt path borrows 1.2 GiB less with it. The fork keeps upstream's default.
+- **A test fixed** (also sent upstream as #785): `test_json_schema_text_format` failed on every install without `jsonschema` (optional), 0.1.39's own as well.
+- **Checks** (each once, release build):
+  - Against 0.1.38-nvfp4.2's references at a fixed cache:
+    - GPTQ + Q8_0-down pack after 2K: logits and 32 tokens identical.
+    - The same pack after 32K: the first token's logits move by KL 0.0004 with the same 32 tokens. #583 changes a long prompt's bits.
+    - ModelOpt pack after 2K: identical logits, and the 32 tokens differ from the 21st on. With `STRATA_ADAPT_WAIT=1`, where greedy decode repeats exactly, both engines give the reference tokens, twice each. Without that wait, the adaptive tier's copies land at other points of 0.1.39's shorter verify rounds, and the GPU/CPU rounding of a swapped expert flips a near tie.
+  - With the fork's own defaults off, the logits equal upstream 0.1.39 + #353 byte for byte (32K). #353 equals upstream on IQ2_XS (32K).
+  - 66 of 69 tests pass; the other 3 need model files this machine does not have. The server's tests: 291 OK.
+- **Speed** with the GPTQ + Q8_0-down pack, 5 interleaved chats each: 15.72 +- 0.10 ms a round (150.6 tokens/s) against 16.88 +- 0.17 (144.8) for 0.1.38-nvfp4.2, 6.9% shorter rounds. That gain is #646's.
+
 ### Other people's pull requests, measured here (2026-10-03, release 0.1.38-nvfp4.2)
 
 - **The VRAM reserve is 700 MiB again on Windows, as upstream.** On 0.1.38 (RTX 5090 driving the desktop, IQ2_XS, 5 interleaved pairs), 700 left 281 MiB free after load and no run stalled. 1500 left 1,079 MiB free, but cost 570 expert slots and 0.8% of the round (13.65 against 13.55 ms), and 3.7% on a 16 GB card emulated. The stalls that made 1500 the default on 0.1.28 no longer show. Upstream #279 was closed with these numbers.
