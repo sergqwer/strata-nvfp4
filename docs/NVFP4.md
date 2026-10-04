@@ -359,6 +359,41 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### "!" after a long conversation (2026-10-05, release 0.1.39-nvfp4.2)
+
+- **The incident** (tray, GPTQ + Q8_0-down pack, Claude Code). On a freshly started engine, a 96,414-token request
+  read normally and answered ~2,800 tokens. Then the reply turned into "!" (token 0, what the sampler answers when no
+  logit is finite). This was ~1,000 tokens after the decode-time K/V growth to 106,496 cells. Every later request of
+  the conversation still answered "!" from its first token. Those requests were 40-1,700 tokens longer and did not
+  contain the broken reply, and each restored the clean checkpoint at 79,106. So state that existed before the
+  failure was damaged: expert weights in VRAM or K/V cells below 79,106. A NaN at position 99K alone does not do that.
+- **Server (fork):** a reply that is token 0 repeated `repeat_stop_tokens` times marks the engine untrusted, and the
+  next request starts a fresh one (about a minute). A run of any other token, a model in a loop, restarts nothing.
+- **The q8_1 clamp completed (upstream #838):** 0.1.39 clamped two q8_1 activation quantizers (#606). The shared
+  expert's fused SwiGLU + q8_1 kernel, on by default, still stored the block's fp16 scale and sum raw. This pack's
+  shared experts are Q8_0, so decode and the MTP verify run it. The same was true of the gfx906 routed-expert kernel.
+  `iq_multi_parity` covers the shared expert's kernel: 0 failures, against 4 on the old kernel. Not the incident's
+  cause: on the replayed conversation the largest block amax there is 70, and the scale overflows above 8.3e6.
+- **Ruled out by measurement:**
+  - the expert arena: its checksum is identical on large pages and on 4 KB pages, and the incident run had fallen
+    back to 4 KB (VirtualAlloc error 1450);
+  - a deterministic trigger: six replays of the conversation and two 8,000-token replies past a decode-time growth,
+    on large and 4 KB pages, all ran clean;
+  - the resident RAM mode, which is off, and #646's zero-doorbell verifier, whose log line is absent.
+- **Read and found consistent** (here and by a second, independent pass):
+  - the elastic K/V's moves (synchronized before the unmap), unmaps and zeroing;
+  - `map_range`, which skips mapped chunks;
+  - the prompt loan and its refill;
+  - checkpoints, which are host copies of the running state only;
+  - captured graphs, whose buffers are sized from max_context.
+- **Found on the way, not this incident's cause:** with the fork's default no-wait adaptive tier, a window can still
+  route to a swap's victim while its slot is being overwritten (`d_res` is uploaded once the copy lands). The result
+  is finite and lasts one token.
+- **Checks:** against 0.1.39-nvfp4.1's references at a fixed cache, the logits and 32 greedy tokens are identical
+  after 2K on both packs. After 32K on the GPTQ + Q8_0-down pack the tokens are the same, and the logits are
+  byte-identical to 0.1.39-nvfp4.1's own binary run the same day: both differ from the stored reference by the same
+  KL 0.0004. Server tests: OK.
+
 ### On upstream 0.1.39 (2026-10-04, release 0.1.39-nvfp4.1)
 
 - **Upstream since 0.1.38:**
