@@ -81,6 +81,12 @@ upstream's; the original README is kept as [README.upstream.md](README.upstream.
   same expert cache, the logits and tokens are identical after 2K on the GPTQ + Q8_0-down pack, and decode
   rounds are 6.9% shorter (15.7 against 16.9 ms, upstream's #646).
 
+- **0.1.39-nvfp4.2:** a long Claude Code conversation turned into "!" mid-reply, and every later request of it
+  answered "!" until the engine was restarted by hand. The server now starts a fresh engine after such a reply (one
+  bad reply instead of a broken session). The shared expert's fused SwiGLU quantizer keeps its fp16 scale finite, as
+  0.1.39's other two do (sent upstream as #838; not this incident's cause). What corrupted the state is not found
+  yet: docs/NVFP4.md lists what was ruled out. Logits and tokens are identical to 0.1.39-nvfp4.1 on both packs.
+
 - **0.1.38-nvfp4.2:** the VRAM reserve is 700 MiB again on Windows (1500 no longer avoided a stall on 0.1.38, only
   cost expert slots). From other people's upstream pull requests: a prompt tokenised from the last shared prefix
   (#567: 6.8 ms instead of 128 ms at 125K tokens), token accounting across reasoning continuations (#615), and no
