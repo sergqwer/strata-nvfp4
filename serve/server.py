@@ -2169,6 +2169,7 @@ class Service:
         self.reasoning_loop_recovery = False
         self.reasoning_budget_tokens = 0                 # #123: the config's default thinking budget (0: none)
         self.repeat_stop_tokens = REPEAT_STOP_TOKENS     # #606: one token this many times in a row ends a reply (0: off)
+        self.restart_pending = False                     # fork: a run of token 0 (NaN logits) - fresh engine next
         self.anthropic_think_unasked = True               # #278: "anthropic_thinking": "on_request" -> False
         self.stop_ids = set(tokenizer.encode(IM_END, parse_special=True) +
                             tokenizer.encode("<|endoftext|>", parse_special=True))
@@ -2393,6 +2394,13 @@ class Service:
         """POST /load and every generation request: start the engine now if it is unloaded (raises GpuBusy)."""
         # a request is on its way: the idle thread must not unload between this and the request's own start
         self.last_request_at = time.time()
+        if self.restart_pending:   # fork: the last reply was NaN logits; the engine's state is not trusted
+            with self.fifo:
+                if self.restart_pending and hasattr(self.engine, "unload") and self.engine.alive():
+                    self.engine.unload()
+                    print("[strata] the last reply was token 0 repeated (non-finite logits): the engine starts again "
+                          "with fresh state", flush=True)
+                self.restart_pending = False
         if self.loaded() and not self._vision_down():
             return
         trace = getattr(self.request_trace, "record", None)
@@ -3061,6 +3069,10 @@ class Service:
                               f"{n} tokens: ended as \"length\" (reasoning_loop_recovery: \"stop\" in "
                               "strata-<model>.json; remove it to turn this off)", flush=True)
                     elif repeated:
+                        # fork: token 0 is what the sampler answers when no logit is finite, and the state that made
+                        # them NaN outlived the request (#606: every later request of the conversation answered "!"
+                        # at once) - the next request gets a freshly started engine
+                        self.restart_pending = run_tok == 0
                         print(f"[strata] the reply repeated one token ({self.tok.decode([run_tok])!r}) "
                               f"{run_len} times in a row: ended as \"length\" (repeat_stop_tokens in "
                               "strata-<model>.json; 0 turns this off). If a new request with a short prompt does the "

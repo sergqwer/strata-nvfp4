@@ -1690,6 +1690,27 @@ class RepeatStop(unittest.TestCase):
         done, _ = self.run_reply("ab" * 400, limit=8)       # alternating tokens are not one run
         self.assertEqual(done["finish"], "stop")
 
+    def test_a_run_of_token_0_restarts_the_engine(self):
+        """fork: token 0 repeated is the sampler's answer to non-finite logits - the next request starts a fresh
+        engine; any other token's run (a model in a loop) does not."""
+        class Restartable(MockEngine):
+            unloaded, starts = False, 0
+            def alive(self): return not self.unloaded
+            def unload(self): self.unloaded = True
+            def restart(self): self.unloaded, self.starts = False, self.starts + 1
+        tok = ByteTokenizer()
+        for text, restart in (("ok " + "\x00" * 1000, True), ("ok " + "!" * 1000, False)):
+            eng = Restartable(tok, text, max_context=CTX)
+            svc = Service(eng, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                done = [x for kind, x in svc.run(tok.encode("hi"), False, None, 3000, {}, threading.Event())
+                        if kind == "done"][0]
+                self.assertEqual(done["finish"], "length")
+                self.assertEqual(svc.restart_pending, restart)
+                svc.load()
+            self.assertEqual((eng.starts, svc.restart_pending, eng.alive()), (int(restart), False, True))
+            self.assertEqual("engine starts again with fresh state" in out.getvalue(), restart)
+
 
 class LayerSplit(unittest.TestCase):
     """#644: "layer_split" is the first layer of each later GPU; a list is accepted, counts per card are not."""
