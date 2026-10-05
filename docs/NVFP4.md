@@ -359,6 +359,21 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### A peer GPU and the request drain (2026-10-06, release 0.1.39-nvfp4.3)
+
+- **The peer tier's chunks** (fork PR #1, @chimpera, 2x RTX 3090):
+  - `vmm.cpp`'s `api()` captured the current device once. Every VMM chunk was then created on that first device, so a peer cache opened on the second card allocated on the first. The peer tier failed with "out of memory" while the peer card was empty.
+  - `cuMemSetAccess` refused a second location on a pair without P2P.
+  - Each range now takes its device in `reserve()`, and device 0 gets access only when a P2P path exists. Taken as 4dc829d, authored by @chimpera.
+- **Only the primary cache in VMM** (32d7089). `ExpertCache::set_vmm` was a global switch. The elastic K/V's conditions exclude a layer split, but not `--peer-device`, so the peer's cache was mapped chunk by chunk too, although the K/V only ever borrows from the primary's. The switch is now per cache and set on the primary alone, so the peer cache is one `cudaMalloc`, as in upstream.
+  - Fork issue #2 reported a peer arena of 19.31 GiB failing on a card with ~22.7 GiB free. The budget walk and `open_sized` map the same bytes, so the gap is not the padding. Waiting for the reporter's re-test.
+- **The request drain** (062178c). The fork's copy of upstream #594 had a 64 MiB byte limit. It is replaced by the PR's current version:
+  - the limit is time only (5 s, one socket read at a time);
+  - `/load`, `/unload`, `/config` and `/settings` read their body through `_body()`.
+  - On 0.1.39-nvfp4.2 the PR's new tests found an 80 MiB body and a late control body reset (WinError 10053). Each of those three POSTs also held its connection 5.5 s after the answer: 0.1.39's #630 reads the body in the handler, and the drain then waited for it again.
+- **Upstream** has none of the three: `vmm.cpp` and `set_vmm` are the fork's. Upstream's segmented cache (#533) is per cache and off with multi-GPU. Upstream's drain exists only in #594, whose author fixed it there.
+- **Checks:** against 0.1.39-nvfp4.2's references at a fixed cache, the logits and 32 greedy tokens are identical after 2K and 32K on the GPTQ + Q8_0-down pack and after 2K on the ModelOpt pack. The 95K-token serve repro still grows the K/V at admission and during decode (98,304 -> 106,496 cells) over 8,000 clean tokens. Only one GPU here, so the peer path itself is untested.
+
 ### "!" after a long conversation (2026-10-05, release 0.1.39-nvfp4.2)
 
 - **The incident** (tray, GPTQ + Q8_0-down pack, Claude Code). On a freshly started engine, a 96,414-token request
