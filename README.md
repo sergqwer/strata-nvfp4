@@ -81,6 +81,8 @@ upstream's; the original README is kept as [README.upstream.md](README.upstream.
   same expert cache, the logits and tokens are identical after 2K on the GPTQ + Q8_0-down pack, and decode
   rounds are 6.9% shorter (15.7 against 16.9 ms, upstream's #646).
 
+- **0.1.39-nvfp4.3:** two fixes for a second card as a peer tier (`--peer-device`), from @chimpera's report on two RTX 3090s. The peer's cache was created on the first GPU. It also went through the elastic K/V's VRAM mapping, which only the primary cache needs, and is one allocation again, as in upstream. The server's handling of a request body it answers before reading follows upstream #594's current version. Bodies of any size get their answer, and `/load`, `/unload` and `/config` no longer hold the connection 5.5 s after answering. Logits and tokens are identical to 0.1.39-nvfp4.2.
+
 - **0.1.39-nvfp4.2:** a long Claude Code conversation turned into "!" mid-reply, and every later request of it
   answered "!" until the engine was restarted by hand. The server now starts a fresh engine after such a reply (one
   bad reply instead of a broken session). The shared expert's fused SwiGLU quantizer keeps its fp16 scale finite, as
