@@ -8,6 +8,10 @@
 //                 [--max-tokens N] [--min-tokens N] [--flash-attn on|off|auto]
 // Flash attention defaults to auto, and to off on the CPU when ggml is built with AVX-512 (see main).
 //
+// --max-tokens / --min-tokens: the image tokens a picture becomes (mtmd's image_max_tokens / image_min_tokens): a
+// larger picture is scaled down to at most N, a smaller one up to at least N, keeping its aspect ratio.  Unset: the
+// projector's own limits (Qwen3-VL: 8 to 4096).  More tokens read finer detail (small text) and encode slower.
+//
 // Resident: prints "READY <n_embd>", then per stdin line
 //   ENC <image path> <output path>   ->  "OK <n_tokens> <nx> <ny> <ms>"  or  "ERR <message>"
 //   QUIT
@@ -131,6 +135,11 @@ int main(int argc, char** argv) {
     // on the CPU without --threads: one per core (mtmd's own default is 4 threads)
     if (threads <= 0 && !gpu) threads = std::max(1u, std::thread::hardware_concurrency() / 2);
     if (threads > 0) cp.n_threads = threads;
+    if (max_tokens > 0 && min_tokens > max_tokens) {
+        std::printf("ERR --min-tokens %d is above --max-tokens %d\n", min_tokens, max_tokens);
+        std::fflush(stdout);
+        return 2;
+    }
     if (max_tokens > 0) cp.image_max_tokens = max_tokens;
     if (min_tokens > 0) cp.image_min_tokens = min_tokens;
     mtmd_context* ctx = mtmd_init_from_file(mmproj.c_str(), text, cp);

@@ -5396,6 +5396,13 @@ def main() -> int:
     ap.add_argument("--slot-save-path", default=None, metavar="DIR",
                     help="enable POST /slots/0?action=save|restore {\"filename\": NAME} (llama-server's API): the "
                          "conversation the engine holds, to or from DIR/NAME (also \"slot_save_path\" in the config)")
+    ap.add_argument("--image-max-tokens", type=int, default=None, metavar="N",
+                    help="image tokens a picture may take at most: a larger picture is scaled down to N, keeping its "
+                         "aspect ratio (also \"max_tokens\" in the config's \"vision\"; the model reads up to 4096; "
+                         "more tokens read smaller text and take longer to encode)")
+    ap.add_argument("--image-min-tokens", type=int, default=None, metavar="N",
+                    help="image tokens a picture takes at least: a smaller picture is scaled up to N (also "
+                         "\"min_tokens\" in the config's \"vision\"; default: the model's 8)")
     a = ap.parse_args()
     cfg = json.loads(Path(a.config).read_text(encoding="utf-8-sig")) if a.config else {}   # Notepad adds a BOM
     if a.gpu is not None:
@@ -5431,7 +5438,19 @@ def main() -> int:
             pretty = ", ".join(f"{k}={v}" for k, v in sampling_defaults.items())
             print(f"[strata] sampling defaults from the config: {pretty}", flush=True)
         lazy = a.lazy or cfg.get("lazy_load") is True
+        for flag, key in ((a.image_max_tokens, "max_tokens"), (a.image_min_tokens, "min_tokens")):
+            if flag is not None:
+                if flag < 1:
+                    ap.error(f"--image-{key.replace('_', '-')} must be 1 or more")
+                if not cfg.get("vision"):
+                    ap.error(f"--image-{key.replace('_', '-')} needs a config with a \"vision\" entry")
+                cfg["vision"][key] = flag
         if cfg.get("vision"):
+            vmax, vmin = cfg["vision"].get("max_tokens"), cfg["vision"].get("min_tokens")
+            if vmax and vmin and int(vmin) > int(vmax):
+                ap.error(f"image tokens: the minimum {vmin} is above the maximum {vmax}")
+            print(f"[strata] image tokens per picture: at most {vmax or 'the model default (4096)'}, at least "
+                  f"{vmin or 'the model default (8)'}", flush=True)
             print("loading the vision encoder ..." if not lazy else
                   "vision encoder unloaded; it starts with the model ...", flush=True)
             # relative paths are the config's cwd's, as for the engine below
