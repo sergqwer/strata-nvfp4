@@ -1,4 +1,4 @@
-// src/kernels/cpu/nvfp4_avx512_parity.cpp - the AVX-512 NVFP4 rows against ggml-cpu's own dot product.
+// src/kernels/cpu/nvfp4_avx512_parity.cpp - the AVX-512 and AVX2 NVFP4 rows against ggml-cpu's own dot product.
 //
 //     nvfp4_avx512_parity [pack/experts.bin]
 //
@@ -7,9 +7,11 @@
 // so the check is a relative tolerance, not equality. Random blocks cover every code and a wide scale range; a real
 // expert (layer 0, expert 0 of a pack's experts.bin) covers the checkpoint's own distribution.
 // Also the down rows (n 640) and gate/up through silu with the blob tail's scales, 1..9 tokens (past one slice).
-// Speed: gate+up rows of one expert for 1..8 tokens, both ways, as the CPU pool runs them.
+// The AVX2 rows follow ggml's AVX2 path step for step, so for them every row must also be bit-equal (ggml-cpu built
+// with AVX2: STRATA_PORTABLE, or a native build). Each kernel is checked when this CPU runs it.
+// Speed: gate+up rows of one expert for 1..8 tokens, each way, as the CPU pool runs them.
 //
-//     nvfp4_avx512_parity --bw THREADS TOKENS [ggml]
+//     nvfp4_avx512_parity --bw THREADS TOKENS [ggml|avx2]
 //     nvfp4_avx512_parity --expert pack/experts.bin [layer expert]
 //
 // --expert: one whole expert as decode runs it (Q8_0 input, gate/up + silu, Q8_0 of the hidden, down) against a
@@ -18,6 +20,8 @@
 //
 // DRAM rate: THREADS threads each run whole experts (gate/up through silu, then down) out of 4.2 GB of blobs -
 // 40x the L3 - for TOKENS tokens; GB/s of weights read. STRATA_NVFP4_PREFETCH sets the kernel's prefetch distance.
+#include "strata/kernels/cpu/expert_layout.hpp"
+#include "strata/kernels/cpu/nvfp4_avx2.hpp"
 #include "strata/kernels/cpu/nvfp4_avx512.hpp"
 
 #include "ggml.h"
@@ -34,10 +38,16 @@
 #include <string>
 #include <vector>
 
-using strata::kernels::cpu::nvfp4_512_gu_rows;
-using strata::kernels::cpu::nvfp4_512_rows;
-
 namespace {
+
+struct Kern {
+    const char* name;
+    void (*gu)(const uint8_t*, size_t, size_t, int, const void* const*, int, float* const*, int, int, float, float);
+    void (*rows)(const uint8_t*, size_t, int, const void* const*, int, float* const*, int, int, float);
+    bool exact;   // bit-equal to ggml's AVX2 dot
+};
+const Kern k512{"avx512", strata::kernels::cpu::nvfp4_512_gu_rows, strata::kernels::cpu::nvfp4_512_rows, false};
+const Kern k256{"avx2", strata::kernels::cpu::nvfp4_256_gu_rows, strata::kernels::cpu::nvfp4_256_rows, true};
 
 constexpr int N = 2560, ROWS = 1280, BLK = 36;   // an expert's gate+up: 1280 rows of 2560 values
 constexpr int FF = 640;                          // its down: 2560 rows of 640
@@ -71,7 +81,7 @@ float ref_dot(const uint8_t* row, int n, const void* a) {
 }
 
 int report(const std::vector<std::vector<float>>& mine, const std::vector<std::vector<float>>& ref,
-           int nt, int rows, double& worst) {
+           int nt, int rows, double& worst, int& differ) {
     int bad = 0;
     for (int t = 0; t < nt; ++t) {
         double scale = 0;
@@ -80,33 +90,40 @@ int report(const std::vector<std::vector<float>>& mine, const std::vector<std::v
             const double e = std::fabs((double) mine[t][r] - ref[t][r]) / (scale > 0 ? scale : 1);
             worst = std::fmax(worst, e);
             if (!(e <= 1e-5)) ++bad;
+            differ += std::memcmp(&mine[t][r], &ref[t][r], sizeof(float)) != 0;
         }
     }
     return bad;
 }
 
+// a kernel that claims bit equality fails on any differing row
+int verdict(const Kern& k, const char* what, double worst, int rows, int nt, int bad, int differ) {
+    std::printf("%-7s %-36s worst |mine - ggml| / max|ggml| = %.2e over %d rows x 1..%d tokens, %d beyond 1e-5, "
+                "%d not bit-equal\n", k.name, what, worst, rows, nt, bad, differ);
+    return bad + (k.exact ? differ : 0);
+}
+
 // plain rows: `rows` rows of `n` values, `row_bytes` apart
-int check_rows(const uint8_t* w, int n, size_t row_bytes, int rows, const char* what, std::mt19937& rng) {
+int check_rows(const Kern& k, const uint8_t* w, int n, size_t row_bytes, int rows, const char* what,
+               std::mt19937& rng) {
     constexpr int NT = 9;                                              // past one slice: 9 = 5 + 4
     Acts a(n, NT, rng);
     std::vector<std::vector<float>> mine(NT, std::vector<float>(rows)), ref(NT, std::vector<float>(rows));
     std::vector<float*> op(NT);
     for (int t = 0; t < NT; ++t) op[t] = mine[t].data();
-    int bad = 0;
+    int bad = 0, differ = 0;
     double worst = 0;
     for (int nt = 1; nt <= NT; ++nt) {
-        nvfp4_512_rows(w, row_bytes, n, a.p.data(), nt, op.data(), 0, rows);
+        k.rows(w, row_bytes, n, a.p.data(), nt, op.data(), 0, rows, 1.f);
         for (int t = 0; t < nt; ++t)
             for (int r = 0; r < rows; ++r) ref[t][r] = ref_dot(w + (size_t) r * row_bytes, n, a.p[t]);
-        bad += report(mine, ref, nt, rows, worst);
+        bad += report(mine, ref, nt, rows, worst, differ);
     }
-    std::printf("%-34s worst |mine - ggml| / max|ggml| = %.2e over %d rows x 1..%d tokens, %d beyond 1e-5\n", what,
-                worst, rows, NT, bad);
-    return bad;
+    return verdict(k, what, worst, rows, NT, bad, differ);
 }
 
 // gate/up with the blob tail's scales: silu(s_gate g) * (s_up u), as native_gu_rows' ggml path computes it
-int check_gu(const uint8_t* blob, std::mt19937& rng) {
+int check_gu(const Kern& k, const uint8_t* blob, std::mt19937& rng) {
     constexpr int NT = 9, F = ROWS / 2;
     float tail[4];
     std::memcpy(tail, blob + BLOB - 16, sizeof tail);
@@ -116,24 +133,24 @@ int check_gu(const uint8_t* blob, std::mt19937& rng) {
     std::vector<std::vector<float>> mine(NT, std::vector<float>(F)), ref(NT, std::vector<float>(F));
     std::vector<float*> op(NT);
     for (int t = 0; t < NT; ++t) op[t] = mine[t].data();
-    int bad = 0;
+    int bad = 0, differ = 0;
     double worst = 0;
     for (int nt = 1; nt <= NT; ++nt) {
-        nvfp4_512_gu_rows(blob, ROW_BYTES, up_off, N, a.p.data(), nt, op.data(), 0, F, sg, su);
+        k.gu(blob, ROW_BYTES, up_off, N, a.p.data(), nt, op.data(), 0, F, sg, su);
         for (int t = 0; t < nt; ++t)
             for (int r = 0; r < F; ++r) {
                 const float g = ref_dot(blob + (size_t) r * ROW_BYTES, N, a.p[t]) * sg;
                 const float u = ref_dot(blob + up_off + (size_t) r * ROW_BYTES, N, a.p[t]) * su;
                 ref[t][r] = (g / (1.f + std::exp(-g))) * u;
             }
-        bad += report(mine, ref, nt, F, worst);
+        bad += report(mine, ref, nt, F, worst, differ);
     }
-    std::printf("%-34s worst |mine - ggml| / max|ggml| = %.2e over %d rows x 1..%d tokens, %d beyond 1e-5 "
-                "(s_gate %.3g, s_up %.3g)\n", "expert 0: silu(gate) * up", worst, F, NT, bad, sg, su);
-    return bad;
+    char what[96];
+    std::snprintf(what, sizeof what, "expert 0: silu(gate) * up (s %.2g/%.2g)", sg, su);
+    return verdict(k, what, worst, F, NT, bad, differ);
 }
 
-void speed(const std::vector<uint8_t>& w, std::mt19937& rng) {
+void speed(const std::vector<uint8_t>& w, std::mt19937& rng, bool has512, bool has256) {
     const ggml_type_traits_cpu* tw = ggml_get_type_traits_cpu(GGML_TYPE_NVFP4);
     const ggml_type_traits_cpu* ta = ggml_get_type_traits_cpu(tw->vec_dot_type);
     const size_t act_bytes = ggml_row_size(tw->vec_dot_type, N);
@@ -148,24 +165,32 @@ void speed(const std::vector<uint8_t>& w, std::mt19937& rng) {
         ap[t] = act[t].data();
         op[t] = sink.data() + (size_t) t * ROWS;
     }
-    std::printf("\n%-6s %12s %12s %8s   (one expert's gate+up, %d rows; best of 20)\n", "tokens", "ggml ms", "avx512 ms",
-                "speedup", ROWS);
+    std::printf("\n%-6s %10s %10s %8s %10s %8s   (one expert's gate+up, %d rows; best of 20)\n", "tokens",
+                "ggml ms", "avx512 ms", "speedup", "avx2 ms", "speedup", ROWS);
     for (int nt = 1; nt <= 8; ++nt) {
-        double tg = 1e30, tm = 1e30;
+        double tg = 1e30, tm = 1e30, t2 = 1e30;
         for (int rep = 0; rep < 20; ++rep) {
             double t0 = now_ms();
             for (int t = 0; t < nt; ++t)
                 for (int r = 0; r < ROWS; ++r) tw->vec_dot(N, &op[t][r], 0, w.data() + (size_t) r * ROW_BYTES, 0, ap[t], 0, 1);
             tg = std::fmin(tg, now_ms() - t0);
-            t0 = now_ms();
-            nvfp4_512_rows(w.data(), ROW_BYTES, N, ap, nt, op, 0, ROWS);
-            tm = std::fmin(tm, now_ms() - t0);
+            if (has512) {
+                t0 = now_ms();
+                k512.rows(w.data(), ROW_BYTES, N, ap, nt, op, 0, ROWS, 1.f);
+                tm = std::fmin(tm, now_ms() - t0);
+            }
+            if (has256) {
+                t0 = now_ms();
+                k256.rows(w.data(), ROW_BYTES, N, ap, nt, op, 0, ROWS, 1.f);
+                t2 = std::fmin(t2, now_ms() - t0);
+            }
         }
-        std::printf("%-6d %12.3f %12.3f %7.2fx\n", nt, tg, tm, tg / tm);
+        std::printf("%-6d %10.3f %10.3f %7.2fx %10.3f %7.2fx\n", nt, tg, has512 ? tm : 0.0, has512 ? tg / tm : 0.0,
+                    has256 ? t2 : 0.0, has256 ? tg / t2 : 0.0);
     }
 }
 
-int bandwidth(int threads, int nt, bool use_ggml) {
+int bandwidth(int threads, int nt, bool use_ggml, const Kern& k) {
     constexpr int E = 1536;
     std::vector<uint8_t> blobs((size_t) E * BLOB);
     {
@@ -198,8 +223,8 @@ int bandwidth(int threads, int nt, bool use_ggml) {
                     const uint8_t* b = blobs.data() + (size_t) e * BLOB;
                     const size_t up_off = (size_t) (ROWS / 2) * ROW_BYTES, d_off = (size_t) ROWS * ROW_BYTES;
                     if (!use_ggml) {
-                        nvfp4_512_gu_rows(b, ROW_BYTES, up_off, N, ax.p.data(), nt, fp.data(), 0, ROWS / 2, 1.f, 1.f);
-                        nvfp4_512_rows(b + d_off, D_ROW, FF, ah.p.data(), nt, op.data(), 0, N);
+                        k.gu(b, ROW_BYTES, up_off, N, ax.p.data(), nt, fp.data(), 0, ROWS / 2, 1.f, 1.f);
+                        k.rows(b + d_off, D_ROW, FF, ah.p.data(), nt, op.data(), 0, N, 1.f);
                     } else {
                         for (int r = 0; r < ROWS / 2; ++r)
                             for (int t = 0; t < nt; ++t) {
@@ -218,7 +243,7 @@ int bandwidth(int threads, int nt, bool use_ggml) {
     }
     const char* pf = std::getenv("STRATA_NVFP4_PREFETCH");
     std::printf("%s  threads %d  tokens %d  prefetch %s: %.1f ms for %d experts -> %.1f GB/s, %.1f us/expert/thread\n",
-                use_ggml ? "ggml  " : "avx512", threads, nt, use_ggml ? "-" : (pf ? pf : "2048"), best, E,
+                use_ggml ? "ggml  " : k.name, threads, nt, use_ggml ? "-" : (pf ? pf : "2048"), best, E,
                 (double) E * BLOB / best / 1e6, best * 1000.0 * threads / E);
     return 0;
 }
@@ -265,11 +290,12 @@ int expert_e2e(const char* path, int layer, int e) {
         float* fp[1] = {ff.data()};
         float* op[1] = {out.data()};
         for (int mode = 0; mode < 2; ++mode) {             // 0: s_down folded into up; 1: s_down on the output
-            nvfp4_512_gu_rows(b.data(), ROW_BYTES, up_off, N, ap, 1, fp, 0, F, sg, mode == 0 ? s_up * s_down : s_up);
+            const Kern& k = strata::kernels::cpu::cpu_avx512_ok() ? k512 : k256;
+            k.gu(b.data(), ROW_BYTES, up_off, N, ap, 1, fp, 0, F, sg, mode == 0 ? s_up * s_down : s_up);
             if (mode == 0) for (float v : ff) hmax_fold = std::fmax(hmax_fold, std::fabs(v));
             q8->from_float(ff.data(), hq.data(), FF);
             const void* hp[1] = {hq.data()};
-            nvfp4_512_rows(b.data() + d_off, D_ROW, FF, hp, 1, op, 0, N);
+            k.rows(b.data() + d_off, D_ROW, FF, hp, 1, op, 0, N, 1.f);
             double err = 0;
             for (int r = 0; r < N; ++r) {
                 const double got = mode == 0 ? out[r] : (double) out[r] * s_down;
@@ -292,8 +318,14 @@ int main(int argc, char** argv) {
     ggml_cpu_init();
     if (argc >= 3 && std::string(argv[1]) == "--expert")
         return expert_e2e(argv[2], argc >= 4 ? std::atoi(argv[3]) : 0, argc >= 5 ? std::atoi(argv[4]) : 0);
-    if (argc >= 4 && std::string(argv[1]) == "--bw")
-        return bandwidth(std::atoi(argv[2]), std::atoi(argv[3]), argc >= 5 && std::string(argv[4]) == "ggml");
+    const bool has512 = strata::kernels::cpu::cpu_avx512_ok(), has256 = strata::kernels::cpu::cpu_avx2_ok();
+    if (argc >= 4 && std::string(argv[1]) == "--bw") {
+        const std::string how = argc >= 5 ? argv[4] : "";
+        return bandwidth(std::atoi(argv[2]), std::atoi(argv[3]), how == "ggml", how == "avx2" || !has512 ? k256 : k512);
+    }
+    std::vector<const Kern*> ks;
+    if (has512) ks.push_back(&k512);
+    if (has256) ks.push_back(&k256);
     std::mt19937 rng(20260929);
     std::vector<uint8_t> w(BLOB);
     // random blocks: every code, scales 0x20..0x5f (sign bit clear, never 0x7F), as ModelOpt writes them
@@ -302,19 +334,24 @@ int main(int argc, char** argv) {
         for (int s = 0; s < 4; ++s) w[b + s] = (uint8_t) sc(rng);
         for (int q = 4; q < BLK; ++q) w[b + q] = (uint8_t) byte(rng);
     }
-    int bad = check_rows(w.data(), N, ROW_BYTES, ROWS, "random blocks, n 2560", rng);
-    bad += check_rows(w.data(), FF, D_ROW, N, "random blocks, n 640", rng);
+    int bad = 0;
+    for (const Kern* k : ks) {
+        bad += check_rows(*k, w.data(), N, ROW_BYTES, ROWS, "random blocks, n 2560", rng);
+        bad += check_rows(*k, w.data(), FF, D_ROW, N, "random blocks, n 640", rng);
+    }
     if (argc >= 2) {                                                   // layer 0, expert 0 of the pack
         std::ifstream f(argv[1], std::ios::binary);
         if (!f.read((char*) w.data(), (std::streamsize) w.size())) {
             std::fprintf(stderr, "cannot read %zu bytes of %s\n", w.size(), argv[1]);
             return 2;
         }
-        bad += check_rows(w.data(), N, ROW_BYTES, ROWS, "expert 0: gate+up rows", rng);
-        bad += check_rows(w.data() + (size_t) ROWS * ROW_BYTES, FF, D_ROW, N, "expert 0: down rows", rng);
-        bad += check_gu(w.data(), rng);
+        for (const Kern* k : ks) {
+            bad += check_rows(*k, w.data(), N, ROW_BYTES, ROWS, "expert 0: gate+up rows", rng);
+            bad += check_rows(*k, w.data() + (size_t) ROWS * ROW_BYTES, FF, D_ROW, N, "expert 0: down rows", rng);
+            bad += check_gu(*k, w.data(), rng);
+        }
     }
-    speed(w, rng);
+    speed(w, rng, has512, has256);
     std::printf("\nRESULT: %s\n", bad ? "MISMATCH" : "parity OK");
     return bad ? 1 : 0;
 }
