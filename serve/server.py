@@ -657,12 +657,17 @@ class StrataEngine:
         self.slot_held: list[list[int]] = [[] for _ in range(self.batch)]
         self.slot_used = [0.0] * self.batch
         self.slot_live: list[dict | None] = [None] * self.batch   # /metrics: the request in each slot
-        self.slot_cv = threading.Condition()
-        self.waiting = 0                                # requests waiting for the control lines (ctl)
-        self.wait_lens: list[list[int]] = []            # ... their prompt lengths (a long read gives way to short ones)
-        self.ctl_epoch = 0                              # how often the control lines were taken
+        # #1012: the admission state belongs to the server, not to one engine process.  restart() runs this again
+        # while requests still wait on it (they hold these very objects), so it is made once and kept: new ones
+        # would leave the waiters on a lock and a condition nobody notifies, with their counts missing from the
+        # new lists.
+        if "slot_cv" not in self.__dict__:
+            self.slot_cv = threading.Condition()
+            self.waiting = 0                            # requests waiting for the control lines (ctl)
+            self.wait_lens: list[list[int]] = []        # ... their prompt lengths (a long read gives way to short ones)
+            self.ctl_epoch = 0                          # how often the control lines were taken
+            self.ctl = threading.Lock()                 # one admission or solo request on the control lines at a time
         self._yielded = None                            # (slot, tokens read): the last request on them gave way
-        self.ctl = threading.Lock()                     # one admission or solo request on the control lines at a time
         self.wlock = threading.Lock()                   # stdin writes from several request threads
         self.pump = threading.Thread(target=self._pump, daemon=True)
         self.pump.start()
@@ -750,10 +755,10 @@ class StrataEngine:
         close() ends and waits for the old process first (EngineStuck when it cannot be ended).  A start that still
         exits before READY - a dead engine's VRAM can take a while to come back, notably on ROCm - is retried
         (PR #637)."""
-        self.close()
         info = dict(self.info)
         self.starting = True                     # prepare() answers 503 "starting" meanwhile (#344)
         try:
+            self.close()
             for i in range(tries):
                 # #344: not alive until READY - __init__ sets max_context to 0 and blocks until the engine says
                 # READY, and a request that saw alive() in that window skipped load() and failed with "context
@@ -774,6 +779,8 @@ class StrataEngine:
                     time.sleep(self.RESTART_RETRY_S)
         finally:
             self.starting = False
+            with self.slot_cv:                   # #1012: wake the requests that waited through it: they go on with the
+                self.slot_cv.notify_all()        # new engine, or (it did not start) end with a clean EngineDied
         self.info = {**info, **self.info}
 
     def _parse_done(self, line):
@@ -963,16 +970,20 @@ class StrataEngine:
         """A slot whose consumer left (a stop token, a stop string, a disconnect): BSTOP it and free it once the engine
         says BDONE (in the background).  `stream`: the prompt and every token of it so far - with the tokens still to
         come before BDONE, all but the last are what the slot holds then (the next turn of its conversation)."""
+        if slot >= len(self.slot_q):                    # the engine restarted with fewer slots: this one is gone
+            return
         try:
             self._send(f"BSTOP {slot}")
         except EngineDied:
             pass
+        q, busy, held = self.slot_q[slot], self.slot_busy, self.slot_held   # this process's: restart() replaces them
+
         def wait():
             end = time.monotonic() + 600.0
             tail = list(stream or [])
             while time.monotonic() < end:
                 try:
-                    line = self.slot_q[slot].get(timeout=5.0)
+                    line = q.get(timeout=5.0)
                 except queue.Empty:
                     continue
                 if line is None:
@@ -985,9 +996,9 @@ class StrataEngine:
                         tail = []
                 if line.startswith("BDONE "):
                     break
-            self.slot_held[slot] = tail[:-1] if stream and tail else []
+            held[slot] = tail[:-1] if stream and tail else []
             with self.slot_cv:
-                self.slot_busy[slot] = False
+                busy[slot] = False
                 self.slot_cv.notify_all()
         threading.Thread(target=wait, daemon=True).start()
 
@@ -1003,10 +1014,18 @@ class StrataEngine:
         beat = time.monotonic()
         try:
             while True:
+                if not self.alive() and not getattr(self, "starting", False):
+                    # #1012: the engine is gone and nobody is starting it again: this request was not sent, so it
+                    # ends now (a clean 503) instead of waiting for control lines nothing will answer on.  While a
+                    # restart is under way it keeps waiting and goes on with the new engine.
+                    raise EngineDied("the engine stopped while this request waited; it was not sent")
                 with self.slot_cv:
                     turn = after_epoch is None or self.ctl_epoch > after_epoch or self.waiting <= 1
                 if turn and self.ctl.acquire(timeout=0.5):
-                    break
+                    if self.alive():
+                        break
+                    self.ctl.release()                  # it died (or is being restarted) while this one was getting
+                    turn = False                        # the lines: not the engine this request was meant for
                 if not turn:
                     with self.slot_cv:
                         self.slot_cv.wait(timeout=0.5)
@@ -1017,8 +1036,9 @@ class StrataEngine:
                     yield None
         finally:
             with self.slot_cv:
-                self.waiting -= 1
-                self.wait_lens.remove(entry)
+                self.waiting = max(0, self.waiting - 1)
+                if entry in self.wait_lens:
+                    self.wait_lens.remove(entry)
         with self.slot_cv:
             self.ctl_epoch += 1
             self.slot_cv.notify_all()
@@ -3165,6 +3185,10 @@ class Service:
                 Path(emb).unlink(missing_ok=True)
         for ev in cut(parser.finish(finish)):
             yield "event", ev
+        if parser.rescued or parser.refused:
+            self.totals["tool_calls_from_reasoning"] = self.totals.get("tool_calls_from_reasoning", 0) + parser.rescued
+            print(f"[strata] tool calls inside the thinking: {parser.rescued} read as calls, {parser.refused} kept as "
+                  f"reasoning (quoted, or the turn did not end on a stop)", flush=True)
         if stops is not None and stops.hit is None and stops.held:
             yield "event", Event("content", stops.flush())     # the held tail was not a stop string after all
         done = {"finish": finish, "completion_tokens": n, "reused": (timings or {}).get("cache_n", 0),
@@ -3185,10 +3209,6 @@ def prompt_tokens_seen(prompt_tokens: int, last: dict) -> int:
         return prompt_tokens
     return min(prompt_tokens, int(last.get("reused") or 0) + int(read))
 
-        if parser.rescued or parser.refused:
-            self.totals["tool_calls_from_reasoning"] = self.totals.get("tool_calls_from_reasoning", 0) + parser.rescued
-            print(f"[strata] tool calls inside the thinking: {parser.rescued} read as calls, {parser.refused} kept as "
-                  f"reasoning (quoted, or the turn did not end on a stop)", flush=True)
 
 def request_timings(prompt_tokens: int, generated: int, last: dict) -> dict | None:
     """One request's `timings` in llama.cpp's names (what its clients show as speed), from the engine's own clock
