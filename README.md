@@ -86,11 +86,16 @@ upstream's; the original README is kept as [README.upstream.md](README.upstream.
   (`--no-kv-grow` allocates it whole), with two fixes upstream's version lacks. The registration keeps upstream's
   default, off, which decodes at the same speed here. A tool call that the model
   writes inside its thinking now counts only when it ends the turn. 0.1.40 also took a call the model only quoted
-  there, even on a reply cut by max tokens (upstream #1058; this fork's fix is sent as #1068). #567's prompt encoder is
+  there, even on a reply cut by max tokens (upstream #1058; fixed in 0.1.40.1, which 0.1.40-nvfp4.2 takes). #567's prompt encoder is
   the author's current version: a conversation that quotes `<think>` or a control token now re-encodes only its new
   part. With the fork's own defaults off, the logits equal upstream 0.1.40 byte for byte on IQ2_XS. Against
   0.1.39-nvfp4.4, with the CPU share fixed, they are identical on both packs.
   Decode is as fast as 0.1.39-nvfp4.4's (16.1 ms a round).
+
+- **0.1.40-nvfp4.2:** upstream's hotfix 0.1.40.1, server only. Its #1058 gate replaces this fork's (#1068): the
+  same three conditions, plus no call from a code fence or inline code, in the thinking or in the answer. A restart
+  keeps waiting requests (#1012), and an engine that exits after an ERR line says why. The engine is 0.1.40-nvfp4.1's,
+  byte for byte.
 
 - **0.1.39-nvfp4.4:** small prompt chunks shared with the CPU (agent turns 15-38% faster), AVX2 NVFP4 rows for CPUs
   without AVX-512, the CPU share and decode's PCIe share measured instead of fixed, and upstream's Q2_0 in the CPU
