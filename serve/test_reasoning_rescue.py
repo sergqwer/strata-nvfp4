@@ -173,6 +173,43 @@ class Gates(unittest.TestCase):
         self.assertEqual((p.rescued, p.refused), (1, 0))
 
 
+class VisibleAnswer(unittest.TestCase):
+    """#1058: the same fence / inline-code rule for a call in the visible answer (after </think>)."""
+    HEAD = "ok</think>\n\n"
+
+    def run_all(self, text, finish=None):
+        res = set()
+        for width in WIDTHS:
+            evs = parse(text, width, SCHEMA, finish)
+            res.add((tuple(calls(evs)), "".join(e.text for e in evs if e.kind == "content")))
+        self.assertEqual(len(res), 1, res)               # every chunking agrees
+        return res.pop()
+
+    def test_quoted_calls_stay_text(self):
+        for body in ("Format:\n```xml\n" + RM + "\n```\nDone.", "Format:\n~~~\n" + RM + "\n~~~\nDone.",
+                     "Use `" + RM + "` like this.", "Use `x`, then `\n" + RM + "`", "```\n" + RM,
+                     "Text\n\n```python\nx = 1\n```\n```\n" + CALL):
+            with self.subTest(body=body[:30]):
+                got, text = self.run_all(self.HEAD + body)
+                self.assertEqual(got, ())
+                self.assertEqual(text, body)             # nothing lost
+
+    def test_real_calls_still_fire(self):
+        for body in (CALL, "Let me do it.\n\n" + CALL, "Let me do it. " + CALL, "```\ncode\n```\n" + CALL,
+                     "`a` and `b` " + CALL, "~~~\nx\n~~~\n\n" + CALL):
+            with self.subTest(body=body[:30]):
+                self.assertEqual(self.run_all(self.HEAD + body)[0], ("write",))
+        self.assertEqual(self.run_all(self.HEAD + CALL + "\n" + CALL)[0], ("write", "write"))
+
+    def test_a_closed_call_in_a_length_cut_answer_stays_a_call(self):
+        self.assertEqual(self.run_all(self.HEAD + "Now.\n" + CALL, finish="length")[0], ("write",))
+
+    def test_without_thinking(self):
+        p = OutputParser(thinking=False, tools=SCHEMA)
+        evs = p.feed("```\n" + RM + "\n```") + p.finish()
+        self.assertEqual(calls(evs), [])
+
+
 class OverHttp(unittest.TestCase):
     """The same rules through the real server: OpenAI chat (whole and streamed), Anthropic and Responses."""
 
@@ -236,6 +273,14 @@ class OverHttp(unittest.TestCase):
             with self.subTest(name):
                 a = self.ask(script, max_tokens=tokens)
                 self.assertEqual(set(a.values()), {0}, a)
+
+    def test_visible_answer_fences_on_all_three_apis(self):
+        for name, body, want in (("fence", "Format:\n```xml\n" + RM + "\n```\nDone.", 0),
+                                 ("inline", "Use `" + RM + "` here.", 0),
+                                 ("real", "Doing it.\n\n" + CALL, 1)):
+            with self.subTest(name):
+                a = self.ask( "ok</think>\n\n" + body)
+                self.assertEqual(set(a.values()), {want}, a)
 
 
 if __name__ == "__main__":
