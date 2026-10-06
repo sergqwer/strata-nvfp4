@@ -3157,7 +3157,7 @@ class Service:
         finally:
             if emb:
                 Path(emb).unlink(missing_ok=True)
-        for ev in cut(parser.finish()):
+        for ev in cut(parser.finish(natural=finish == "stop")):   # #1058: a held call only on a natural end
             yield "event", ev
         if stops is not None and stops.hit is None and stops.held:
             yield "event", Event("content", stops.flush())     # the held tail was not a stop string after all
