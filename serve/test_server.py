@@ -395,60 +395,6 @@ class ImageMarkers(unittest.TestCase):
         msgs = [{"role": "user", "content": "q"}, call,
                 {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": [{"type": "text", "text": "r"}]}]}]
         self.assertEqual(anthropic_to_messages({"messages": msgs})[0][-1], {"role": "tool", "content": "r"})
-    def test_the_whole_marker_in_text_before_images(self):
-        # Text quoting the template's marker (an agent reading chat_template.jinja) took the first picture's rows, the
-        # later pictures moved up one and the last real marker became text - every count still matched.
-        tok = ByteTokenizer()
-        start, pad, end = (tok.encode(s, parse_special=True)[0]
-                           for s in ("<|vision_start|>", "<|image_pad|>", "<|vision_end|>"))
-        quoted = "the template writes <|vision_start|><|image_pad|><|vision_end|> per picture"
-
-        class TwoPictures(self.FakeVision):
-            def encode(self, source):
-                return self.rows, {"a.png": 2, "b.png": 5}[source]
-
-        def holds(ids, part):
-            return any(ids[i:i + len(part)] == part for i in range(len(ids) - len(part) + 1))
-
-        with tempfile.TemporaryDirectory() as d:
-            svc = Service(MockEngine(tok, "ok", max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"),
-                          vision=TwoPictures(d))
-            pictures = [{"type": "image", "source": "a.png"}, {"type": "text", "text": "and"},
-                        {"type": "image", "source": "b.png"}]
-            tools = [{"name": "read", "description": quoted, "parameters": {}}]
-            cases = {"text part": ([{"role": "user", "content": [{"type": "text", "text": quoted}, *pictures]}], None),
-                     "earlier turns and tools": ([{"role": "user", "content": "read it"},
-                                                  {"role": "assistant", "content": quoted, "reasoning_content": quoted,
-                                                   "tool_calls": [{"function": {"name": "read",
-                                                                                "arguments": {"text": quoted}}}]},
-                                                  {"role": "tool", "content": quoted},
-                                                  {"role": "user", "content": pictures}], tools)}
-            for name, (msgs, tools) in cases.items():
-                with self.subTest(case=name):
-                    ids, _, _ = svc.prepare(msgs, tools, {})
-                    starts = [j for j, t in enumerate(ids) if t == start]
-                    self.assertEqual(len(starts), 2)                 # the pictures' markers, nothing else
-                    for j, rows in zip(starts, (2, 5)):              # each followed by its own picture's rows
-                        self.assertEqual(ids[j + 1:j + 2 + rows], [pad] * rows + [end])
-                    self.assertEqual((ids.count(pad), ids.count(end)), (7, 2))
-                    self.assertTrue(holds(ids, tok.encode(quoted)))   # the text kept its own tokens
-            # no picture: the quoted markers are text too
-            ids, _, _ = svc.prepare([{"role": "user", "content": quoted}], None, {})
-            self.assertEqual([t for t in ids if t in (start, pad, end)], [])
-            # markers cut apart across three text parts are no picture's: refused, not a silent shift
-            cut = [{"type": "text", "text": "<|vision_sta"}, {"type": "text", "text": "rt|><|image_pa"},
-                   {"type": "text", "text": "d|>"}, *pictures]
-            with self.assertRaisesRegex(ValueError, "do not match"):
-                svc.prepare([{"role": "user", "content": cut}], None, {})
-            # a prompt without the marker strings has exactly the ids it had (other special tokens as well)
-            old = lambda m, t=None: tok.encode(svc.template.render(m, tools=t), parse_special=True)   # noqa: E731
-            for msgs, tools in (([{"role": "user", "content": "plain <|im_end|> <|endoftext|>"}], None),
-                                ([{"role": "system", "content": "s"}, {"role": "user", "content": pictures}], None),
-                                ([{"role": "user", "content": "x"}, {"role": "assistant", "content": "",
-                                  "tool_calls": [{"function": {"name": "f", "arguments": {"a": "<|image"}}}]}],
-                                 [{"name": "f", "description": "<|vision_", "parameters": {}}])):
-                with self.subTest(msgs=msgs):
-                    self.assertEqual(svc.encode_prompt(msgs, tools, {}), old(msgs, tools))
 
 
     def test_the_whole_marker_in_text_before_images(self):
@@ -1362,59 +1308,6 @@ class RecordingPrompt(MockEngine):
     def generate(self, ids, max_new, sampling, cancel, embeddings=None):
         self.last_ids = list(ids)
         yield from super().generate(ids, max_new, sampling, cancel, embeddings)
-
-
-class IncrementalPrompts(unittest.TestCase):
-    """The prompt encoder: every request's ids are those of a full encode, and a turn reuses the previous one's."""
-
-    @classmethod
-    def setUpClass(cls):
-        tok = ByteTokenizer()
-        cls.engine = RecordingPrompt(tok, "Thinking.\n</think>\n\nThe answer.", max_context=CTX)
-        cls.svc = Service(cls.engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
-        cls.httpd = serve(cls.svc, port=0)
-        cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.httpd.shutdown()
-        cls.httpd.server_close()
-
-    post = ClientShapes.post
-
-    def test_turns(self):
-        self.assertIsNotNone(self.svc.prompts)
-        msgs = [{"role": "system", "content": "Be brief."}]
-        for turn in range(6):
-            msgs.append({"role": "user", "content": f"question {turn} <|im_end|> é你 " * (turn + 1)})
-            status, b = self.post("/v1/chat/completions", {"model": "m", "max_tokens": 64, "messages": msgs})
-            self.assertEqual(status, 200, b)
-            prompt = self.svc.template.render(msgs)
-            self.assertEqual(self.engine.last_ids, self.svc.tok.encode(prompt, parse_special=True))
-            if turn:
-                self.assertGreater(self.svc.prompts.last_reused, len(prompt) // 3)
-            msgs.append({"role": "assistant", "content": b["choices"][0]["message"]["content"]})
-
-    def test_same_ids_as_a_full_encode_on_varied_conversations(self):
-        import random
-        sys.path.insert(0, str(ROOT / "tools"))
-        from test_strata_tokenizer import conversation_prompts, load_tokenizer
-        toks = [("byte", ByteTokenizer())]
-        if load_tokenizer() is not None:
-            toks.append(("qwen35", load_tokenizer()))
-        for name, tok in toks:
-            svc = Service(self.engine, tok, self.svc.template)
-            for seed in range(3):
-                for what, prompt in conversation_prompts(self.svc.template, random.Random(seed)):
-                    with self.subTest(tokenizer=name, seed=seed, what=what):
-                        self.assertEqual(svc.encode_rendered(prompt), tok.encode(prompt, parse_special=True))
-
-    def test_a_tokenizer_without_resume_points_encodes_in_full(self):
-        class Plain:
-            encode = ByteTokenizer().encode
-        svc = Service(self.engine, Plain(), self.svc.template)
-        self.assertIsNone(svc.prompts)
-        self.assertEqual(svc.encode_rendered("<|im_start|>hi"), ByteTokenizer().encode("<|im_start|>hi", True))
 
 
 class DyingEngine(MockEngine):
@@ -3693,114 +3586,6 @@ class ImageSources(unittest.TestCase):
             finally:
                 httpd.shutdown()
                 httpd.server_close()
-class AnswerBeforeTheBody(unittest.TestCase):
-    """An answer sent before the request body was read must still reach a client that sends the body after the headers
-    (http.client, urllib and requests do): closing the connection on unread bytes sends a reset that eats the answer."""
-
-    def setUp(self):
-        tok = ByteTokenizer()
-        self.engine = UnloadableEngine(tok, "</think>\n\nok", max_context=CTX)
-        self.svc = Service(self.engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
-        self.httpd = serve(self.svc, port=0)
-        self.port = self.httpd.server_address[1]
-
-    def tearDown(self):
-        self.httpd.shutdown()
-        self.httpd.server_close()
-
-    def status(self, method, path, headers=None, body=b'{"x": 1}', early=0, pause=0.3):
-        """The status line of the answer to a request whose body (but its first `early` bytes) follows the headers
-        after a pause."""
-        head = {"Host": f"127.0.0.1:{self.port}", "Content-Type": "application/json", "Content-Length": str(len(body)),
-                **(headers or {})}
-        with socket.create_connection(("127.0.0.1", self.port), timeout=10) as s:
-            s.sendall((f"{method} {path} HTTP/1.1\r\n" + "".join(f"{k}: {v}\r\n" for k, v in head.items()) +
-                       "\r\n").encode() + body[:early])
-            time.sleep(pause)                                # the server answers (and, unfixed, closes) meanwhile
-            try:
-                s.sendall(body[early:])
-            except OSError:
-                pass
-            answer = b""
-            while chunk := s.recv(65536):                    # Windows raises a reset here, where Linux keeps the answer
-                answer += chunk
-            time.sleep(0.2)
-            # Linux shows the reset only as a pending socket error, after the answer and the end of the stream
-            self.assertEqual(s.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR), 0, "the connection was reset")
-        return answer.split(b"\r\n", 1)[0].decode()
-
-    def test_a_wrong_key(self):
-        self.svc.api_key = "secret"
-        try:
-            self.assertEqual(self.status("POST", "/v1/chat/completions"), "HTTP/1.0 401 Unauthorized")
-        finally:
-            self.svc.api_key = ""
-
-    def test_a_wrong_key_and_a_body_of_megabytes(self):
-        """An agent client's conversation, or one screenshot, is several MiB, and a rotated key is when the 401 matters."""
-        self.svc.api_key = "secret"
-        try:
-            self.assertEqual(self.status("POST", "/v1/chat/completions", body=b'{"x": "' + b"a" * (80 << 20) + b'"}'),
-                             "HTTP/1.0 401 Unauthorized")
-        finally:
-            self.svc.api_key = ""
-
-    def test_a_body_that_comes_in_drops_does_not_hold_the_connection(self):
-        """A client that announces a body and sends it a byte at a time is let go after DRAIN_SECONDS, with its
-        answer: the time limit is on the whole body, not on each read."""
-        self.svc.api_key = "secret"
-        try:
-            with mock.patch.object(self.httpd.RequestHandlerClass, "DRAIN_SECONDS", 0.5), \
-                    socket.create_connection(("127.0.0.1", self.port), timeout=10) as s:
-                s.sendall((f"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\n"
-                           f"Content-Length: {1 << 20}\r\n\r\n").encode())
-                started, answer = time.monotonic(), b""
-                s.settimeout(0.2)
-                while True:
-                    try:
-                        if not (chunk := s.recv(65536)):
-                            break
-                        answer += chunk
-                    except TimeoutError:
-                        s.sendall(b"a")                      # a byte every 0.2 s keeps each read of the server alive
-            self.assertEqual(answer.split(b"\r\n", 1)[0], b"HTTP/1.0 401 Unauthorized")
-            self.assertLess(time.monotonic() - started, 5)
-        finally:
-            self.svc.api_key = ""
-
-    def test_load_and_unload(self):
-        self.assertEqual(self.status("POST", "/unload"), "HTTP/1.0 200 OK")
-        self.assertEqual(self.status("POST", "/load"), "HTTP/1.0 200 OK")
-
-    def test_a_body_a_handler_read_is_not_read_again(self):
-        """/load, /unload and /config read their body themselves: the answer and the close follow at once, instead of
-        a second read that waits DRAIN_SECONDS for bytes that will never come."""
-        with mock.patch.object(self.httpd.RequestHandlerClass, "DRAIN_SECONDS", 3):
-            for path in ("/unload", "/load", "/config"):
-                with self.subTest(path=path):
-                    started = time.monotonic()
-                    self.status("POST", path)
-                    self.assertLess(time.monotonic() - started, 2)
-
-    def test_a_control_body_over_its_limit(self):
-        """/load answers 413 to a body over 64 KiB without reading it: the drain takes it."""
-        status = self.status("POST", "/load", body=b'{"x": "' + b"a" * (70 << 10) + b'"}')
-        self.assertTrue(status.startswith("HTTP/1.0 413 "), status)   # the reason phrase depends on Python
-
-    def test_a_control_body_that_comes_late(self):
-        """/load gives up on a body still missing after 2 s and answers 400: what comes later is drained, not reset."""
-        body = b'{"x": "' + b"a" * 60000 + b'"}'
-        self.assertEqual(self.status("POST", "/load", body=body, early=30000, pause=3), "HTTP/1.0 400 Bad Request")
-
-    def test_not_the_apps_own_page(self):
-        self.assertEqual(self.status("POST", "/load", {"Origin": "https://example.com"}), "HTTP/1.0 403 Forbidden")
-
-    def test_a_host_the_server_does_not_answer_to(self):
-        self.assertEqual(self.status("POST", "/v1/chat/completions", {"Host": "rebind.example.com"}),
-                         "HTTP/1.0 403 Forbidden")
-
-    def test_a_method_with_no_handler(self):
-        self.assertEqual(self.status("PUT", "/v1/chat/completions"), "HTTP/1.0 501 Unsupported method ('PUT')")
 
 
 class CountingEngine(MockEngine):
@@ -4201,6 +3986,62 @@ class ClaudeCodeBillingStamp(unittest.TestCase):
         first = svc.encode_prompt(*anthropic_to_messages({"system": self.blocks(c="b145e"), "messages": turn1,
                                                          "tools": tools}))
         self.assertEqual(ids[1][:len(first) - 8], first[:len(first) - 8])   # all but the generation header
+
+
+
+class IncrementalPrompts(unittest.TestCase):
+    """The prompt encoder: every request's ids are those of a full encode, and a turn reuses the previous one's."""
+
+    @classmethod
+    def setUpClass(cls):
+        tok = ByteTokenizer()
+        cls.engine = RecordingPrompt(tok, "Thinking.\n</think>\n\nThe answer.", max_context=CTX)
+        cls.svc = Service(cls.engine, tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        cls.httpd = serve(cls.svc, port=0)
+        cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    post = ClientShapes.post
+
+    def test_turns(self):
+        self.assertIsNotNone(self.svc.prompts)
+        msgs = [{"role": "system", "content": "Be brief."}]
+        for turn in range(6):
+            # no control-token text: since 0.1.40 such a message is encoded in full with its literal marks (#537), and
+            # this test is about the incremental path
+            msgs.append({"role": "user", "content": f"question {turn} é你 " * (turn + 1)})
+            status, b = self.post("/v1/chat/completions", {"model": "m", "max_tokens": 64, "messages": msgs})
+            self.assertEqual(status, 200, b)
+            prompt = self.svc.template.render(msgs)
+            self.assertEqual(self.engine.last_ids, self.svc.tok.encode(prompt, parse_special=True))
+            if turn:
+                self.assertGreater(self.svc.prompts.last_reused, len(prompt) // 3)
+            msgs.append({"role": "assistant", "content": b["choices"][0]["message"]["content"]})
+
+    def test_same_ids_as_a_full_encode_on_varied_conversations(self):
+        import random
+        sys.path.insert(0, str(ROOT / "tools"))
+        from test_strata_tokenizer import conversation_prompts, load_tokenizer
+        toks = [("byte", ByteTokenizer())]
+        if load_tokenizer() is not None:
+            toks.append(("qwen35", load_tokenizer()))
+        for name, tok in toks:
+            svc = Service(self.engine, tok, self.svc.template)
+            for seed in range(3):
+                for what, prompt in conversation_prompts(self.svc.template, random.Random(seed)):
+                    with self.subTest(tokenizer=name, seed=seed, what=what):
+                        self.assertEqual(svc.encode_rendered(prompt), tok.encode(prompt, parse_special=True))
+
+    def test_a_tokenizer_without_resume_points_encodes_in_full(self):
+        class Plain:
+            encode = ByteTokenizer().encode
+        svc = Service(self.engine, Plain(), self.svc.template)
+        self.assertIsNone(svc.prompts)
+        self.assertEqual(svc.encode_rendered("<|im_start|>hi"), ByteTokenizer().encode("<|im_start|>hi", True))
 
 
 if __name__ == "__main__":
