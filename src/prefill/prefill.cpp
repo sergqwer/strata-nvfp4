@@ -140,9 +140,17 @@ constexpr int RING_MAX = 1024;          // the arrays; the ring itself is ring_s
 // fixed cache: 1,500-token prompts 621 -> 785 / 612 -> 735 tok/s, 2,000 727 -> 934 / 712 -> 892, 4,000 (its last
 // chunk) 779 -> 912 / 766 -> 844, the same output.  Below ~1,000 tokens the output changed on Q2_0 (a smaller chunk
 // takes other kernels), so 1024 is the floor.  STRATA_PREFILL_STREAM_MIN overrides (A/B).
+// With the CPU share (set_cpu_pool) on an NVFP4 pack a chunk reads routed-only up to 4096 tokens: the CPU takes the
+// experts few of its tokens route to, and streaming every expert pays only above that.  RTX 5090, NVFP4 + Q8_0-down,
+// warm serve turns: 1,620 tokens 1,317 -> 992 ms, 2,425 1,339 -> 1,114; 4,630 at 8192 1,397 -> 1,509 (worse: the
+// stream-all stays).  NVFP4 packs only: their 2.76 MB experts make such a chunk PCIe-bound.  Q2_0's 1.15 MB ones do not
+// (the share changed nothing below 1,300 tokens, 32 GB card or 12 GB emulated), and there routed-only lost: 2,099
+// tokens 714 -> 763 ms, 1,299 482 -> 549.
+bool g_cpu_share_on = false;   // set_cpu_pool, with a share above 0
+bool g_cpu_share_nvfp4 = false;   // ... and an NVFP4 pack: the routed-only walk up to 4096
 inline int64_t stream_all_min() {
-    static const int64_t v = [] { const char* e = std::getenv("STRATA_PREFILL_STREAM_MIN"); return e ? (int64_t) std::atoll(e) : (int64_t) 1024; }();
-    return v;
+    static const int64_t env = [] { const char* e = std::getenv("STRATA_PREFILL_STREAM_MIN"); return e ? (int64_t) std::atoll(e) : (int64_t) -1; }();
+    return env >= 0 ? env : g_cpu_share_on && g_cpu_share_nvfp4 ? 4096 : 1024;
 }
 // STRATA_PREFILL_CPU_SHARE (set_cpu_pool; the fork's default is `auto`, upstream's is off): a chunk below
 // stream_all_min() hands the decode CPU pool - idle while a prompt is read - the non-resident experts few of its tokens
@@ -1663,7 +1671,12 @@ int64_t Prefill::ring_max_slots() {
 }
 
 int64_t Prefill::ring_slots_for(int64_t chunk) { return ring_slots((size_t) chunk); }
-void Prefill::set_cpu_pool(kernels::cpu::ExpertPool* pool) { cpu_pool_ = pool; }
+void Prefill::set_cpu_pool(kernels::cpu::ExpertPool* pool) {
+    cpu_pool_ = pool;
+    g_cpu_share_on = pool != nullptr && cpu_share_on();
+    const auto& lay = kernels::cpu::expert_layout();
+    g_cpu_share_nvfp4 = lay.native && !lay.fmt.empty() && lay.fmt[0].gu_type == kernels::cpu::kNvfp4Type;
+}
 
 bool Prefill::ring_bytes_enabled() { return ring_bytes_on(); }
 
