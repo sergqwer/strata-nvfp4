@@ -110,10 +110,14 @@ constexpr int RING_MAX = 1024;          // the arrays; the ring itself is ring_s
 // With the CPU share (set_cpu_pool) a chunk reads routed-only up to 4096 tokens: the CPU takes the experts few of its
 // tokens route to, and streaming every expert pays only above that.  RTX 5090, NVFP4 + Q8_0-down, warm serve turns:
 // 1,620 tokens 1,317 -> 992 ms, 2,425 1,339 -> 1,114; 4,630 at 8192 1,397 -> 1,509 (worse: the stream-all stays).
+// NVFP4 packs only: their 2.76 MB experts make such a chunk PCIe-bound.  Q2_0's 1.15 MB ones do not (the share
+// changed nothing below 1,300 tokens, 32 GB card or 12 GB emulated), and there routed-only lost: 2,099 tokens
+// 714 -> 763 ms, 1,299 482 -> 549.
 bool g_cpu_share_on = false;   // set_cpu_pool, with a share above 0
+bool g_cpu_share_nvfp4 = false;   // ... and an NVFP4 pack: the routed-only walk up to 4096
 inline int64_t stream_all_min() {
     static const int64_t env = [] { const char* e = std::getenv("STRATA_PREFILL_STREAM_MIN"); return e ? (int64_t) std::atoll(e) : (int64_t) -1; }();
-    return env >= 0 ? env : g_cpu_share_on ? 4096 : 1024;
+    return env >= 0 ? env : g_cpu_share_on && g_cpu_share_nvfp4 ? 4096 : 1024;
 }
 // set_cpu_pool: the share of a small chunk's streamed experts the CPU pool takes instead.  0.5 measured best on an
 // RTX 5090 (NVFP4 + Q8_0-down pack, warm serve turns at 95K): 229 tokens 605 -> 479 ms, 601 768 -> 613, 1,193
@@ -563,6 +567,7 @@ struct Prefill::Impl {
     float *cpu_x = nullptr, *cpu_rows = nullptr, *cpu_ones = nullptr;
     size_t cpu_x_n = 0, cpu_rows_n = 0;
     std::vector<uint8_t> cpu_nact;
+    std::vector<kernels::cpu::ActQ> cpu_actq;   // a Q2_0 layer's activations (the pool's Q2_0 kernels read ActQ)
     std::vector<kernels::cpu::ExpertJobMulti> cpu_jobs;
     // the measured share: running means of the CPU's ms per expert and the GPU's per streamed expert, and the share
     // they balance at (cpu_share_env)
@@ -1496,6 +1501,8 @@ int64_t Prefill::ring_slots_for(int64_t chunk) { return ring_slots((size_t) chun
 void Prefill::set_cpu_pool(kernels::cpu::ExpertPool* pool) {
     cpu_pool_ = pool;
     g_cpu_share_on = pool != nullptr && cpu_share_on();
+    const auto& lay = kernels::cpu::expert_layout();
+    g_cpu_share_nvfp4 = lay.native && !lay.fmt.empty() && lay.fmt[0].gu_type == kernels::cpu::kNvfp4Type;
 }
 
 bool Prefill::ring_bytes_enabled() { return ring_bytes_on(); }
@@ -2414,8 +2421,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         if (grp_mapped) copy_i32(m.grp_dev, m.ids, T * K, m.cs);
                         else cudaMemcpyAsync(m.ids_host.data(), m.ids, (size_t) T * K * 4, cudaMemcpyDeviceToHost, m.cs);
                         const bool cpu_maybe = cpu_pool_ != nullptr && cpu_share_on() && !stream_all && m.src != nullptr &&
-                                               lay.native && !m.pp && !lay.fmt.empty() &&
-                                               !strata::kernels::cpu::q2_native_kernels(lay.fmt[(size_t) l].gu_type);
+                                               lay.native && !m.pp && !lay.fmt.empty();
                         if (cpu_maybe) {
                             const size_t want = (size_t) T * N;
                             if (m.cpu_x_n < want) {
@@ -2606,14 +2612,19 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             cpu_fut = std::async(std::launch::async, [&m, &on_cpu, &cf, &cpu_ms, src_h, l, T, r0c, this]() -> bool {
                                 const auto t0 = std::chrono::steady_clock::now();
                                 constexpr size_t AB = strata::kernels::cpu::kNativeActBytes;
-                                if (m.cpu_nact.size() < (size_t) T * AB) m.cpu_nact.resize((size_t) T * AB);
+                                // a Q2_0 layer (gate/up on the pool's Q2_0 kernels): ActQ activations, as decode's
+                                const bool q2 = strata::kernels::cpu::q2_native_kernels(cf.gu_type);
+                                if (q2 && m.cpu_actq.size() < (size_t) T) m.cpu_actq.resize((size_t) T);
+                                if (!q2 && m.cpu_nact.size() < (size_t) T * AB) m.cpu_nact.resize((size_t) T * AB);
                                 std::vector<char> need((size_t) T, 0);
                                 for (int32_t e = 0; e < m.g->n_expert; ++e)   // the tokens the CPU's experts read
                                     if (on_cpu[(size_t) e])
                                         for (int32_t r = 0; r < m.cnt[(size_t) e]; ++r)
                                             need[(size_t) src_h[(size_t) m.off[(size_t) e] + (size_t) r]] = 1;
                                 for (int64_t t = 0; t < T; ++t)
-                                    if (need[(size_t) t])
+                                    if (need[(size_t) t] && q2)
+                                        strata::kernels::cpu::act_quant_any(m.cpu_x + (size_t) t * N, (int) N, m.cpu_actq[(size_t) t]);
+                                    else if (need[(size_t) t])
                                         strata::kernels::cpu::native_quant_act(cf, m.cpu_x + (size_t) t * N,
                                                                                m.cpu_nact.data() + (size_t) t * AB);
                                 m.cpu_jobs.clear();
@@ -2625,7 +2636,8 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                     j.nt = m.cnt[(size_t) e];
                                     for (int r = 0; r < j.nt; ++r) {
                                         const int64_t p = (int64_t) m.off[(size_t) e] + r;
-                                        j.nact[r] = m.cpu_nact.data() + (size_t) src_h[(size_t) p] * AB;
+                                        if (q2) j.act[r] = &m.cpu_actq[(size_t) src_h[(size_t) p]];
+                                        else j.nact[r] = m.cpu_nact.data() + (size_t) src_h[(size_t) p] * AB;
                                         j.out[r] = m.cpu_rows + (size_t) (p - r0c) * N;
                                     }
                                     m.cpu_jobs.push_back(j);
