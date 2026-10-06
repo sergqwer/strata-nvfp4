@@ -75,20 +75,22 @@ upstream's; the original README is kept as [README.upstream.md](README.upstream.
   - The result is 73.8 GiB of experts instead of 63.3 GiB. Against an all-Q8_0 reference, the answers' KL is half of the ModelOpt pack's, about 2.6x less once run-to-run noise is taken out, for 12-15% of the decode speed.
   - GPTQ alone, without the 8-bit layers, is 1.7x closer at no speed cost.
   - docs/NVFP4.md, "Re-quantized from BF16", has the method and every measurement.
-- **On upstream Strata 0.1.39.** Since 0.1.38 upstream added:
-  - a verify pass with fewer launches (#646);
-  - the prompt path's streamed ring sized in bytes (#583, on by default);
-  - several conversations at once (`"parallel": N`, #465);
-  - a hot VRAM resize (`--vram-elastic`, #533);
-  - the OpenAI Responses API;
-  - experimental engines for older NVIDIA cards (CUDA 12), Intel Arc and AMD gfx906.
+- **On upstream Strata 0.1.40.** Since 0.1.39 upstream added:
+  - crash and NaN fixes, among them this fork's #838 and #550;
+  - the image fixes this fork carried (#553, #554, #555, a tool's unreadable picture as a note);
+  - this fork's elastic K/V as `--kv-grow` and its deferred arena registration as `STRATA_DEFERRED_REGISTER=1`, both opt-in there;
+  - decode fusions and kernels from Eddoursul's fork and #783;
+  - Q4_0 / Q4_1 experts, more PLE table formats, Strix Halo, and a long list of opt-ins.
 
-  This fork's elastic K/V is off beside `--vram-elastic` and `parallel`: each of those manages the cache's VRAM its
-  own way. #554 (the vision markers in a message's text) now uses 0.1.39's own way of keeping a quoted `<think>` as
-  text, and #567's incremental tokenizing sits behind 0.1.39's prompt encoder. Upstream's byte-sized prompt ring
-  (#583) is kept: on this pack it reads at the same speed and borrows 1.2 GiB less. Against 0.1.38-nvfp4.2, with the
-  same expert cache, the logits and tokens are identical after 2K on the GPTQ + Q8_0-down pack, and decode
-  rounds are 6.9% shorter (15.7 against 16.9 ms, upstream's #646).
+  The fork runs upstream's code for both. The K/V keeps this fork's default: it grows with the context
+  (`--no-kv-grow` allocates it whole), with two fixes upstream's version lacks. The registration keeps upstream's
+  default, off, which decodes at the same speed here. A tool call that the model
+  writes inside its thinking now counts only when it ends the turn. 0.1.40 also took a call the model only quoted
+  there, even on a reply cut by max tokens (upstream #1058; this fork's fix is sent as #1068). #567's prompt encoder is
+  the author's current version: a conversation that quotes `<think>` or a control token now re-encodes only its new
+  part. With the fork's own defaults off, the logits equal upstream 0.1.40 byte for byte on IQ2_XS. Against
+  0.1.39-nvfp4.4, with the CPU share fixed, they are identical on both packs.
+  Decode is as fast as 0.1.39-nvfp4.4's (16.1 ms a round).
 
 - **0.1.39-nvfp4.4:** small prompt chunks shared with the CPU (agent turns 15-38% faster), AVX2 NVFP4 rows for CPUs
   without AVX-512, the CPU share and decode's PCIe share measured instead of fixed, and upstream's Q2_0 in the CPU
@@ -335,8 +337,8 @@ either way - CUDA pins it for the GPU's copies.
 | `STRATA_NO_NVFP4_256=1` | without AVX-512: ggml-cpu's NVFP4 dot instead of the AVX2 rows |
 | `STRATA_FORCE_AVX2=1` | tests: the engine's CPU dispatch as on a CPU without AVX-512 |
 | `STRATA_UNBUFFERED_LOAD=1\|0` | force the expert reads unbuffered / through the file cache (default: unbuffered only when the cache cannot keep the files) |
-| `STRATA_DEFERRED_REGISTER=0`, `STRATA_ARENA_SYNC=1` | A/B: register the arena before the load / load it after the dense weights |
-| `STRATA_ADAPT_WAIT=1` | each decode window waits for the adaptive tier's copies, so greedy decode repeats exactly (upstream's default since 0.1.38; ~11% slower with this fork's tier) |
+| `STRATA_DEFERRED_REGISTER=1`, `STRATA_ARENA_SYNC=1` | register the arena per layer on a thread ahead of its readers (upstream's opt-in, this fork's default until 0.1.39; the same decode speed here) / load the arena after the dense weights (A/B) |
+| `STRATA_ADAPT_WAIT=1` | each decode window waits for the adaptive tier's copies, so greedy decode repeats exactly (upstream's default since 0.1.38; ~11% slower with this fork's tier, ~2% with `STRATA_ADAPT_LAG=2`, #764) |
 | `STRATA_VERIFY_ARENA=1` | print a checksum of the loaded arena |
 | `STRATA_DUMP_FIRST_LOGITS=file` | write the first generated token's logits (compare prompt paths) |
 | `STRATA_DUMP_MOE_INPUT=file`, `STRATA_DUMP_MOE_LAYER=l` | dump one layer's real MoE input rows |

@@ -372,6 +372,52 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### On upstream 0.1.40 (2026-10-06, release 0.1.40-nvfp4.1)
+
+- **Upstream since 0.1.39** (its release notes have the full list):
+  - crash and NaN fixes, among them this fork's #838 (q8_1 scales) and #550 (the residency-table upload);
+  - the image fixes this fork carried: #553 (image sources), #554 (vision markers), #555 (temp files), and a tool's unreadable picture as a note;
+  - this fork's elastic K/V as `--kv-grow` (#1040) and its deferred arena registration as `STRATA_DEFERRED_REGISTER=1` (#1039), both opt-in upstream;
+  - decode fusions and kernels from Eddoursul's fork and #783;
+  - Q4_0 / Q4_1 experts, PLE tables in Q8_0 / Q5_1 / BF16, Strix Halo;
+  - a tool call written inside the reasoning delivered when its name is declared (#804).
+- **Conflicts:**
+  - **The elastic K/V.** It is upstream's code now, with this fork's defaults: on, and `--no-kv-grow` allocates the whole window. Two fixes of this fork are kept on top, because upstream's version lacks them:
+    - a run that cannot lend cache slots maps the whole window up front;
+    - the d_res uploads are synchronized.
+  - **The arena registration.** It is upstream's opt-in `STRATA_DEFERRED_REGISTER`, off by default. This fork had its own version on. Measured below.
+  - **The adaptive tier.** The fork's no-wait stays. 0.1.40's `STRATA_ADAPT_LAG` (#764) only applies to upstream's wait (`STRATA_ADAPT_WAIT=1`). Measured below.
+  - **The CPU share.** It leaves the expert order before 0.1.40's resident sort (`STRATA_MMQ_RESIDENT_SORT_NE`). That sort only runs when a layer's experts are all resident, and then none go to the CPU.
+  - **NVFP4.** 0.1.40's float4 combine kernel takes `row_sd` (NVFP4's per-row down scale). Q2_0 is added to 0.1.40's new format tables.
+  - **#567.** The author's current version, 76b916e. `PromptEncoder.encode(prompt, plain)` resumes across the plain spans of 0.1.40's literal marks, so a conversation that quotes `<think>` or a control token re-encodes only its new part. The fork's copy encoded such a prompt in full every turn.
+- **A tool call quoted in the thinking (upstream #1058, fixed here, sent as #1068).** 0.1.40's #804 rescue delivered any complete call to a declared tool written inside the reasoning. That included an example the model only quoted, even on a reply cut by max_tokens (the issue shows a quoted `rm -rf build`). Such a call is now held until the turn ends. It is delivered only if:
+  - its `<tool_call>` begins a line;
+  - only whitespace and further calls follow it;
+  - the turn ends by itself (finish `stop`).
+
+  Otherwise its text stays reasoning. The issue's corpora (PR #525's 25 specimens and 12 live strandings) were fed whole, one character at a time and in random chunks:
+  - 0.1.40 differs from the expectation on 12 of them, this fork on none;
+  - every live stranding that is a call is still delivered.
+
+  `GET /metrics` counts both outcomes (`reasoning_calls_delivered`, `reasoning_calls_kept_as_text`).
+- **Checks** (release build):
+  - **With the fork's own defaults off,** the logits and 32 tokens equal upstream 0.1.40 byte for byte on IQ2_XS (32K, the same expert cache). #353 was closed upstream, so this replaces the two-step check through it.
+  - **The same command with an automatic cache** gets 248 fewer slots (0.33 GiB) than upstream. This fork makes its first cuBLAS handle during the arena load (`gemm_prewarm`), before the cache is sized, so the 700 MiB reserve stays free. Upstream makes it after the cache, out of the reserve (~335 MiB). Both end with the same VRAM free.
+  - **Against 0.1.39-nvfp4.4,** the logits and 32 tokens are identical on both packs: GPTQ + Q8_0-down after 2K and 32K, ModelOpt after 2K. This holds with the CPU share fixed at 0.5 and decode's PCIe model off.
+  - **With the measured share (the default),** a short prompt's result varies from run to run. The share comes from timings, and which experts the CPU takes follows from it, so a 2K prompt's first token moves by KL up to 0.08 (top token the same).
+  - **The cache must also be sized by its budget, not by free VRAM.** On the Q8_0-down pack, 8000 slots were bounded by free VRAM, which the desktop moves by a few slots. Those experts then went to the CPU. `port_check` now pins the share, turns off the PCIe model and uses 6000 slots.
+  - **Tests:** 84 of 87 pass; the other 3 need model files this machine does not have. The server's tests: 437 OK.
+- **Speed** with the GPTQ + Q8_0-down pack, 5 interleaved chats each: 16.08 +- 0.50 ms a round (155.7 tokens/s) against 16.11 +- 0.28 (150.4) for 0.1.39-nvfp4.4 - the same.
+- **Measured, not taken:**
+  - **`STRATA_DEFERRED_REGISTER=1`**, the registration this fork ran on 0.1.39. 3 interleaved chats against the default:
+    - with it, 15.21 / 15.23 / 16.82 ms a round; without, 16.08 / 17.20 / 15.89;
+    - ready 9.4-9.7 s against 9.8-11.9 s.
+
+    0.1.39-nvfp4.4 had it on and this release has it off, and the two decode at the same speed (above). So the fork
+    keeps upstream's default: the gap is within the noise, and upstream measured it 10% slower on an RTX 5070.
+  - **`STRATA_ADAPT_WAIT=1 STRATA_ADAPT_LAG=2`**, upstream's wait with #764's lag (greedy decode repeats exactly):
+    16.68 / 16.66 / 16.56 ms a round, against the fork's no-wait above. That is ~2% slower, so the no-wait stays.
+
 ### Small prompt chunks with the CPU (2026-10-06, release 0.1.39-nvfp4.4)
 
 An agent's turn - a tool result, a test's output - is a small prompt chunk at long context, and it cost a fixed
@@ -404,8 +450,8 @@ it saves.
 
 Accuracy: layer 0's expert rows (same input) are 1.086% from the FP16 prompt path on the CPU against 1.087% for the
 GPU's MMQ rows. The first token's KL to the FP16 path was lower on 10 of 12 prompts (250-2,100 tokens, both packs);
-a routing flip moves a single prompt either way (p1700 went 0.008-0.76 across shares 0.3-0.7). Deterministic run to
-run.
+a routing flip moves a single prompt either way (p1700 went 0.008-0.76 across shares 0.3-0.7). Deterministic run to run at a fixed share. The measured share follows timings, so which experts the CPU takes,
+and a short prompt's last bits, move from run to run ("On upstream 0.1.40").
 
 **Upstream's formats** (ISTA's GSQ-RCO files): Q2_0 layers take the pool's Q2_0 kernels' activations (ActQ, as
 decode's). KL to `STRATA_PREFILL_MMQ=0` in the noise (Q2_0 600 tokens 0.0033 without the share, 0.0068 with it,
