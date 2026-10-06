@@ -144,19 +144,23 @@ inline int64_t stream_all_min() {
     static const int64_t v = [] { const char* e = std::getenv("STRATA_PREFILL_STREAM_MIN"); return e ? (int64_t) std::atoll(e) : (int64_t) 1024; }();
     return v;
 }
-// STRATA_PREFILL_CPU_SHARE (opt-in; set_cpu_pool): a chunk below stream_all_min() hands the decode CPU pool - idle
-// while a prompt is read - the non-resident experts few of its tokens route to, instead of streaming them over PCIe.
+// STRATA_PREFILL_CPU_SHARE (set_cpu_pool; the fork's default is `auto`, upstream's is off): a chunk below
+// stream_all_min() hands the decode CPU pool - idle while a prompt is read - the non-resident experts few of its tokens
+// route to, instead of streaming them over PCIe.
 // `auto`: the share measured, each layer's CPU time per expert and the GPU's per streamed expert (CUDA events around
 // its expert work, read after the next layer's routing sync - the host reaches the combine long before the GPU does)
 // as running means, and the next layers hand the CPU g / (c + g) of them, where both sides end together - so a small
-// CPU takes a small share.  x: a fixed x.  Unset or 0: every expert on the GPU (the default).  RTX 5090 + 9950X3D,
+// CPU takes a small share.  x: a fixed x.  0: every expert on the GPU (upstream's default).  RTX 5090 + 9950X3D,
 // 600-token prompts: UD-Q4_K_XL 1,528-1,548 -> 1,296-1,369 ms (share 0.65), Q2_0 472-491 -> 445-448, IQ2_XS 507 -> 490
-// (250 tokens 402 -> 368); IQ2_XS on 2 AVX2 workers 512 -> 487 (share 0.49).
-inline double cpu_share_env() {   // -1: measured
+// (250 tokens 402 -> 368); IQ2_XS on 2 AVX2 workers 512 -> 487 (share 0.49).  The fork's NVFP4 + Q8_0-down pack, warm
+// serve turns at 95K (ms; share 0 / a fixed 0.5 / measured): 229 tokens 605-697 / 505-555 / 477-546, 601 768-856 /
+// 612-720 / 601-669, 1,193 1,279 / 809-879 / 788-880; it settles at 0.51 (~75 us an expert each side).  Smaller CPUs,
+// emulated (STRATA_FORCE_AVX2=1, --pool-workers), 600 tokens: 2 workers 0.42, 761 against 900 ms at a fixed 0.5;
+// 1 worker on ggml-cpu's dot 0.26, 891 against 2,330 - a fixed share would cost such a CPU more than it saves.
+inline double cpu_share_env() {   // -1: measured (the fork's default)
     static const double v = [] {
         const char* e = std::getenv("STRATA_PREFILL_CPU_SHARE");
-        if (e == nullptr) return 0.0;
-        if (std::strcmp(e, "auto") == 0) return -1.0;
+        if (e == nullptr || std::strcmp(e, "auto") == 0) return -1.0;
         return std::clamp(std::atof(e), 0.0, 1.0);
     }();
     return v;
