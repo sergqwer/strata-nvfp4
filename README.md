@@ -344,6 +344,7 @@ either way - CUDA pins it for the GPU's copies.
 | `STRATA_EMULATE_CC=75\|86\|89` | tests: answer as that generation (with an engine built as its PTX, `86-virtual`) |
 | `STRATA_QSA_WARP=1\|select\|attn` | the pre-sm_80 QSA kernels on any card, as RTX 20 runs them (A/B) |
 | `--vram-reserve-mib N` | VRAM left unused (default 700, as upstream; this fork used 1500 on Windows until 0.1.38, where 700 measured 0.8% faster with no stalls); a smaller card's budget on a bigger one |
+| `--image-max-tokens N`, `--image-min-tokens N` (`serve.server`) | image tokens a picture becomes at most / at least: a bigger picture is scaled down, a smaller one up, keeping its aspect ratio (also `"max_tokens"` / `"min_tokens"` in the config's `"vision"`; the bundle's config has 1024 and the model's minimum 8; the model reads up to 4096, and more tokens read smaller text and encode slower) |
 | `--low-ram` / `--no-low-ram` | the low-RAM mode on / off (default: on with less than 96 GB installed) |
 | `--ram-budget GIB` | the low-RAM mode with at most GIB of pinned expert copies (upstream's `--resident-budget-gib`) |
 | `STRATA_RESIDENT_HEADROOM_GIB=6` | RAM the low-RAM mode leaves free |
