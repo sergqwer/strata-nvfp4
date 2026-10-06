@@ -25,6 +25,7 @@
 #include "strata/core/hit_hook.hpp"
 #include "strata/kernels/cpu/pool.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstddef>
@@ -229,6 +230,34 @@ struct GpuPlanSink {
     /// kernel reads the mapped arena directly; 2 = a copy kernel stages it inside the graph.  For 1 and 2 `ptr2`
     /// holds the arena's device alias.
     int pcie_mode = 0;
+    int32_t cpu_jobs = 0;   ///< host only: the distinct experts the pool computes for the layer just published
+};
+
+/// Verifier::set_pcie_balance: a verify window's costs, measured (ms, running means): the CPU pool's per expert (c) and
+/// per layer (p0), the GPU's per expert read over PCIe (g) and per layer with none (g0, and gp0 its PCIe part). A
+/// layer then reads over PCIe the m of its nmiss missed experts that minimizes max(g0 + g m, p0 + c (nmiss - m)):
+/// an expert moves only when the CPU would outlast the GPU by more than the expert costs the GPU - one expert costs
+/// the GPU ~4x the CPU's on an RTX 5090 + 9950X3D, about the same with one CPU worker. Until both c and g are seen,
+/// and while `on` is off, pcie_num's fixed share.
+struct PcieModel {
+    bool on = false;
+    double c = 0, p0 = 0, g = 0, g0 = 0, gp0 = 0;
+    uint32_t explore = 0;
+    bool ready() const { return on && c > 0 && g > 0; }
+    /// The PCIe count for a layer of `nmiss` misses (`fixed`: pcie_num's).  Every 64th layer of 2+ misses that would
+    /// send none sends one, so g is measured and stays current.
+    int pick(int nmiss, int fixed) {
+        int m = fixed;
+        if (ready()) {
+            double best = 1e300;
+            for (int k = 0; k <= nmiss; ++k) {
+                const double t = std::max(g0 + g * k, p0 + c * (nmiss - k));
+                if (t < best) { best = t; m = k; }
+            }
+        }
+        if (on && m == 0 && nmiss >= 2 && (++explore & 63u) == 0) m = 1;
+        return m;
+    }
 };
 
 /// The adapter's own state.  One per session, reused every layer so the token path allocates nothing (P2.T10).
@@ -351,6 +380,7 @@ struct ExpertDispatch {
     /// each layer's distinct missed experts (the last ones in routing order) are read by the GPU over PCIe.
     GpuPlanSink* plan = nullptr;
     int pcie_num = 0;
+    PcieModel pcie_model;          ///< Verifier::set_pcie_balance: the PCIe count from measured costs
     int64_t pcie_experts = 0;      ///< distinct experts the GPU read over PCIe in verify windows
     /// #588: routed (token, expert) entries the GPU computed from outside its cache in verify windows: read over PCIe
     /// (--pcie-frac, kind 1) or on another GPU (kind 2).  In neither cache_hits nor cache_refused.
