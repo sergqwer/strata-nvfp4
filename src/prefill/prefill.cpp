@@ -129,14 +129,23 @@ inline int64_t stream_all_min() {
 // 1,279 -> 760, 2,421 1,327 -> 1,072, 4,630 the same (0.7: 487 / 618 at 227 / 600).  As close to the FP16 prompt
 // path as the GPU's rows: layer 0's expert rows 1.086% from it against the GPU's 1.087%; the first token's KL to it
 // lower on 10 of 12 prompts (250-2,100 tokens, two packs; a routing flip moves a single one either way).
-// STRATA_PREFILL_CPU_SHARE=0: every expert on the GPU (A/B).
-inline double cpu_share() {
+// The default is that balance as measured, so a CPU without AVX-512, with fewer cores or slower RAM (or a slower
+// PCIe link) gets its own: each layer's CPU time per expert and the GPU's per streamed expert (CUDA events around its
+// expert work, read after the next layer's routing sync - the host reaches the combine long before the GPU does), as
+// running means, and the next layers hand the CPU g / (c + g) of them - where both sides end together - from 0.5 on.
+// Here it settles at 0.51 (~75 us an expert each side).  Smaller CPUs, emulated (STRATA_FORCE_AVX2=1, --pool-workers),
+// 600 tokens, measured share against a fixed 0.5: 2 workers 0.42, 761 against 900 ms; 1 worker on ggml-cpu's dot
+// 0.26, 891 against 2,330 (and 925 with no CPU share) - a fixed share would cost such a CPU more than it saves.
+// STRATA_PREFILL_CPU_SHARE=x: a fixed x (A/B); 0: every expert on the GPU.
+inline double cpu_share_env() {   // -1: measured (the default)
     static const double v = [] {
         const char* e = std::getenv("STRATA_PREFILL_CPU_SHARE");
-        return e ? std::clamp(std::atof(e), 0.0, 1.0) : 0.5;
+        if (e == nullptr || std::strcmp(e, "auto") == 0) return -1.0;
+        return std::clamp(std::atof(e), 0.0, 1.0);
     }();
     return v;
 }
+inline bool cpu_share_on() { return cpu_share_env() != 0.0; }
 double g_pinned_share = 1.0;
 // The streamed ring: 384 slots when (nearly) every streamed expert is DMA'd from pinned RAM - measured on Q2_0,
 // 8192-token chunks: 96 slots 1153 tok/s, 384 1294 (the next layer's experts arrive during its attention half) -
@@ -617,6 +626,13 @@ struct Prefill::Impl {
     size_t cpu_x_n = 0, cpu_rows_n = 0;
     std::vector<uint8_t> cpu_nact;
     std::vector<kernels::cpu::ExpertJobMulti> cpu_jobs;
+    // the measured share: running means of the CPU's ms per expert and the GPU's per streamed expert, and the share
+    // they balance at (cpu_share_env)
+    double cpu_c_ms = 0, cpu_g_ms = 0, cpu_share_now = 0.5;
+    cudaEvent_t cpu_ev[2] = {};   // the GPU's expert work of the last CPU-sharing layer, read once the stream is done
+    bool cpu_pend = false;
+    double pend_cpu_ms = 0;
+    int64_t pend_n_cpu = 0, pend_n_gpu = 0;
     // The grouping tables in mapped pinned memory, [ids | slot | src] of T_max * K each, then the MMQ bounds: kernels
     // read and write them in place.  A cudaMemcpyAsync of them queues behind the expert blobs the copy stream already
     // holds (up to `ring` of them, ~70 us each), and the GPU idles meanwhile - measured 4.2 s of a 128K prompt's
@@ -732,6 +748,8 @@ void Prefill::release() {
     if (impl_->grp_host) cudaFreeHost(impl_->grp_host);
     for (float* p : {impl_->cpu_x, impl_->cpu_rows, impl_->cpu_ones})
         if (p) cudaFreeHost(p);
+    for (cudaEvent_t e : impl_->cpu_ev)
+        if (e) cudaEventDestroy(e);
     for (void* p : impl_->owned) cudaFree(p);
 }
 
@@ -1612,7 +1630,7 @@ int64_t Prefill::ring_max_slots() {
 int64_t Prefill::ring_slots_for(int64_t chunk) { return ring_slots((size_t) chunk); }
 void Prefill::set_cpu_pool(kernels::cpu::ExpertPool* pool) {
     cpu_pool_ = pool;
-    g_cpu_share_on = pool != nullptr && cpu_share() > 0.0;
+    g_cpu_share_on = pool != nullptr && cpu_share_on();
 }
 
 bool Prefill::ring_bytes_enabled() { return ring_bytes_on(); }
@@ -2573,8 +2591,9 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     // set_cpu_pool: this layer's CPU experts (rows [T * K - rows_cpu, T * K) of Dm), computed on a thread
                     // that reads on_cpu: declared first, so the future (which waits for the thread) goes first
                     std::vector<char> on_cpu;
+                    double cpu_ms = 0;                    // the thread's time (the measured share)
                     std::future<bool> cpu_fut;
-                    int64_t rows_cpu = 0, n_cpu = 0;
+                    int64_t rows_cpu = 0, n_cpu = 0, n_stream = 0;
                     if (fused_l) {
                         if (static bool said = false; !said) {
                             said = true;
@@ -2644,7 +2663,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         int32_t* src_h = grp_mapped ? m.grp_host + 2 * m.grp_tk : m.src_host.data();
                         if (grp_mapped) copy_i32(m.grp_dev, m.ids, T * K, m.cs);
                         else cudaMemcpyAsync(m.ids_host.data(), m.ids, (size_t) T * K * 4, cudaMemcpyDeviceToHost, m.cs);
-                        const bool cpu_maybe = cpu_pool_ != nullptr && cpu_share() > 0.0 && !stream_all && m.src != nullptr &&
+                        const bool cpu_maybe = cpu_pool_ != nullptr && cpu_share_on() && !stream_all && m.src != nullptr &&
                                                lay.native && !m.pp && !lay.fmt.empty() &&
                                                !strata::kernels::cpu::q2_native_kernels(lay.fmt[(size_t) l].gu_type);
                         if (cpu_maybe) {
@@ -2667,6 +2686,17 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                           l, p0);
                         cudaStreamSynchronize(m.cs);
                         core::progress_at("reading the prompt (batched): layer", l, p0);
+                        if (m.cpu_pend) {   // the measured share: the last CPU-sharing layer's GPU time is final now
+                            m.cpu_pend = false;
+                            float g_ms = 0;
+                            if (cudaEventElapsedTime(&g_ms, m.cpu_ev[0], m.cpu_ev[1]) == cudaSuccess) {
+                                constexpr double a = 0.25;
+                                const double c = m.pend_cpu_ms / (double) m.pend_n_cpu, g = g_ms / (double) m.pend_n_gpu;
+                                m.cpu_c_ms = m.cpu_c_ms > 0 ? m.cpu_c_ms + a * (c - m.cpu_c_ms) : c;
+                                m.cpu_g_ms = m.cpu_g_ms > 0 ? m.cpu_g_ms + a * (g - m.cpu_g_ms) : g;
+                                m.cpu_share_now = std::clamp(m.cpu_g_ms / (m.cpu_c_ms + m.cpu_g_ms), 0.05, 0.9);
+                            }
+                        }
                         pt.fold();
                         if (pe.on) {   // the peer's marks so far are done: the primary waited for its last rows
                             int pd = 0; cudaGetDevice(&pd); cudaSetDevice(pe.dev); cudaStreamSynchronize(m.pp->s); pe.fold(); cudaSetDevice(pd);
@@ -2688,7 +2718,9 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 if (c <= strata::kernels::cpu::MAXT && m.src->pinned(l, e)) cand.emplace_back(c, e);
                             }
                             std::sort(cand.begin(), cand.end());
-                            const size_t take = std::min(cand.size(), (size_t) std::llround(cpu_share() * (double) nstream));
+                            const double share = cpu_share_env() >= 0.0 ? cpu_share_env() : m.cpu_share_now;
+                            const size_t take = std::min(cand.size(), (size_t) std::llround(share * (double) nstream));
+                            n_stream = nstream;
                             if (take > 0) {
                                 on_cpu.assign((size_t) m.g->n_expert, 0);
                                 for (size_t i = 0; i < take; ++i) {
@@ -2825,7 +2857,12 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             }
                             const int64_t r0c = T * K - rows_cpu;
                             const strata::kernels::cpu::NativeFmt& cf = lay.fmt[(size_t) l];
-                            cpu_fut = std::async(std::launch::async, [&m, &on_cpu, &cf, src_h, l, T, r0c, this]() -> bool {
+                            if (cpu_share_env() < 0.0) {
+                                if (m.cpu_ev[0] == nullptr) { cudaEventCreate(&m.cpu_ev[0]); cudaEventCreate(&m.cpu_ev[1]); }
+                                cudaEventRecord(m.cpu_ev[0], m.cs);
+                            }
+                            cpu_fut = std::async(std::launch::async, [&m, &on_cpu, &cf, &cpu_ms, src_h, l, T, r0c, this]() -> bool {
+                                const auto t0 = std::chrono::steady_clock::now();
                                 constexpr size_t AB = strata::kernels::cpu::kNativeActBytes;
                                 if (m.cpu_nact.size() < (size_t) T * AB) m.cpu_nact.resize((size_t) T * AB);
                                 std::vector<char> need((size_t) T, 0);
@@ -2852,6 +2889,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                     m.cpu_jobs.push_back(j);
                                 }
                                 cpu_pool_->run_split_multi_native(cf, m.cpu_jobs.data(), (int) m.cpu_jobs.size());
+                                cpu_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
                                 return true;
                             });
                         }
@@ -3324,7 +3362,15 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     }
                     pt.mark(kPfCombine, cs);
                     if (cpu_fut.valid()) {   // set_cpu_pool: the CPU's rows into Dm's tail, row_sd 1 (s_down is in them)
+                        if (cpu_share_env() < 0.0) cudaEventRecord(m.cpu_ev[1], m.cs);   // after the GPU's expert work
                         if (!cpu_fut.get()) { err = "prefill: a CPU expert has no blob"; return false; }
+                        if (cpu_share_env() < 0.0 && n_stream > n_cpu) {
+                            m.cpu_pend = true;
+                            m.pend_cpu_ms = cpu_ms;
+                            m.pend_n_cpu = n_cpu;
+                            m.pend_n_gpu = n_stream - n_cpu;
+                        }
+                        stats_.cpu_share = cpu_share_env() >= 0.0 ? cpu_share_env() : m.cpu_share_now;
                         const int64_t r0c = T * K - rows_cpu;
                         cudaMemcpyAsync(m.Dm + (size_t) r0c * N, m.cpu_rows, (size_t) rows_cpu * N * sizeof(float),
                                         cudaMemcpyHostToDevice, m.cs);

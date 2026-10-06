@@ -36,6 +36,7 @@ struct PrefillStats {
     int64_t experts_dma = 0;        ///< ...of which straight from the pinned arena (no CPU copy)
     int64_t experts_resident = 0;   ///< expert-layer groups served from the VRAM tier
     int64_t experts_cpu = 0;        ///< ...computed on the CPU pool instead of streamed (STRATA_PREFILL_CPU_SHARE)
+    double cpu_share = 0;           ///< ...the share of the streamed ones it took last (measured by default)
     double ms_ple = 0;
 };
 
@@ -170,9 +171,10 @@ public:
 
     /// The CPU expert pool (decode's, idle while a prompt is read). A chunk below stream_all_min() tokens (4096 with the
     /// pool, 1024 without) - an agent's tool output - then hands it the non-resident experts routed by at most MAXT of
-    /// its tokens, fewest first, up to STRATA_PREFILL_CPU_SHARE of the experts it would stream: the CPU reads them from
-    /// RAM while the rest come over PCIe, which alone was the floor of such a chunk. Their rows go to Dm's tail, as a
-    /// peer's do. Not bit-identical to the GPU's rows (the CPU's own activation format), as close to the FP16 path.
+    /// its tokens, fewest first, up to a share of the experts it would stream (measured: where both sides end together;
+    /// STRATA_PREFILL_CPU_SHARE fixes one). The CPU reads them from RAM while the rest come over PCIe, which alone was
+    /// the floor of such a chunk. Their rows go to Dm's tail, as a peer's do. Not bit-identical to the GPU's rows (the
+    /// CPU's own activation format), as close to the FP16 path.
     /// Null (default) or a share of 0: every expert on the GPU. Only for a pool no other thread runs meanwhile (no
     /// batch slots). Set before `init`.
     void set_cpu_pool(kernels::cpu::ExpertPool* pool);
