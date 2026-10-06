@@ -177,7 +177,7 @@ public:
     /// while the rest come over PCIe; their rows go to Dm's tail, as a peer's do. Not bit-identical to the GPU's rows
     /// (the CPU's own activation format). Unset (default) or null: every expert on the GPU. Only for a pool no other
     /// thread runs meanwhile (no batch slots); on a layer split every stage may have it - one stage at a time takes it
-    /// for a chunk. Set before `init`.
+    /// for a chunk. Set before `init`.  The fork: on an NVFP4 pack the share's chunks go up to 4096 tokens.
     void set_cpu_pool(kernels::cpu::ExpertPool* pool);
     /// With STRATA_PREFILL_CPU_SHARE set and `applies` (a pool will be set): the chunks staged after their routing - the
     /// only ones the share applies to - go up to STRATA_PREFILL_CPU_SHARE_MAX tokens (default 3072) instead of 1024.
