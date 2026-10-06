@@ -163,6 +163,12 @@ inline int64_t stream_all_min() {
 // gate at cpu_maybe).  x: a fixed x.  Unset or 0: every expert on the GPU (the default).  RTX 5090 + 9950X3D,
 // 600-token prompts: UD-Q4_K_XL 1,528-1,548 -> 1,296-1,369 ms (share 0.65), Q2_0 472-491 -> 445-448, IQ2_XS 507 -> 490
 // (250 tokens 402 -> 368); IQ2_XS on 2 AVX2 workers 512 -> 487 (share 0.49).
+// The fork's NVFP4 + Q8_0-down pack, warm serve turns at 95K (ms; share 0 / a fixed 0.5 / measured): 229 tokens
+// 605-697 / 505-555 / 477-546, 601 768-856 / 612-720 / 601-669, 1,193 1,279 / 809-879 / 788-880; it settles at 0.51
+// (~75 us an expert each side).  Smaller CPUs, emulated (STRATA_FORCE_AVX2=1, --pool-workers), 600 tokens: 2 workers
+// 0.42, 761 against 900 ms at a fixed 0.5; 1 worker on ggml-cpu's dot 0.26, 891 against 2,330 - a fixed share would
+// cost such a CPU more than it saves.  (The fork had `auto` as its default since 0.1.39-nvfp4.4; 0.1.41's default is
+// the same `auto`, on the same one-GPU paths.)
 // 0.1.41: ON BY DEFAULT where it was measured (CUDA builds, one GPU, no batch slots): STRATA_PREFILL_CPU_SHARE unset
 // behaves as `auto` with STRATA_PREFILL_CPU_SHARE_MAX=1024 (chunks below 1024 tokens: -20..-35% at 512 and 1000 tokens
 // on an RTX 3060, a Tesla P100 and an RTX 5070, 8/8 pairs each; mean KL against the share off about 0.004).
