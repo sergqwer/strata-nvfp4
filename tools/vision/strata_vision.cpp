@@ -5,7 +5,11 @@
 // rows at the image's pad tokens and gives them their 2-D M-RoPE positions (see --serve GENI in generate.cpp).
 //
 //   strata-vision --mmproj <mmproj.gguf> --model <text model .gguf, first split> [--gpu] [--threads N]
-//                 [--max-tokens N] [--flash-attn on|off|auto]
+//                 [--max-tokens N] [--min-tokens N] [--flash-attn on|off|auto]
+//
+// --max-tokens / --min-tokens: the image tokens a picture becomes (mtmd's image_max_tokens / image_min_tokens): a
+// larger picture is scaled down to at most N, a smaller one up to at least N, keeping its aspect ratio.  Unset: the
+// projector's own limits (Qwen3-VL: 8 to 4096).  More tokens read finer detail (small text) and encode slower.
 //
 // Resident: prints "READY <n_embd>", then per stdin line
 //   ENC <image path> <output path>   ->  "OK <n_tokens> <nx> <ny> <ms>"  or  "ERR <message>"
@@ -51,7 +55,7 @@ bool parse_enc(const std::string& line, std::string& img, std::string& out) {
 int main(int argc, char** argv) {
     std::string mmproj, model;
     bool gpu = false;
-    int threads = 0, max_tokens = 0;
+    int threads = 0, max_tokens = 0, min_tokens = 0;
     llama_flash_attn_type fa = LLAMA_FLASH_ATTN_TYPE_AUTO;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -64,6 +68,7 @@ int main(int argc, char** argv) {
         else if (a == "--gpu") gpu = true;
         else if (a == "--threads") threads = std::atoi(next().c_str());
         else if (a == "--max-tokens") max_tokens = std::atoi(next().c_str());
+        else if (a == "--min-tokens") min_tokens = std::atoi(next().c_str());
         else if (a == "--flash-attn") {   // FA keeps K and V in FP16; off = the attention in FP32
             const std::string v = next();
             fa = v == "on" ? LLAMA_FLASH_ATTN_TYPE_ENABLED : v == "off" ? LLAMA_FLASH_ATTN_TYPE_DISABLED
@@ -73,7 +78,7 @@ int main(int argc, char** argv) {
     }
     if (mmproj.empty() || model.empty()) {
         std::fprintf(stderr, "usage: strata-vision --mmproj <mmproj.gguf> --model <model.gguf> [--gpu] [--threads N] "
-                             "[--max-tokens N] [--flash-attn on|off|auto]\n");
+                             "[--max-tokens N] [--min-tokens N] [--flash-attn on|off|auto]\n");
         return 2;
     }
     // On the CPU the GPU stays unseen: a CUDA build otherwise opens a context there (measured: 0.4-0.7 GB of VRAM,
@@ -102,7 +107,13 @@ int main(int argc, char** argv) {
     // on the CPU without --threads: one per core (mtmd's own default is 4 threads)
     if (threads <= 0 && !gpu) threads = std::max(1u, std::thread::hardware_concurrency() / 2);
     if (threads > 0) cp.n_threads = threads;
+    if (max_tokens > 0 && min_tokens > max_tokens) {
+        std::printf("ERR --min-tokens %d is above --max-tokens %d\n", min_tokens, max_tokens);
+        std::fflush(stdout);
+        return 2;
+    }
     if (max_tokens > 0) cp.image_max_tokens = max_tokens;
+    if (min_tokens > 0) cp.image_min_tokens = min_tokens;
     mtmd_context* ctx = mtmd_init_from_file(mmproj.c_str(), text, cp);
     if (!ctx || !mtmd_support_vision(ctx)) {
         std::printf("ERR cannot load the vision encoder %s\n", mmproj.c_str());
