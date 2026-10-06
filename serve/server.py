@@ -2671,12 +2671,6 @@ class Service:
             from strata_tokenizer import PromptEncoder
             self.prompts = PromptEncoder(tokenizer)
 
-    def encode_rendered(self, prompt: str) -> list[int]:
-        """#567: a rendered prompt's ids, from the last shared prefix (the same ids as a full encode)."""
-        if self.prompts is None:
-            return self.tok.encode(prompt, parse_special=True)
-        return self.prompts.encode(prompt)
-
     def loaded(self) -> bool:
         return not hasattr(self.engine, "alive") or self.engine.alive()
 
@@ -3198,10 +3192,13 @@ class Service:
         the control tokens the template writes are control tokens."""
         marked, marked_tools, changed = mark_think_literals(messages, tools, self.literals)
         prompt = self.render_prompt(marked, marked_tools, kwargs)
-        if not changed:
-            return self.encode_rendered(prompt)            # #567
-        prompt, plain = unmark_think_literals(prompt, self.literals)
-        return self.tok.encode(prompt, parse_special=True, plain=plain)
+        plain = ()
+        if changed:
+            prompt, plain = unmark_think_literals(prompt, self.literals)
+        if self.prompts is not None:            # #567: only what follows the last special shared with a recent prompt
+            return self.prompts.encode(prompt, plain)
+        return self.tok.encode(prompt, parse_special=True, plain=plain) if plain else \
+            self.tok.encode(prompt, parse_special=True)
 
     def _note_unreadable_tool_images(self, messages):
         """A picture a tool returned (Claude Code's Read of an image file) that this server cannot read - it has no
