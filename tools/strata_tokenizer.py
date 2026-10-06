@@ -261,11 +261,10 @@ class Tokenizer:
         """
         return self._encode_matching(text, self._special_re if parse_special else self._always_re, plain)
 
-    def encode_marked(self, text: str, parse_special: bool = False) -> tuple[list[int], list[tuple[int, int]]]:
+    def encode_marked(self, text: str, parse_special: bool = False, plain=()) -> tuple[list[int], list[tuple[int, int]]]:
         """encode() and its resume points: (end offset in `text`, ids so far) after every special-token match."""
         marks: list[tuple[int, int]] = []
-        return self._encode_matching(text, self._special_re if parse_special else self._always_re,
-                                   marks=marks), marks
+        return self._encode_matching(text, self._special_re if parse_special else self._always_re, plain, marks), marks
 
     def token_bytes(self, i: int) -> bytes:
         """The raw bytes of one token (a multi-byte character can be split across tokens)."""
@@ -287,7 +286,7 @@ class Tokenizer:
         return b"".join(self.token_bytes(i) for i in ids).decode("utf-8", errors=errors)
 
 
-# ------------------------------------------------------------------ incremental prompts
+# ------------------------------------------------------------------ incremental prompts (#567)
 def common_prefix_len(a: str, b: str) -> int:
     """Length of the longest common prefix, by slices (C speed) rather than a loop over characters."""
     n = min(len(a), len(b))
@@ -308,8 +307,22 @@ def common_prefix_len(a: str, b: str) -> int:
     return lo
 
 
+def plain_agree_until(a, b, limit: int) -> int:
+    """The first position below `limit` where the `plain` spans (#537) of two texts differ - a position inside a
+    span in one and not in the other - or `limit`.  Spans are (start, end), sorted and disjoint."""
+    def clip(spans):
+        return [(x, min(y, limit)) for x, y in spans if x < limit and y > x]
+    ca, cb = clip(a), clip(b)
+    for (xa, ya), (xb, yb) in zip(ca, cb):
+        if (xa, ya) != (xb, yb):
+            return min(xa, xb) if xa != xb else min(ya, yb)
+    if len(ca) != len(cb):
+        return (ca if len(ca) > len(cb) else cb)[min(len(ca), len(cb))][0]
+    return limit
+
+
 class PromptEncoder:
-    """`tok.encode(text, parse_special=True)` for chat prompts, reusing the ids of an earlier prompt.
+    """`tok.encode(text, parse_special=True, plain=...)` for chat prompts, reusing the ids of an earlier prompt.
 
     A chat client sends the whole conversation every turn, and the rendered prompt of turn n+1 starts with most of
     turn n's.  Running BPE over all of it again costs hundreds of milliseconds at 100K tokens, even when the engine
@@ -317,12 +330,14 @@ class PromptEncoder:
     and only the rest is encoded.
 
     WHY THAT IS EXACT.  Encoding splits the text at special-token matches and BPE-encodes each stretch between two
-    matches on its own (`_encode_matching`): nothing crosses a match.  Whether a match starts at position q depends
-    only on text[q : q + max_special_len].  So if the two texts agree up to L, every decision the scan makes at a
-    position before c = the end of some match, with c + max_special_len - 1 <= L, is the same for both - the same
-    matches, the same stretches, the same ids up to c - and from c the scan starts afresh, exactly as it does on
-    text[c:].  Hence encode(new) == ids_old[:ids at c] + encode(new[c:]).  The margin matters only for a
-    vocabulary where a literal overlaps another's end; it costs re-encoding one short stretch.
+    matches on its own (`_encode_matching`): nothing crosses a match.  Whether a match is taken at position q
+    depends only on text[q : q + max_special_len] and on whether q lies inside a `plain` span (#537: a </think>
+    quoted in a message is text).  So if the two texts agree up to L and their plain spans agree below L, every
+    decision the scan makes at a position before c = the end of some match, with c + max_special_len - 1 <= L, is
+    the same for both - the same matches, the same stretches, the same ids up to c - and from c the scan starts
+    afresh, exactly as it does on text[c:] with the spans shifted by c.  Hence encode(new) == ids_old[:ids at c] +
+    encode(new[c:]).  The margin matters only for a vocabulary where a literal overlaps another's end; it costs
+    re-encoding one short stretch.
 
     A few recent prompts are kept (one per conversation: the one a prompt extends is replaced by it), so a second
     client does not evict the first.  The tokenizer needs `encode_marked` and `max_special_len`.
@@ -330,33 +345,36 @@ class PromptEncoder:
 
     def __init__(self, tok, keep: int = 4):
         self.tok, self.keep = tok, keep
-        self.entries: list[tuple[str, list[int], list[int], list[int]]] = []   # (text, ids, mark ends, mark counts)
+        # (text, plain spans, ids, mark ends, mark counts)
+        self.entries: list[tuple[str, tuple, list[int], list[int], list[int]]] = []
         self.lock = threading.Lock()
         self.last_reused = 0                            # characters taken from an earlier prompt (for tests)
 
-    def encode(self, text: str) -> list[int]:
+    def encode(self, text: str, plain=()) -> list[int]:
+        plain = tuple(sorted(plain))
         with self.lock:
             entries = self.entries                      # replaced, never changed in place
         margin = self.tok.max_special_len - 1
         src, cut_k = None, -1
         for e in entries:
-            limit = common_prefix_len(e[0], text) - margin
-            k = bisect.bisect_right(e[2], limit) - 1       # the last boundary c with c <= limit
-            if k >= 0 and (src is None or e[2][k] > src[2][cut_k]):
+            same = plain_agree_until(e[1], plain, common_prefix_len(e[0], text))
+            k = bisect.bisect_right(e[3], same - margin) - 1   # the last boundary c with c <= same - margin
+            if k >= 0 and (src is None or e[3][k] > src[3][cut_k]):
                 src, cut_k = e, k
         if src is None:
-            ids, marks = self.tok.encode_marked(text, parse_special=True)
+            ids, marks = self.tok.encode_marked(text, parse_special=True, plain=plain)
             ends, counts = [m[0] for m in marks], [m[1] for m in marks]
             self.last_reused = 0
         else:
-            c, n = src[2][cut_k], src[3][cut_k]
-            tail, marks = self.tok.encode_marked(text[c:], parse_special=True)
-            ids = src[1][:n] + tail
-            ends = src[2][:cut_k + 1] + [c + m[0] for m in marks]
-            counts = src[3][:cut_k + 1] + [n + m[1] for m in marks]
+            c, n = src[3][cut_k], src[4][cut_k]
+            rest = tuple((max(x - c, 0), y - c) for x, y in plain if y > c)
+            tail, marks = self.tok.encode_marked(text[c:], parse_special=True, plain=rest)
+            ids = src[2][:n] + tail
+            ends = src[3][:cut_k + 1] + [c + m[0] for m in marks]
+            counts = src[4][:cut_k + 1] + [n + m[1] for m in marks]
             self.last_reused = c
         with self.lock:
-            self.entries = [(text, ids, ends, counts)] + [e for e in self.entries if e is not src][:self.keep - 1]
+            self.entries = [(text, plain, ids, ends, counts)] + [e for e in self.entries if e is not src][:self.keep - 1]
         return list(ids)
 
 
