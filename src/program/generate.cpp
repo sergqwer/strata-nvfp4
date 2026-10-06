@@ -12101,8 +12101,9 @@ int main(int argc, char** argv) {
                         drive.d.pcie_num);
         if (rounds > 0 && ver.pcie_balance_on()) {
             const strata::core::PcieModel& pm = drive.d.pcie_model;
-            std::printf("%-24s CPU %.0f us an expert + %.0f a layer, GPU %.0f us a PCIe expert + %.0f a layer (the PCIe "
-                        "count per layer from these)\n", "pcie model", 1000 * pm.c, 1000 * pm.p0, 1000 * pm.g, 1000 * pm.g0);
+            std::printf("%-24s CPU %.0f us + %.0f an expert + %.0f a PCIe one, GPU %.0f us + %.0f a PCIe expert (the "
+                        "PCIe count per layer from these)\n", "pcie model", 1000 * pm.a, 1000 * pm.c, 1000 * pm.d,
+                        1000 * pm.g0, 1000 * pm.g);
         }
         (void) pool_ms0;
         if (use_mtp && rounds > 0)
