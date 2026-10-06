@@ -141,6 +141,36 @@ class RestartWaiters(unittest.TestCase):
         self.assertEqual([out[i][:2] for i in range(2)], [("http", 503)] * 2, out)
         self.clean()
 
+    def killed_mid_read(self, slots, others):
+        """A long prompt is being read (alone, or with `others` short requests arriving meanwhile: it gives way and is
+        admitted into a slot) when the engine dies: every request ends at once with a 503.  It used to wait out the
+        300 s drain for an end line that had been read already."""
+        self.start(slots)
+        out, threads = {}, []
+        threads.append(threading.Thread(target=self.post, args=("LONGREPLY " + "word " * 740, out, "long")))
+        threads[0].start()
+        time.sleep(0.25)
+        for i in range(others):
+            th = threading.Thread(target=self.post, args=(f"short {i}", out, i))
+            th.start()
+            threads.append(th)
+            time.sleep(0.05)
+        time.sleep(0.1)
+        t0 = time.time()
+        self.kill()
+        self.joined(threads)
+        self.assertLess(time.time() - t0, 20)
+        self.assertTrue(all(v[0] == "ok" or v[:2] == ("http", 503) for v in out.values()), out)
+        self.assertEqual(out["long"][:2], ("http", 503), out)
+        self.clean()
+        self.assertEqual(self.chat("after")["choices"][0]["message"]["content"], "ok, done.")
+
+    def test_killed_while_reading_alone(self):
+        self.killed_mid_read(2, 0)
+
+    def test_killed_while_reading_with_others_arriving(self):
+        self.killed_mid_read(2, 2)
+
     def test_solo_engine_is_unchanged(self):
         self.start(4, fit=0)                                          # the engine turns batching off
         self.kill()

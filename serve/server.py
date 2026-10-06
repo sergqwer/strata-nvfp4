@@ -667,6 +667,7 @@ class StrataEngine:
             self.wait_lens: list[list[int]] = []        # ... their prompt lengths (a long read gives way to short ones)
             self.ctl_epoch = 0                          # how often the control lines were taken
             self.ctl = threading.Lock()                 # one admission or solo request on the control lines at a time
+        self.gen = self.__dict__.get("gen", 0) + 1      # which engine process this is (a request notes its own)
         self._yielded = None                            # (slot, tokens read): the last request on them gave way
         self.wlock = threading.Lock()                   # stdin writes from several request threads
         self.pump = threading.Thread(target=self._pump, daemon=True)
@@ -949,15 +950,20 @@ class StrataEngine:
                 self._ctl_result = ("done", None)
                 return
 
-    def _drain_control(self, until: str, timeout: float = 300.0):
+    def _drain_control(self, until: str, timeout: float = 300.0, born: int | None = None):
         """After a consumer left early: read the control lines up to the next `until` line (DONE or BADM) so the next
-        request does not read this one's leftovers.  Returns that line (None: the engine ended or never answered)."""
+        request does not read this one's leftovers.  Returns that line (None: the engine ended or never answered).
+        `born`: the engine process (self.gen) the request started on; once that one is gone there is nothing to
+        drain - its end line was read already (by the request's own EngineDied), and waiting for another one held
+        a request that had failed for the whole 300 s (#1012), or read the lines of the engine that replaced it."""
         end = time.monotonic() + timeout
         while time.monotonic() < end:
+            if born is not None and (self.gen != born or not self.alive()):
+                return None
             try:
-                line = self.lines.get(timeout=max(0.1, end - time.monotonic()))
+                line = self.lines.get(timeout=max(0.1, min(1.0, end - time.monotonic())))
             except queue.Empty:
-                break
+                continue
             if line is None:
                 return None
             if line.startswith("DONE"):
@@ -1074,6 +1080,7 @@ class StrataEngine:
         if not self.alive():
             raise EngineDied("the engine is unavailable; this request was not sent")
         self.progress, self.progress_ms, self.reused = None, 0, 0
+        born = self.gen                                 # the engine process this request is sent to
         keys = self.sampling_keys(sampling or {})
         out: list[int] = []
         pending: list[int] = []
@@ -1081,7 +1088,7 @@ class StrataEngine:
         ok = yield from self._take_control(cancel, len(prompt))
         if not ok:
             return
-        holding = True
+        holding, born = True, self.gen                  # (the engine it now has the control lines of)
         btrace("ctl acquired")
         slot, gen0, reserved = None, None, None
         phase = "none"            # solo -> (admit -> slot) ; "done" once the engine has finished with this request
@@ -1093,7 +1100,7 @@ class StrataEngine:
                     ok = yield from self._take_control(cancel, len(prompt))
                     if not ok:
                         return
-                    holding = True
+                    holding, born = True, self.gen                  # (the engine it now has the control lines of)
                 with self.slot_cv:
                     alone = not any(self.slot_busy) and self.waiting == 0
                 if alone and left > 1:
@@ -1161,7 +1168,7 @@ class StrataEngine:
                         ok = yield from self._take_control(cancel, len(prompt), after_epoch=epoch)
                         if not ok:
                             return
-                        holding = True
+                        holding, born = True, self.gen                  # (the engine it now has the control lines of)
                     while not self.slot_q[slot].empty():
                         self.slot_q[slot].get_nowait()
                     head = f"BGENI {slot} {left}{keys} {embeddings}" if embeddings else f"BGEN {slot} {left}{keys}"
@@ -1253,11 +1260,13 @@ class StrataEngine:
             # a consumer that left early (or an error): keep the engine and this server in step
             btrace("finally phase", phase, "slot", slot, "holding", holding)
             try:
+                if phase in ("solo", "admit") and (self.gen != born or not self.alive()):
+                    phase = "none"                      # #1012: its engine is gone: nothing to stop or drain
                 if phase == "solo":
                     self._send("STOP")
-                    self._drain_control("DONE")
+                    self._drain_control("DONE", born=born)
                 elif phase == "admit":
-                    line = self._drain_control("BADM")
+                    line = self._drain_control("BADM", born=born)
                     if line and line.startswith("BADM ") and line.split()[2:3] == ["1"]:
                         phase = "slot"
             except EngineDied:
