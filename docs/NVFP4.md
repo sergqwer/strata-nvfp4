@@ -372,6 +372,26 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### Upstream 0.1.40.1 (2026-10-07, release 0.1.40-nvfp4.2)
+
+Upstream's hotfix changes the server and setup only. The engine is 0.1.40-nvfp4.1's, byte for byte (the same exe).
+
+- **#1058, upstream's way.** The maintainer fixed it in 0.1.40.1 with the conditions of #1068, which upstream closed when it rewrote its history:
+  - the call begins a line;
+  - only whitespace or further calls follow it;
+  - the turn ends by itself.
+
+  Two things go further than #1068:
+  - no call is taken from a code fence or inline code, which closes the gap #1068 left (an opener inside a fence that never closes);
+  - a call quoted in a fence or inline code in the visible answer is text too.
+
+  The fork drops its own gate and takes upstream's, so `finish()` takes the finish reason (`reason`), not a flag. The counter is upstream's `totals.tool_calls_from_reasoning`, and a log line notes a call kept as text on a max-tokens cut.
+
+  One reading differs from #1068. In a mixed tail, a declared call followed by an undeclared `<function=tool_call>` envelope, upstream delivers the declared block. #1068 kept both as text. The issue's author agreed the per-block reading is the consistent one. Upstream's 37-entry corpus (`serve/fixtures/rcall_specimens.json`) passes here.
+- **Restarts (#1012).** A restart keeps the admission state, so waiting requests no longer hang or fail. A request that meets a restart in progress gets EngineDied. A `--batch` request whose engine died during its prompt read ends at once instead of after 300 s.
+- **An engine that exits after an unread ERR line says why** (#997, #890).
+- **Checks:** the server's tests, 466 OK.
+
 ### On upstream 0.1.40 (2026-10-06, release 0.1.40-nvfp4.1)
 
 - **Upstream since 0.1.39** (its release notes have the full list):
@@ -390,7 +410,7 @@ Tried and dropped:
   - **The CPU share.** It leaves the expert order before 0.1.40's resident sort (`STRATA_MMQ_RESIDENT_SORT_NE`). That sort only runs when a layer's experts are all resident, and then none go to the CPU.
   - **NVFP4.** 0.1.40's float4 combine kernel takes `row_sd` (NVFP4's per-row down scale). Q2_0 is added to 0.1.40's new format tables.
   - **#567.** The author's current version, 76b916e. `PromptEncoder.encode(prompt, plain)` resumes across the plain spans of 0.1.40's literal marks, so a conversation that quotes `<think>` or a control token re-encodes only its new part. The fork's copy encoded such a prompt in full every turn.
-- **A tool call quoted in the thinking (upstream #1058, fixed here, sent as #1068).** 0.1.40's #804 rescue delivered any complete call to a declared tool written inside the reasoning. That included an example the model only quoted, even on a reply cut by max_tokens (the issue shows a quoted `rm -rf build`). Such a call is now held until the turn ends. It is delivered only if:
+- **A tool call quoted in the thinking (upstream #1058; this fork's gate, sent as #1068, was replaced by 0.1.40.1's in 0.1.40-nvfp4.2).** 0.1.40's #804 rescue delivered any complete call to a declared tool written inside the reasoning. That included an example the model only quoted, even on a reply cut by max_tokens (the issue shows a quoted `rm -rf build`). Such a call is now held until the turn ends. It is delivered only if:
   - its `<tool_call>` begins a line;
   - only whitespace and further calls follow it;
   - the turn ends by itself (finish `stop`).
