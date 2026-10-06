@@ -184,6 +184,16 @@ inline double cpu_share_env() {   // -1: measured
     return v == -2.0 ? (g_share_default ? -1.0 : 0.0) : v;
 }
 inline bool cpu_share_on() { return cpu_share_env() != 0.0; }
+// The fork: on an NVFP4 pack the share's chunks go up to 4096 tokens, the default's and an explicit share's alike (a
+// STRATA_PREFILL_CPU_SHARE_MAX wins): the CPU takes the experts few of its tokens route to, and streaming every expert
+// pays only above that.  RTX 5090, NVFP4 + Q8_0-down, warm serve turns: 1,620 tokens 1,317 -> 992 ms, 2,425 1,339 ->
+// 1,114; 4,630 at 8192 1,397 -> 1,509 (worse: the stream-all stays).  NVFP4 packs only: their 2.76 MB experts make such
+// a chunk PCIe-bound.  Q2_0's 1.15 MB ones do not (the share changed nothing below 1,300 tokens, 32 GB card or 12 GB
+// emulated), and there routed-only lost: 2,099 tokens 714 -> 763 ms, 1,299 482 -> 549.
+inline bool cpu_share_nvfp4() {
+    const auto& lay = kernels::cpu::expert_layout();
+    return lay.native && !lay.fmt.empty() && lay.fmt[0].gu_type == kernels::cpu::kNvfp4Type;
+}
 // STRATA_PREFILL_CPU_SHARE_MAX (default 3072, at least 1024): with the share on, chunks below it are staged after their
 // routing - so they can hand the CPU its share - instead of streaming every expert the cards do not hold.  The share pays
 // on chunks up to ~3K tokens, where few tokens route to many of the streamed experts; 1024 keeps the old limit.
@@ -193,6 +203,7 @@ inline int64_t cpu_share_max() {
         return e ? std::max<int64_t>(1024, (int64_t) std::atoll(e)) : (int64_t) 3072;
     }();
     static const bool explicit_max = std::getenv("STRATA_PREFILL_CPU_SHARE_MAX") != nullptr;
+    if (!explicit_max && cpu_share_nvfp4()) return 4096;   // the fork: NVFP4 packs (above)
     if (g_share_default && cpu_share_explicit() == -2.0 && !explicit_max) return 1024;   // the default's measured range
     return v;
 }
