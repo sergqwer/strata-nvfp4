@@ -2969,7 +2969,8 @@ class Service:
                                     finish = "stop"         # gen.close() below STOPs the engine, as for a stop token
                                     break
                                 if (self.reasoning_loop_recovery and not recovery_count and parser.state == "reasoning"
-                                        and n >= next_loop_check and not parser.buf and not detok.pending()):
+                                        and n >= next_loop_check and not parser.buf and not parser.pending
+                                        and not detok.pending()):
                                     next_loop_check = n + LOOP_CHECK_EVERY
                                     repeat_coverage = reasoning_repeat_coverage(reasoning_text)
                                     if repeat_coverage >= LOOP_COVERAGE:
@@ -3162,7 +3163,7 @@ class Service:
         finally:
             if emb:
                 Path(emb).unlink(missing_ok=True)
-        for ev in cut(parser.finish()):
+        for ev in cut(parser.finish(finish)):
             yield "event", ev
         if stops is not None and stops.hit is None and stops.held:
             yield "event", Event("content", stops.flush())     # the held tail was not a stop string after all
@@ -3184,6 +3185,10 @@ def prompt_tokens_seen(prompt_tokens: int, last: dict) -> int:
         return prompt_tokens
     return min(prompt_tokens, int(last.get("reused") or 0) + int(read))
 
+        if parser.rescued or parser.refused:
+            self.totals["tool_calls_from_reasoning"] = self.totals.get("tool_calls_from_reasoning", 0) + parser.rescued
+            print(f"[strata] tool calls inside the thinking: {parser.rescued} read as calls, {parser.refused} kept as "
+                  f"reasoning (quoted, or the turn did not end on a stop)", flush=True)
 
 def request_timings(prompt_tokens: int, generated: int, last: dict) -> dict | None:
     """One request's `timings` in llama.cpp's names (what its clients show as speed), from the engine's own clock
