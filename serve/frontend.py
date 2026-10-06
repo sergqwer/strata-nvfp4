@@ -601,6 +601,7 @@ class OutputParser:
         # character of the reasoning so far
         self.rheld: list = []
         self.rline = False
+        self.rcalls = [0, 0]   # complete calls with a declared name in the reasoning: delivered, kept as text
         self.rprev = "\n"
         # stream_tools: a tool call is also reported while it is being written - "tool_start" (its name and id) as
         # soon as the name is known, then "tool_args" pieces of its JSON arguments (string parameters character by
@@ -737,6 +738,7 @@ class OutputParser:
     def _release(self, out: list):
         """#1058: the held calls were quoted in the thinking, not made: their text goes back to the reasoning."""
         if self.rheld:
+            self.rcalls[1] += sum(kind == "call" for kind, val, raw in self.rheld)
             text = "".join(raw if kind == "call" else val for kind, val, raw in self.rheld)
             self.rheld = []
             self._reasoning(out, text)
@@ -776,6 +778,7 @@ class OutputParser:
                     if call is not None:
                         self.rheld.append(("call", call, raw))   # #1058: a call only if the turn ends after it
                     else:
+                        self.rcalls[1] += name in self.schemas
                         self._release(out)
                         self._reasoning(out, raw)
                     self.buf = body[end + len(CALL_END):]
@@ -880,6 +883,7 @@ class OutputParser:
         if self.rheld:
             if natural and self.state == "reasoning" and not self.buf.strip():
                 out += [Event("tool_call", call=val) for kind, val, raw in self.rheld if kind == "call"]
+                self.rcalls[0] += len(out)
                 self.rheld, self.buf = [], ""
             else:
                 self._release(out)

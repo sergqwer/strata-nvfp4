@@ -55,6 +55,19 @@ class Parser(unittest.TestCase):
                     self.assertEqual(joined(evs, "content"), "")
                     self.assertFalse([e for e in evs if e.kind in ("tool_start", "tool_args")])   # never streamed
 
+    def test_the_counts(self):
+        """#1058: GET /metrics' totals come from these: calls delivered, and declared calls kept as text."""
+        for text, natural, want in (("x\n" + CALL, True, [1, 0]), ("x\n" + CALL + "\n" + CALL, True, [2, 0]),
+                                    ("x\n" + CALL, False, [0, 1]), ("x " + CALL + "\n", True, [0, 1]),
+                                    ("x\n" + CALL + " more", True, [0, 1]), ("x " + OTHER, True, [0, 0])):
+            for width in (1, 100_000):
+                with self.subTest(text=text[:4], natural=natural, width=width):
+                    p = OutputParser(thinking=True, tools=TOOLS, stream_tools=True)
+                    for i in range(0, len(text), width):
+                        p.feed(text[i:i + width])
+                    p.finish(natural=natural)
+                    self.assertEqual(p.rcalls, want)
+
     def test_a_quoted_call_stays_reasoning(self):
         """#1058: what the model only quoted while thinking is never a call - its text comes back whole."""
         cases = {"more thought after it": ("before " + CALL + " after</think>\n\nanswer", True),
@@ -170,6 +183,9 @@ class OverHttp(unittest.TestCase):
             evs = [json.loads(line[6:]) for line in raw.splitlines() if line.startswith("data: {")]
             order = [e["content_block"]["type"] for e in evs if e["type"] == "content_block_start"]
             self.assertEqual(order, ["thinking", "tool_use"])
+            with urllib.request.urlopen(f"http://127.0.0.1:{httpd.server_address[1]}/metrics", timeout=30) as r:
+                totals = json.loads(r.read())["totals"]
+            self.assertEqual((totals["reasoning_calls_delivered"], totals["reasoning_calls_kept_as_text"]), (1, 0))
             tool = [e["delta"]["partial_json"] for e in evs if e["type"] == "content_block_delta"
                     and e["delta"]["type"] == "input_json_delta"]
             self.assertEqual(json.loads("".join(tool)), {"path": "file.txt"})
