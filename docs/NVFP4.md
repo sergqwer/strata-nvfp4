@@ -139,6 +139,19 @@ back to ggml-cpu.
 
 (one expert's gate+up, 1280 rows of 2560, cache-resident; the pool itself is bound by DRAM)
 
+Without AVX-512 (Zen 2/3, Intel 12th-14th gen), `src/kernels/cpu/nvfp4_avx2.cpp` does the same in 256-bit lanes,
+up to 8 tokens a pass. Each token's arithmetic is `ggml_vec_dot_nvfp4_q8_0`'s AVX2 path step for step (vpsignb,
+vpmaddubsw + vpmaddwd, the same FMA order, `hsum_float_8`), so every row is bit-equal to it: an AVX2 CPU computes
+what it did before, faster. `STRATA_NO_NVFP4_256=1` falls back to ggml-cpu.
+
+| tokens | ggml-cpu | AVX2 | speedup |
+|---|---|---|---|
+| 1 | 0.100 ms | 0.089 ms | 1.12x |
+| 4 | 0.399 ms | 0.200 ms | 2.00x |
+| 8 | 0.807 ms | 0.344 ms | 2.35x |
+
+Under DRAM load (`--bw`, 6 threads): 47.3 against 24.0 GB/s at 4 tokens, 26.6 against 12.0 at 8.
+
 ## Loading
 
 `experts.bin` is read unbuffered (`FILE_FLAG_NO_BUFFERING`) straight into the arena by 16 readers, while a
@@ -358,6 +371,62 @@ Tried and dropped:
 - A drafter window of 8K or 4K instead of 32K: 0.54 s less prompt reading at 32K, but decode -14% at that length.
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
+
+### Small prompt chunks with the CPU (2026-10-06, release 0.1.39-nvfp4.4)
+
+An agent's turn - a tool result, a test's output - is a small prompt chunk at long context, and it cost a fixed
+~0.55 s plus ~0.5 ms a token in every release: below 1,024 tokens the prompt path streams each routed expert that is
+not in VRAM over PCIe (~9,900 of them, ~30 GB, for 600 tokens), and that copy was the whole floor.
+
+- **The CPU share.** The decode pool is idle while a prompt is read, and the pinned arena holds the same experts in
+  RAM. A chunk now hands the pool the non-resident experts routed by at most 8 of its tokens, fewest first; their
+  rows go to Dm's tail (as a peer GPU's do) and the combine weights them as any other row. Below 4,096 tokens a chunk
+  reads routed-only (was 1,024) on NVFP4 packs; on Q2_0 streaming every expert stayed better there (2,099 tokens 714
+  against 763 ms), so other formats keep 1,024.
+- **The share is measured.** Each layer times the CPU thread per expert and the GPU's expert work per streamed expert
+  (CUDA events, read after the next layer's routing sync - the host reaches the combine long before the GPU does;
+  timing the host gave 0.18 and was slower), and the next layers hand the CPU g / (c + g), where both end together.
+  It settles at 0.51 here (~75 us an expert each side).
+
+Warm serve turns at 95K (ms, two runs each):
+
+| new tokens | before | 0.1.39-nvfp4.4 | STRATA_FORCE_AVX2=1, 6 workers |
+|---|---|---|---|
+| 229 | 605-697 | 477-546 | 468-559 (630-733 without the share) |
+| 601 | 768-856 | 601-669 | 601-657 (813-893) |
+| 1,193 | 1,279-1,281 | 788-880 | 772-851 (1,303-1,308) |
+| 2,422 | 1,299-1,327 | 1,134-1,142 | 1,086-1,370 (1,327-1,350) |
+| 4,631 | 1,344-1,373 | 1,359-1,404 | 1,344-1,404 |
+
+Smaller CPUs, emulated (600 tokens, measured share against a fixed 0.5): 2 workers 0.42, 761 against 900 ms; one
+worker on ggml-cpu's dot 0.26, 891 against 2,330 (925 with no share) - a fixed share would cost such a CPU more than
+it saves.
+
+Accuracy: layer 0's expert rows (same input) are 1.086% from the FP16 prompt path on the CPU against 1.087% for the
+GPU's MMQ rows. The first token's KL to the FP16 path was lower on 10 of 12 prompts (250-2,100 tokens, both packs);
+a routing flip moves a single prompt either way (p1700 went 0.008-0.76 across shares 0.3-0.7). Deterministic run to
+run.
+
+**Upstream's formats** (ISTA's GSQ-RCO files): Q2_0 layers take the pool's Q2_0 kernels' activations (ActQ, as
+decode's). KL to `STRATA_PREFILL_MMQ=0` in the noise (Q2_0 600 tokens 0.0033 without the share, 0.0068 with it,
+0.0017 on the AVX2 rows; 1,300 0.0007 / 0.0001). Q2_0 gains nothing: its 1.15 MB experts leave a small chunk short of
+PCIe-bound even on an emulated 12 GB card (`--vram-reserve-mib 20480`, 5 workers: 597 / 594 ms at 600 tokens, 717 /
+704 at 1,300, with the CPU taking 28-43% of the streamed experts). IQ2_XS: 492 -> 469 ms at 600 tokens.
+
+**Decode's PCIe share** was pcie_frac of each layer's misses, from a link probe alone. With a weak CPU (one worker on
+ggml-cpu's dot) the round was 34.7 ms at 0.25 and 22.3 at 0.75. The spin kernels now stamp each step's GPU work (the
+plan's arrival, the PCIe part, the wait for the CPU's rows - no extra launch), the host times its pool, and least
+squares fit the pool's a + c n_cpu + d n_pcie and the GPU's g0 + g n_pcie; a layer takes the PCIe count that
+minimizes the longer side. d is the link's DRAM reads slowing the pool: on this PC moving experts to PCIe left the
+pool's time where it was (d ~ 0.75 c), so few move; one ggml worker has d ~ 0 and most do. Two simpler controllers
+were worse: balancing sums (one PCIe expert costs the GPU ~120 us against the CPU's ~70) and per-expert means without
+d (+4% here).
+
+| ms a round, chat, 1,000 tokens | fixed | measured |
+|---|---|---|
+| NVFP4, this PC (5 pairs) | 15.98 (0.25) | 15.93 |
+| NVFP4, 1 worker on ggml-cpu's dot | 34.7 (0.25) | 20.85 |
+| Q2_0, this PC (2 pairs) | 10.85 (0.55) | 10.73 |
 
 ### A peer GPU and the request drain (2026-10-06, release 0.1.39-nvfp4.3)
 
