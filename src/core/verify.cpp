@@ -2114,27 +2114,18 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     return true;
 }
 
-// set_pcie_balance: each stamped step's costs into the model, as running means per step: the pool's ms per layer
-// with no CPU expert (p0) and per expert beyond it (c); the GPU's PCIe part with no PCIe expert (gp0) and per expert
-// beyond it (g); its whole work with none (g0: the VRAM part and gp0).
+// set_pcie_balance: each stamped step's times into the model's fits (PcieModel::sample), solved once a window.
 void Verifier::pcie_balance_window(int64_t steps, int G) {
     const volatile unsigned long long* st = h_bal_;
     PcieModel& M = *bal_;
-    constexpr double a = 0.05;
-    auto mean = [](double& v, double x) { v = v > 0 ? v + a * (x - v) : x; };
     for (int64_t k = 0; k < steps; ++k) {
         const size_t i = (size_t) ((k / G) * 2 + k % G);
         if (!bal_ok_[i]) continue;
         const unsigned long long ta = st[4 * i], tb = st[4 * i + 1], tw = st[4 * i + 2];
         if (ta == 0 || tb < ta || tw < tb || tw - ta > 1000000000ull) continue;   // not stamped in this window
-        const double vram = (double) (tb - ta) * 1e-6, pcie = (double) (tw - tb) * 1e-6, p = bal_p_[i];
-        const int nc = bal_nc_[i], np = bal_np_[i];
-        if (nc == 0) mean(M.p0, p);
-        else mean(M.c, std::max(p - M.p0, 0.0) / nc);
-        if (np == 0) mean(M.gp0, pcie);
-        else mean(M.g, std::max(pcie - M.gp0, 0.0) / np);
-        mean(M.g0, vram + M.gp0);
+        M.sample(bal_nc_[i], bal_np_[i], bal_p_[i], (double) (tw - ta) * 1e-6);
     }
+    M.solve();
 }
 
 void Verifier::set_plan_slot(int grp) {
