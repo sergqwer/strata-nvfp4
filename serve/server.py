@@ -721,7 +721,8 @@ class StrataEngine:
             if "issue #29" in line:
                 return ("The engine stopped itself because it had stopped making progress - a hang it caught. Its log "
                         "line: " + line.strip() + " - please report it at github.com/Niko1221/Strata/issues.")
-        rc = self.proc.poll()
+        proc = self.proc                                 # None while a restart has not started the next one yet
+        rc = proc.poll() if proc is not None else None
         if rc is not None and rc >= 0 and self.last_err:  # its own last words on stdout: they say why
             return (f"The engine exited (code {rc}) after it reported: {self.last_err} - please report it at "
                     "github.com/Niko1221/Strata/issues with the log.")
@@ -734,7 +735,8 @@ class StrataEngine:
                 "smaller model (Q2_0 / IQ2_XS).")
 
     def alive(self) -> bool:
-        return self.proc is not None and not getattr(self, "ended", False) and self.proc.poll() is None
+        proc = self.proc                                 # read once: restart() / close() may set it to None meanwhile
+        return proc is not None and not getattr(self, "ended", False) and proc.poll() is None
 
     def exit_code(self):
         if self.proc is None:
@@ -894,7 +896,7 @@ class StrataEngine:
             with self.wlock:
                 self.proc.stdin.write(text + "\n")
                 self.proc.stdin.flush()
-        except OSError:                                  # the pipe is gone: the engine died (not the client)
+        except (OSError, AttributeError):                # the pipe is gone (or a restart's close() took the process):
             raise EngineDied(f"the engine stopped unexpectedly (exit code {self.exit_code()})") from None
 
     def _control(self, cancel, on_token, stop_when=None):

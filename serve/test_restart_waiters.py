@@ -171,6 +171,19 @@ class RestartWaiters(unittest.TestCase):
     def test_killed_while_reading_with_others_arriving(self):
         self.killed_mid_read(2, 2)
 
+    def test_an_old_request_meets_a_restart_in_progress(self):
+        """A request that learns its engine died while restart() has already taken the process (self.proc is None):
+        its death note and its sends answer with EngineDied, not AttributeError (the client got no reply at all)."""
+        from serve.server import EngineDied
+        self.start(2)
+        self.kill()
+        self.engine.close()                                           # what restart() does first
+        self.assertIsNone(self.engine.proc)
+        self.assertTrue(self.engine.death_note())                    # a sentence, no AttributeError
+        self.assertFalse(self.engine.alive())
+        with self.assertRaises(EngineDied):
+            self.engine._send("STOP")
+
     def test_solo_engine_is_unchanged(self):
         self.start(4, fit=0)                                          # the engine turns batching off
         self.kill()
