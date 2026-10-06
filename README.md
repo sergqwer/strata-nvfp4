@@ -22,7 +22,8 @@ upstream's; the original README is kept as [README.upstream.md](README.upstream.
   prompt path's BF16 projections (router, indexer, gates), int8 KV behind a Hadamard rotation.
 - **An int8 (W4A8) prompt path for Blackwell:** llama.cpp builds NVFP4 MMQ as FP4 x FP4 on sm_120; this keeps
   8-bit activations - 16x smaller error per product - at 86% of its speed.
-- **AVX-512 NVFP4 kernels** for the CPU share of the experts (1.8-3.7x ggml-cpu).
+- **NVFP4 CPU kernels** for the CPU share of the experts: AVX-512 (1.8-3.7x ggml-cpu) and, on a CPU without it,
+  AVX2 (2.0-2.4x at 4-8 tokens, every row bit-equal to ggml-cpu's own AVX2 dot).
 - **Faster start:** experts read unbuffered into the pinned arena on their own thread, registered with CUDA one layer
   ahead of the readers, beside everything else - the arena is in at ~7 s from a PCIe 5 drive.
 - **The K/V grows with the context:** at a 262K window upstream allocates the whole context's K/V at start (3.35 GiB
@@ -32,6 +33,14 @@ upstream's; the original README is kept as [README.upstream.md](README.upstream.
 - **Faster prompt reading:** an MMQ group's experts gathered in one launch after one wait (under WDDM every streamed
   expert's wait and event had left ~10 us of GPU idle, 226 ms of a 32K prompt), the n-gram rows read 256 at a time
   and beside layer 0, upstream's split hyper-connection kernels on.
+- **Small prompt chunks shared with the CPU:** an agent's turn (a tool result, a test's output) was a fixed ~0.6 s
+  of PCIe copies of the experts it routes to. The idle decode pool now computes the experts few of its tokens reach,
+  from RAM, while the rest stream: at 95K context 229 new tokens 605 -> 477 ms, 1,193 1,279 -> 788 ms. The share
+  is measured each layer (where the CPU and the GPU end together), so a smaller CPU takes less and never makes a
+  prompt slower; the prompt reads as close to the FP16 path as before.
+- **The PCIe share of decode's misses is measured too:** each layer's count from fitted costs instead of a fixed
+  share, so a slow CPU sends more over the link (one pool worker, emulated: 34.7 -> 20.8 ms a round) and a
+  DRAM-bound one, as here, sends few.
 - **An adaptive VRAM tier with a longer memory:** it re-ranks the experts every 2 rounds, up to 192 swaps, and the
   routing counts fade x0.92 per pass. Upstream re-ranks every 4 rounds, up to 96, x0.7. In fixed 1,000-token runs on
   the 5090 it missed 30-40% fewer experts and the round did not change measurably. About half of those runs' tokens
@@ -80,6 +89,10 @@ upstream's; the original README is kept as [README.upstream.md](README.upstream.
   (#583) is kept: on this pack it reads at the same speed and borrows 1.2 GiB less. Against 0.1.38-nvfp4.2, with the
   same expert cache, the logits and tokens are identical after 2K on the GPTQ + Q8_0-down pack, and decode
   rounds are 6.9% shorter (15.7 against 16.9 ms, upstream's #646).
+
+- **0.1.39-nvfp4.4:** small prompt chunks shared with the CPU (agent turns 15-38% faster), AVX2 NVFP4 rows for CPUs
+  without AVX-512, the CPU share and decode's PCIe share measured instead of fixed, and upstream's Q2_0 in the CPU
+  share. docs/NVFP4.md, "Small prompt chunks with the CPU", has the measurements.
 
 - **0.1.39-nvfp4.3:** two fixes for a second card as a peer tier (`--peer-device`), from @chimpera's report on two RTX 3090s. The peer's cache was created on the first GPU. It also went through the elastic K/V's VRAM mapping, which only the primary cache needs, and is one allocation again, as in upstream. The server's handling of a request body it answers before reading follows upstream #594's current version. Bodies of any size get their answer, and `/load`, `/unload` and `/config` no longer hold the connection 5.5 s after answering. Logits and tokens are identical to 0.1.39-nvfp4.2.
 
@@ -314,9 +327,13 @@ either way - CUDA pins it for the GPU's copies.
 | `--prefill auto:8192\|16384` | cap `--prefill auto`'s chunk (default 32768 here, 8192 upstream) |
 | config `"anthropic_thinking": "on_request"\|"model"` | an Anthropic request that does not ask for thinking renders without it (the bundle's default) / thinks as the template does (upstream's default) |
 | `STRATA_COMMIT_SYNC=1` | the verify commit waits for its graph again (A/B) |
-| `--pcie-frac F` | share of cache misses fetched over PCIe (NVFP4 default 0.25) |
+| `--pcie-frac F` | a fixed share of cache misses fetched over PCIe (default: each layer's count from measured costs, from the link probe's share; NVFP4 0.25) |
+| `STRATA_PCIE_BALANCE=0` | decode keeps the link probe's fixed PCIe share |
+| `STRATA_PREFILL_CPU_SHARE=x\|0` | a fixed CPU share of a small prompt chunk's streamed experts / none (default: measured) |
 | `STRATA_NO_LARGEPAGES=1` | 4 KB pages even when large pages are allowed (A/B) |
 | `STRATA_NO_NVFP4_512=1` | CPU pool on ggml-cpu's NVFP4 dot instead of the AVX-512 rows |
+| `STRATA_NO_NVFP4_256=1` | without AVX-512: ggml-cpu's NVFP4 dot instead of the AVX2 rows |
+| `STRATA_FORCE_AVX2=1` | tests: the engine's CPU dispatch as on a CPU without AVX-512 |
 | `STRATA_UNBUFFERED_LOAD=1\|0` | force the expert reads unbuffered / through the file cache (default: unbuffered only when the cache cannot keep the files) |
 | `STRATA_DEFERRED_REGISTER=0`, `STRATA_ARENA_SYNC=1` | A/B: register the arena before the load / load it after the dense weights |
 | `STRATA_ADAPT_WAIT=1` | each decode window waits for the adaptive tier's copies, so greedy decode repeats exactly (upstream's default since 0.1.38; ~11% slower with this fork's tier) |
@@ -341,7 +358,7 @@ either way - CUDA pins it for the GPU's copies.
 
 | executable | checks |
 | --- | --- |
-| `nvfp4_avx512_parity [experts.bin]` | AVX-512 rows vs ggml-cpu (`--expert`: one whole expert vs FP64; `--bw`: DRAM rate) |
+| `nvfp4_avx512_parity [experts.bin]` | AVX-512 and AVX2 rows vs ggml-cpu, the AVX2 ones bit for bit (ctest `nvfp4_cpu_parity`; `--expert`: one whole expert vs FP64; `--bw T N [ggml\|avx2]`: DRAM rate) |
 | `nvfp4_expert_gpu_parity experts.bin` | the GPU decode path's experts vs FP64, one per sampled layer |
 | `mmq_nvfp4_parity experts.bin` | MMQ products vs FP64 (`--group`, `--layers`, `--real dump layer`) |
 
@@ -349,11 +366,13 @@ either way - CUDA pins it for the GPU's copies.
 
 - Built and measured on Windows with one RTX 5090 and 128 GB of RAM. RTX 20/30/40 cards, smaller VRAM and 64 GB of
   RAM were tested on that PC through their own code paths and budgets (docs/NVFP4.md), not on the real hardware; a
-  CPU without AVX-512 takes ggml-cpu's AVX2 path for its share of the experts. The low-RAM mode's unbuffered reads
+  CPU without AVX-512 runs the AVX2 rows, and smaller CPUs were emulated (`STRATA_FORCE_AVX2=1`, `--pool-workers`). The low-RAM mode's unbuffered reads
   are Windows-only (elsewhere it reads through the page cache).
 - A decode round (~21 ms) is the GPU running back to back, ~4.6 ms of it pulling the PCIe share of the experts
-  and ~3.4 ms waiting for the CPU's share, which reads DRAM at ~55 of the ~65 GB/s this platform does. More VRAM
-  for the expert cache or more memory bandwidth are what would move it; docs/NVFP4.md lists what was tried.
+  and ~3.4 ms waiting for the CPU's share, which reads DRAM at ~55 of the ~65 GB/s this platform does. The pool and
+  the link read the same DRAM, so moving misses between them does not shorten it here (the measured PCIe count
+  moves few). More VRAM for the expert cache or more memory bandwidth are what would move it; docs/NVFP4.md lists
+  what was tried.
 - The model is an abliterated fine-tune: it does not refuse. What it is used for is on whoever runs it.
 
 ## Releasing
