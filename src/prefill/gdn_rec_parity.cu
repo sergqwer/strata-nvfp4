@@ -240,6 +240,95 @@ __global__ void __launch_bounds__(CB * RG) gdn_rec_kh_kernel(float* __restrict__
         for (int r = 0; r < RPG; ++r) base[r * rs] = s[j][r];
     }
 }
+
+// The fork (0.1.40-nvfp4): gdn_rec_kh_kernel's block and staging (a key head, 32 columns, its q / k staged once for the
+// three value heads) with a thread per (column, row group, VALUE HEAD): 384 threads, a third of the work each.  Per
+// value head and column the same arithmetic in the same order (kv and o as fmaf chains over the thread's 32 rows, the
+// four row groups' partials added in order): the same bits (gdn_rec_parity checks them).  The original thread runs
+// its three heads back to back, one warp per scheduler; here three warps share each scheduler.  RTX 5090: 1.07-1.13x
+// the recurrence (0.41 -> 0.38-0.39 us a token, ~0.6% of a 32K prompt).  Tried and slower there: the four row groups
+// in one warp meeting through __shfl_sync instead of shared memory (0.91-0.98x, padded against bank conflicts) and
+// 8 row groups of 16 rows (0.83x, other bits).  Only where its 64 blocks fit one per SM (gdn_kh3_ok); measured on 170
+// SMs only, so smaller cards keep gdn_rec_kh_kernel.  STRATA_GDN_KH3=0: gdn_rec_kh_kernel.
+__global__ void __launch_bounds__(CB * RG * VPK) gdn_rec_kh3_kernel(float* __restrict__ state, const float* __restrict__ h,
+                                                                    const float* __restrict__ gate,
+                                                                    const float* __restrict__ beta,
+                                                                    float* __restrict__ oc_out, int64_t T) {
+    constexpr int TB = GDN_TB, NT = CB * RG * VPK, QKP = S / 4, VP = CB / 4;
+    __shared__ __align__(16) float sq[2][TB][S];
+    __shared__ __align__(16) float sk[2][TB][S];
+    __shared__ __align__(16) float sv[2][TB][VPK][CB];
+    __shared__ float sg[2][TB][VPK], sb[2][TB][VPK], rkv[VPK][RG][CB], ro[VPK][RG][CB];
+    const int qh = blockIdx.x / NCB, cb = blockIdx.x % NCB;
+    const int c = threadIdx.x, rg = threadIdx.y, j = threadIdx.z, tid = (j * RG + rg) * CB + c, col = cb * CB + c;
+    const int vh = qh + j * HK;                           // this thread's value head
+    float s[RPG];
+    const size_t rs = (size_t) HV * S;
+    {
+        const float* base = state + ((size_t) (rg * RPG) * HV + vh) * S + col;
+#pragma unroll
+        for (int r = 0; r < RPG; ++r) s[r] = base[r * rs];
+    }
+    const int64_t nblk = (T + TB - 1) / TB;
+    auto stage = [&](int64_t k) {
+        const int bb = (int) (k & 1);
+        const int64_t t0 = k * TB;
+        for (int p = tid; p < TB * 2 * QKP; p += NT) {
+            const int i = p / (2 * QKP), w = p % (2 * QKP), isk = w / QKP, jj = (w % QKP) * 4;
+            if (t0 + i < T)
+                gdn_cp16(isk ? &sk[bb][i][jj] : &sq[bb][i][jj], h + (t0 + i) * C + (isk ? HK * S : 0) + qh * S + jj);
+        }
+        for (int p = tid; p < TB * VPK * VP; p += NT) {
+            const int i = p / (VPK * VP), w = p % (VPK * VP), jh = w / VP, jj = (w % VP) * 4;
+            if (t0 + i < T)
+                gdn_cp16(&sv[bb][i][jh][jj], h + (t0 + i) * C + 2 * HK * S + (qh + jh * HK) * S + cb * CB + jj);
+        }
+        for (int p = tid; p < 2 * TB * VPK; p += NT) {
+            const int isb = p / (TB * VPK), w = p % (TB * VPK), i = w / VPK, jh = w % VPK;
+            if (t0 + i < T)
+                gdn_cp4(isb ? &sb[bb][i][jh] : &sg[bb][i][jh], (isb ? beta : gate) + (t0 + i) * HV + qh + jh * HK);
+        }
+    };
+    if (nblk > 0) stage(0);
+    gdn_cp_commit();
+    for (int64_t k = 0; k < nblk; ++k) {
+        // buffer (k + 1) & 1 was read by block k - 1, whose last token's second __syncthreads every thread has passed
+        if (k + 1 < nblk) stage(k + 1);
+        gdn_cp_commit();
+        gdn_cp_wait_prev();
+        __syncthreads();
+        const int bb = (int) (k & 1);
+        const int n = (int) ((T - k * TB) < TB ? (T - k * TB) : TB);
+        for (int i = 0; i < n; ++i) {
+            const int64_t t = k * TB + i;
+            float kc[RPG];
+#pragma unroll
+            for (int r = 0; r < RPG; ++r) kc[r] = sk[bb][i][rg * RPG + r];
+            const float g = __expf(sg[bb][i][j]);
+            float kv = 0.0f, o = 0.0f;
+#pragma unroll
+            for (int r = 0; r < RPG; ++r) kv = fmaf(s[r], kc[r], kv);
+            rkv[j][rg][c] = kv;
+            __syncthreads();
+            const float kv_col = rkv[j][0][c] + rkv[j][1][c] + rkv[j][2][c] + rkv[j][3][c];
+            const float delta = (sv[bb][i][j][c] - g * kv_col) * sb[bb][i][j];
+#pragma unroll
+            for (int r = 0; r < RPG; ++r) {
+                s[r] = fmaf(g, s[r], kc[r] * delta);
+                o = fmaf(s[r], sq[bb][i][rg * RPG + r], o);
+            }
+            ro[j][rg][c] = o;
+            __syncthreads();
+            if (rg == 0)   // head j's output, from its four row groups in order
+                oc_out[t * HV * S + vh * S + col] = (ro[j][0][c] + ro[j][1][c] + ro[j][2][c] + ro[j][3][c]) * rsqrtf((float) S);
+        }
+    }
+    {
+        float* base = state + ((size_t) (rg * RPG) * HV + vh) * S + col;
+#pragma unroll
+        for (int r = 0; r < RPG; ++r) base[r * rs] = s[r];
+    }
+}
 // the output norm over a head's 128 columns, into the FP16 copy the out projection reads (the FP32 output before the
 // norm stays in its scratch buffer)
 __global__ void __launch_bounds__(S) gdn_out_norm_kernel(const float* __restrict__ z, const float* __restrict__ gamma,
@@ -452,6 +541,20 @@ int check_bits(int64_t T, uint64_t seed) {
         std::printf("FAIL T=%lld output norm: %llu of %zu FP16 pairs differ\n", (long long) T, d16, oc_n / 2);
         ++fails;
     }
+    {   // the fork's gdn_rec_kh3_kernel against gdn_rec_kh_kernel
+        float* st3 = dalloc<float>(st);
+        float* oc3 = dalloc<float>(oc_n);
+        ck(cudaMemcpy(st3, in.state0, st * 4, cudaMemcpyDeviceToDevice), "state copy");
+        gdn_rec_kh3_kernel<<<HK * NCB, dim3(CB, RG, VPK)>>>(st3, in.h, in.gate, in.beta, oc3, in.T);
+        ck(cudaDeviceSynchronize(), "kh3");
+        const unsigned long long d3o = diff_words(oc[kKeyHead], oc3, oc_n * 4), d3s = diff_words(state[kKeyHead], st3, st * 4);
+        if (d3o || d3s) {
+            std::printf("FAIL T=%lld gdn_rec_kh3_kernel: %llu of %zu outputs and %llu of %zu state values differ\n",
+                        (long long) T, d3o, oc_n, d3s, st);
+            ++fails;
+        }
+        cudaFree(st3); cudaFree(oc3);
+    }
     std::printf("T=%-6lld %s\n", (long long) T, fails ? "DIFFERENT" : "the same bits (output, state, FP16 output)");
     for (int v = 0; v < kRecCount; ++v) { cudaFree(state[v]); cudaFree(oc[v]); }
     cudaFree(y16a); cudaFree(y16b); cudaFree(yb);
@@ -501,12 +604,25 @@ void bench(int64_t T) {
             if (i >= warm) t_norm[v].push_back(ms);
         }
     }
+    std::vector<float> t_kh[2];   // the fork's gdn_rec_kh3_kernel against gdn_rec_kh_kernel, alternating
+    for (int i = 0; i < warm + rounds; ++i)
+        for (int j = 0; j < 2; ++j) {
+            const int v = (i + j) % 2;
+            const float ms = timed([&] {
+                if (v == 0) gdn_rec_kh_kernel<<<HK * NCB, dim3(CB, RG)>>>(state, in.h, in.gate, in.beta, oc, in.T);
+                else gdn_rec_kh3_kernel<<<HK * NCB, dim3(CB, RG, VPK)>>>(state, in.h, in.gate, in.beta, oc, in.T);
+            });
+            if (i >= warm) t_kh[v].push_back(ms);
+        }
+    const float k0 = median(t_kh[0]), k3 = median(t_kh[1]);
     const float r0 = median(t_rec[kBefore]), r1 = median(t_rec[kKeyHead]), n0 = median(t_norm[0]), n1 = median(t_norm[1]);
     std::printf("  T = %lld tokens, one layer (48 value heads), medians of %d alternating runs:\n", (long long) T, rounds);
     std::printf("    recurrence, before (gdn_rec_cols_pipe_kernel)  %8.2f ms  (%.3f us per token)\n", r0,
                 1000.0f * r0 / (float) T);
     std::printf("    recurrence, gdn_rec_kh_kernel                  %8.2f ms  (%.3f us per token)  %.2fx\n", r1,
                 1000.0f * r1 / (float) T, r0 / r1);
+    std::printf("    recurrence, the fork's gdn_rec_kh3_kernel      %8.2f ms  (%.3f us per token)  %.2fx gdn_rec_kh_kernel\n",
+                k3, 1000.0f * k3 / (float) T, k0 / k3);
     std::printf("    output norm, before (FP32 and FP16 store)      %8.2f ms\n", n0);
     std::printf("    output norm, FP16 store only                   %8.2f ms  %.2fx\n", n1, n0 / n1);
     std::printf("    36 DeltaNet layers per %lld-token block: recurrence + norm %.0f ms -> %.0f ms (-%.0f ms)\n",
