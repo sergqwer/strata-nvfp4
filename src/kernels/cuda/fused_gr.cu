@@ -2064,7 +2064,7 @@ bool fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
                          v4_attrs<kFusedGrMaxT, false>(n1);
             int major = 0;
             v4pdl[dev3] = cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev3) == cudaSuccess &&
-                          major >= 9;
+                          strata::cc_major_of(major) >= 9;
             cudaGetLastError();
             std::fprintf(stderr, "strata: the hyper-connection read v4%s\n",
                          !v4ok[dev3] ? " does not fit this card: v3"
