@@ -97,6 +97,15 @@ void native_q8_0_mmvq(const void* weights, const void* x_q8_1, float* y,
 /// followed by a d plane (n_out x n_in / 32 fp16), the same bytes (34 per 32 values). A registered matrix's
 /// native_q8_0_mmvq calls (keyed by its GGUF-layout device pointer, which stays valid for the prompt path) read the
 /// packed copy instead; every output is bitwise equal to the GGUF-layout kernels.
+/// STRATA_MMVQ_V2=1 (opt-in): native_q8_0_mmvq_group runs up to three Q8_0 matrices on the SAME Q8_1 input and n_in
+/// in one launch (the engine: attention's k + v + q, the drafter's k + v), every output the same bits as its separate
+/// native_q8_0_mmvq call (the EXACT layout). Returns false
+/// (nothing launched) where it does not apply: V2 off, n_in not a multiple of 32, more than 3 matrices, a packed
+/// (STRATA_Q8_PACKED) matrix, the non-exact multi-column layout. native_mmvq_set_v2 is for tests.
+bool native_mmvq_v2_enabled();
+void native_mmvq_set_v2(bool on);
+bool native_q8_0_mmvq_group(int n, const void* const* weights, float* const* y, const int* n_out, const void* x_q8_1,
+                            int n_in, int ncols, void* stream);
 bool native_q8_0_packed_enabled();
 bool native_q8_0_packed_eligible(int n_in, int n_out);
 void native_q8_0_pack_host(const void* gguf_blocks, void* out, int n_in, int n_out);
