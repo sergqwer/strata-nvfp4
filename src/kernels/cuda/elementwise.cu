@@ -249,9 +249,21 @@ __global__ void copy_rows_from_mapped_kernel(float4* __restrict__ dst, const vol
     float4* d = dst + (int64_t) row * row4;
     if (hit) {
         for (int64_t i = threadIdx.x; i < row4; i += blockDim.x) d[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
-    } else {
-        const volatile float4* sr = src + (int64_t) row * row4;
-        for (int64_t i = threadIdx.x; i < row4; i += blockDim.x) d[i] = const_cast<const float4*>(sr)[i];
+    } else {   // 4 loads in flight a thread: one PCIe round trip each, one after another, made a 2560-wide row 5 of them
+        const float4* sr = const_cast<const float4*>(src) + (int64_t) row * row4;
+        for (int64_t i0 = threadIdx.x; i0 < row4; i0 += (int64_t) blockDim.x * 4) {
+            float4 v[4];
+#pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                const int64_t i = i0 + (int64_t) j * blockDim.x;
+                if (i < row4) v[j] = sr[i];
+            }
+#pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                const int64_t i = i0 + (int64_t) j * blockDim.x;
+                if (i < row4) d[i] = v[j];
+            }
+        }
     }
 }
 namespace {
@@ -375,8 +387,17 @@ void doorbell_publish_res(const float* x, const int32_t* ids, const int32_t* d_r
     check_launch("doorbell_publish_res");
 }
 
+// 4 loads in flight a thread: a verify plan (488 words) took 4 PCIe round trips one after another
 __global__ void copy_i32_from_mapped_kernel(int32_t* __restrict__ dst, const volatile int32_t* src, int n) {
-    for (int i = threadIdx.x; i < n; i += blockDim.x) dst[i] = src[i];
+    for (int i0 = threadIdx.x; i0 < n; i0 += (int) blockDim.x * 4) {
+        int32_t v[4];
+#pragma unroll
+        for (int j = 0; j < 4; ++j)
+            if (i0 + j * (int) blockDim.x < n) v[j] = src[i0 + j * (int) blockDim.x];
+#pragma unroll
+        for (int j = 0; j < 4; ++j)
+            if (i0 + j * (int) blockDim.x < n) dst[i0 + j * (int) blockDim.x] = v[j];
+    }
 }
 
 #if !defined(__HIPCC__)
