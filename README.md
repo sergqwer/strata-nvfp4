@@ -92,6 +92,13 @@ upstream's; the original README is kept as [README.upstream.md](README.upstream.
   0.1.39-nvfp4.4, with the CPU share fixed, they are identical on both packs.
   Decode is as fast as 0.1.39-nvfp4.4's (16.1 ms a round).
 
+- **0.1.40-nvfp4.3:** a round of kernels after a roofline of where the time goes. A 32K prompt reads 8% faster:
+  the experts' gate/up on the FP4 tensor cores with two FP4 terms per activation (w4a4x2), the prompt attention on
+  INT8 tensor cores (closer to FP32 than before), the DeltaNet recurrence in chunks for long chunks, the
+  hyper-connection up projection fused with its mix. Decode: the hyper-connection read v4 (15.8 against 16.1 ms a round, 5 interleaved chats, the GPU ring 7.06 against 7.41 ms).
+  Answers against a high-precision reference are as close as before (8 prompts); docs/NVFP4.md, "A round of
+  kernels", has the table and every measurement.
+
 - **0.1.40-nvfp4.2:** upstream's hotfix 0.1.40.1, server only. Its #1058 gate replaces this fork's (#1068): the
   same three conditions, plus no call from a code fence or inline code, in the thinking or in the answer. A restart
   keeps waiting requests (#1012), and an engine that exits after an ERR line says why. The engine is 0.1.40-nvfp4.1's,
@@ -326,7 +333,11 @@ either way - CUDA pins it for the GPU's copies.
 
 | | |
 | --- | --- |
-| `STRATA_PREFILL_NVFP4=w4a8\|w4a4\|fp16` | prompt path precision (default `w4a8`) |
+| `STRATA_PREFILL_NVFP4=w4a8\|w4a4\|w4a4x2\|fp16` | prompt path precision of the NVFP4 experts (default `w4a4x2`: gate/up on the FP4 tensor cores with two FP4 terms per activation, down w4a8; `w4a8` before 0.1.40-nvfp4.3) |
+| `STRATA_QUANT_GATHER=1` | the prompt path quantizes a token's row once per expert again (default: once per token, scattered; the same bytes) |
+| `STRATA_PROMPT_ATTN_IMMA=0` | the prompt attention's v2 kernel (FP16 MMA) instead of the INT8 one (default since 0.1.40-nvfp4.3) |
+| `STRATA_GDN_CHUNKED=0\|1` | the prompt path's DeltaNet recurrence never / from 128 tokens in chunks (default: for chunks of 16384+ tokens) |
+| `STRATA_MMVQ_V2=1` | decode: attention k+v+q and the drafter's k+v in one Q8_0 launch (the same bits; under 1%) |
 | `--embd-gguf PATH` | the token embedding from this GGUF (BF16 from `tools/embd_bf16_pack.py`) |
 | `STRATA_PREFILL_BF16X2=2\|1\|0` | exact inputs to the prompt path's BF16 projections: all but the hyper-connection (default), all (~9% slower prompt reading), off |
 | `STRATA_KV_ROT=0` | int8 K/V without the Hadamard rotation (A/B) |
