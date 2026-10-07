@@ -1926,8 +1926,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 // split with norm and RoPE, the rotation
                 const bool q_il = side_proj && g_mmvq_il() &&
                                   strata::kernels::native_mmvq_il_supported(wq->native_type, n, (int) (NH * 2 * HD));
+                bool q_done = false;   // STRATA_MMVQ_V2=1 below: q made with k and v in one launch
                 auto q_chain = [&](cudaStream_t ns) -> bool {
-                    if (ns == cs) mm(wq, qfull_ + tb * NH * 2 * HD, (int) N, (int) (NH * 2 * HD));
+                    if (ns == cs) { if (!q_done) mm(wq, qfull_ + tb * NH * 2 * HD, (int) N, (int) (NH * 2 * HD)); }
                     else if (q_il) strata::kernels::native_mmvq_il(wq->native_type, wq->native_data, xq_, xil_,
                                                                    qfull_ + tb * NH * 2 * HD, (int) N, (int) (NH * 2 * HD), n, ns);
                     else native_mmvq(wq->native_type, wq->native_data, xq_, qfull_ + tb * NH * 2 * HD, (int) N,
@@ -1981,8 +1982,20 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 }
                 if (!sidem) idx_key(cs);
                 stamp(l, 7, grp);
-                mm(wk, kcur_ + tb * NKV * HD, (int) N, (int) (NKV * HD));
-                mm(wv, vcur_ + tb * NKV * HD, (int) N, (int) (NKV * HD));
+                // STRATA_MMVQ_V2=1: k, v and q in one launch, the same bits (qfull_ is not read before q's own call was;
+                // 1.05-1.08x the three calls at T = 2-5).  Not with the query branch (qbr: q is made on side 0) nor
+                // with STRATA_SIDE_MIXER=2's queries on their own branch (side_proj)
+                if (!qbr && !side_proj && native_mmvq_v2_enabled() && wk->native_type == 8 && wv->native_type == 8 &&
+                    wq->native_type == 8) {
+                    const void* gw[3] = {wk->native_data, wv->native_data, wq->native_data};
+                    float* gy[3] = {kcur_ + tb * NKV * HD, vcur_ + tb * NKV * HD, qfull_ + tb * NH * 2 * HD};
+                    const int go[3] = {(int) (NKV * HD), (int) (NKV * HD), (int) (NH * 2 * HD)};
+                    q_done = native_q8_0_mmvq_group(3, gw, gy, go, xq_, (int) N, n, cs);
+                }
+                if (!q_done) {
+                    mm(wk, kcur_ + tb * NKV * HD, (int) N, (int) (NKV * HD));
+                    mm(wv, vcur_ + tb * NKV * HD, (int) N, (int) (NKV * HD));
+                }
                 if (qb) norm_rope(kcur_ + tb * NKV * HD, wkn, (int) (n * NKV), (int) HD, pos_k + tb * NKV);
                 else for (int t = tb; t < te; ++t) norm_rope(kcur_ + t * NKV * HD, wkn, (int) NKV, (int) HD, pos_ + t * NH);
                 if (st.kv_rot) {   // K and V rotated before they are stored (kv_q4.hpp)
