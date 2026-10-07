@@ -114,10 +114,12 @@ struct TopkCase {
     int64_t capacity;    // --max-context: max_blocks = capacity / 4 + 2 (the engine's rule)
     int nq;
     int pattern;
+    int64_t top_k = 0;   // > 0: another selection budget (--qsa-top-k)
 };
 
 int run_topk_case(const TopkCase& c, std::mt19937& rng, bool verbose) {
-    const k::QsaShapes s = k::qsa_real_shapes();
+    k::QsaShapes s = k::qsa_real_shapes();
+    if (c.top_k > 0) s.idx_top_k = c.top_k;
     const int64_t max_blocks = c.capacity / 4 + 2, cap = k::qsa_selection_width(k::kTopkMaxCells, s);
     std::vector<float> sc((size_t) (c.nq * max_blocks), 0.f);
     std::vector<int32_t> steps((size_t) c.nq * k::kStepCount);
@@ -404,6 +406,20 @@ int main(int argc, char** argv) {
                 if (nq > ctx) continue;
                 fails += run_topk_case({ctx, capacity, nq, p}, rng, verbose);
                 ++cases;
+            }
+        }
+    }
+    // --qsa-top-k: twice and eight times the model's budget - around the identity edge (width = top_k + 3), past
+    // it, both sides of the register kernel's reach, and the longest context
+    for (const int64_t tk : {(int64_t) 4096, (int64_t) 16384}) {
+        const int64_t w = tk + 3;
+        for (const int64_t ctx : {w - 1, w, w + 1, w + 2, w + 5, (int64_t) 32769, (int64_t) 135171, (int64_t) 262144}) {
+            for (const int64_t capacity : {ctx + 272, (int64_t) 262144 + 272}) {
+                for (int p = 0; p < kPatterns; ++p) {
+                    const int nq = (p % 3 == 0) ? 1 : (p % 3 == 1 ? 5 : 16);
+                    fails += run_topk_case({ctx, capacity, nq, p, tk}, rng, verbose);
+                    ++cases;
+                }
             }
         }
     }

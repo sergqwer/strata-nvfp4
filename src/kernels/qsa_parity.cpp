@@ -374,12 +374,21 @@ int main(int argc, char** argv) {
         if (a == "--selftest") selftest = true;
         else if (a == "--qsa-dense") dense = true;
         else if (a == "--bench") bench = true;
+        else if (a == "--top-k" && i + 1 < argc) {
+            const int64_t k = std::atoll(argv[++i]);
+            if (!strata::kernels::qsa_set_top_k(k)) {
+                std::fprintf(stderr, "qsa_parity: --top-k %lld: %s\n", (long long) k,
+                             strata::kernels::qsa_top_k_problem(k));
+                return 2;
+            }
+        }
         else {
-            std::fprintf(stderr, "usage: qsa_parity [--selftest] [--qsa-dense] [--bench]\n"
+            std::fprintf(stderr, "usage: qsa_parity [--selftest] [--qsa-dense] [--bench] [--top-k N]\n"
                                  "  --qsa-dense  attend to EVERY cell instead of the indexer's selection\n"
                                  "               (P1.S4's isolation switch; the sparse selection is still run\n"
                                  "                and checked, against the reference's dense/sparse property)\n"
-                                 "  --bench      time the kernels at 32K of context\n");
+                                 "  --bench      time the kernels at 32K of context\n"
+                                 "  --top-k N    the selection budget (--qsa-top-k; default the model's 2048)\n");
             return 2;
         }
     }
@@ -388,6 +397,9 @@ int main(int argc, char** argv) {
     const int64_t NH = S.n_head, NKV = S.n_head_kv, HD = S.head_dim, IDXN = S.idx_n_head, IDXD = S.idx_dim,
                   R = S.idx_block, TOPK = S.idx_top_k;
     const int64_t MAXC = strata::kernels::kTopkMaxCells;
+    // the width once the context passes it: 2,051 at the model's budget, and every bound below is written from it
+    const int64_t W = TOPK + R - 1;
+    const std::string Ws = std::to_string(W);
     const float EPS = strata::kernels::qsa_rms_eps();
     const double THETA = strata::kernels::qsa_freq_base();
     std::mt19937 rng(20260916u);
@@ -556,8 +568,10 @@ int main(int argc, char** argv) {
     }
     std::vector<float> w_kn((size_t) IDXD);
     for (auto& x : w_kn) x = 1.0f + 0.1f * rnd(1.0);
-    std::vector<float> cos_tab((size_t) (2000 * S.n_rot / 2)), sin_tab(cos_tab.size());
-    strata::kernels::build_rope_table((int) S.n_rot, THETA, 2000, cos_tab.data(), sin_tab.data());
+    // rows for every position the fixtures append: section 6 reaches T = W + 49 * TOPK / 2048 (2,100 at the default)
+    const int64_t rope_rows = std::max<int64_t>(2000, W + 49 * TOPK / 2048 + R);
+    std::vector<float> cos_tab((size_t) (rope_rows * S.n_rot / 2)), sin_tab(cos_tab.size());
+    strata::kernels::build_rope_table((int) S.n_rot, THETA, (int) rope_rows, cos_tab.data(), sin_tab.data());
     Dev<float> dw_kn, dcos, dsin;
     dw_kn.put(w_kn);
     dcos.put(cos_tab);
@@ -778,10 +792,13 @@ int main(int argc, char** argv) {
         check(cudaStreamEndCapture(stream, &graph), "tail capture end");
         check(cudaGraphInstantiate(&exec, graph, 0), "tail instantiate");
 
-        const std::vector<int64_t> counts = {
+        std::vector<int64_t> counts = {
             1, 2, 3, 4, 511, 512, 513, 2046, 2047, 2048, 2049, 2050, 2051,
             2052, 2053, 2054, 2055, 2056, 2057, 2058, 2059, 2060,
             4095, 4096, 4097, 8191, 8192, 8193, 20477, 20478, 20479, 20480};
+        if (W != 2051)   // --top-k: the same edge around this budget's bound
+            for (int64_t d = -5; d <= 9; ++d)
+                if (W + d >= 1 && W + d <= max_n) counts.push_back(W + d);
         for (const int64_t n : counts) {
             const int64_t width = strata::kernels::qsa_selection_width(n, S);
             const int64_t tail = n % R;
@@ -846,26 +863,27 @@ int main(int argc, char** argv) {
         for (auto& x : sc) x = rnd(1.0);
         one("topk_512 n_kv = 1", 1);
         one("topk_512 n_kv = 7 (random)", 7);
-        one("topk_512 n_kv = 2048 (the plan's threshold)", 2048);
-        one("topk_512 n_kv = 2051 (the reference's own bound)", 2051);
-        one("topk_512 n_kv = 2052 (two past the plan's number)", 2052);
+        one("topk_512 n_kv = " + std::to_string(TOPK) + " (the plan's threshold)", TOPK);
+        one("topk_512 n_kv = " + Ws + " (the reference's own bound)", W);
+        one("topk_512 n_kv = " + std::to_string(W + 1) + " (two past the plan's number)", W + 1);
         one("topk_512 n_kv = 5000 (random)", 5000);
         one("topk_512 n_kv = 32768 (= kTopkMaxCells)", MAXC);
 
         // ALL-EQUAL scores: every cell ties, so the answer must be 0..width-1 and any other tie rule shows up
         // on the first element.  ggml does not specify the rule; the reference and the kernel both say
         // ascending index, and this is the case that distinguishes them.
-        std::fill(sc.begin(), sc.begin() + 2052, 0.25f);
-        one("topk_512 with 2052 EQUAL scores (every cell ties)", 2052);
+        std::fill(sc.begin(), sc.begin() + W + 1, 0.25f);
+        one("topk_512 with " + std::to_string(W + 1) + " EQUAL scores (every cell ties)", W + 1);
 
         // a tie BLOCK straddling the cut: 100 cells share the cut score and only some of them fit
-        for (int64_t j = 0; j < 5000; ++j) sc[(size_t) j] = (float) (-(double) j);
-        for (int64_t j = 2051 - 50; j < 2051 + 50; ++j) sc[(size_t) j] = -1000.0f;
-        one("topk_512 with a 100-cell tie straddling the cut", 5000);
+        const int64_t n_tie = W + 2949;   // 5,000 at the default budget
+        for (int64_t j = 0; j < n_tie; ++j) sc[(size_t) j] = (float) (-(double) j);
+        for (int64_t j = W - 50; j < W + 50; ++j) sc[(size_t) j] = -1000.0f;
+        one("topk_512 with a 100-cell tie straddling the cut", n_tie);
 
         // THE IDENTITY BELOW THE BOUND.  `select_cells` returns `arange` whenever width == n_kv, which is what
         // "selection skipped when context <= 2,048" means - and it holds to 2,051, not 2,048.
-        for (int64_t n : {(int64_t) 2048, (int64_t) 2051}) {
+        for (int64_t n : {TOPK, W}) {
             for (int64_t j = 0; j < n; ++j) sc[(size_t) j] = rnd(1.0);
             const std::vector<int32_t> g = one(std::string("topk_512 n_kv = ") + std::to_string(n) +
                                                    " selects every cell (identity)",
@@ -875,14 +893,14 @@ int main(int argc, char** argv) {
             require("  ...and it really is 0,1,2,...", ident);
         }
         {   // one past the bound the identity must FAIL, or the two checks above prove nothing
-            for (int64_t j = 0; j < 2052; ++j) sc[(size_t) j] = rnd(1.0);
-            const std::vector<int32_t> g = one("topk_512 n_kv = 2052 is NOT the identity", 2052);
-            std::vector<char> kept(2052, 0);
+            for (int64_t j = 0; j < W + 1; ++j) sc[(size_t) j] = rnd(1.0);
+            const std::vector<int32_t> g = one("topk_512 n_kv = " + std::to_string(W + 1) + " is NOT the identity", W + 1);
+            std::vector<char> kept((size_t) W + 1, 0);
             for (int32_t id : g) kept[(size_t) id] = 1;
             int64_t missing = 0;
-            for (int64_t j = 0; j < 2052; ++j) if (!kept[(size_t) j]) ++missing;
+            for (int64_t j = 0; j < W + 1; ++j) if (!kept[(size_t) j]) ++missing;
             int64_t argmin = 0;
-            for (int64_t j = 1; j < 2052; ++j) if (sc[(size_t) j] < sc[(size_t) argmin]) argmin = j;
+            for (int64_t j = 1; j < W + 1; ++j) if (sc[(size_t) j] < sc[(size_t) argmin]) argmin = j;
             require("  ...exactly one cell is dropped, and it is the smallest score",
                     missing == 1 && !kept[(size_t) argmin], std::to_string(missing) + " dropped");
         }
@@ -973,7 +991,7 @@ int main(int argc, char** argv) {
     // ================= 6. the whole layer at n_kv = 2100, so the selection is genuinely sparse =============
     int64_t width = 0;
     {
-        const int64_t T = 2100;                      // > 2051, so `width` really truncates
+        const int64_t T = W + 49 * TOPK / 2048;      // 2,100 > 2,051 at the default, so `width` really truncates
         width = strata::kernels::qsa_selection_width(T, S);
         std::vector<float> pk((size_t) T * NKV * HD), pv((size_t) T * NKV * HD), praw((size_t) T * IDXD);
         std::vector<std::vector<double>> k16((size_t) T), v16((size_t) T);
@@ -1049,7 +1067,8 @@ int main(int argc, char** argv) {
         const std::vector<double> sc_want =
             ref_indexer_scores(pool64, p_nbid, q_idx64, IDXN, IDXD, {}, T, Alt{});
         const std::vector<int32_t> sel_want = ref_select(sc_want, T, TOPK, false);
-        require("the selected set matches the reference (2100 cells, width 2051)", sel_sparse == sel_want,
+        require("the selected set matches the reference (" + std::to_string(T) + " cells, width " + Ws + ")",
+                sel_sparse == sel_want,
                 std::to_string(width) + " ids");
 
         // HOW CLOSE IS THE CUT?  `indexer_ids` is an EXACT capture key, so a boundary gap of a few fp32 ulp
@@ -1172,7 +1191,7 @@ int main(int argc, char** argv) {
         // DENSE vs SPARSE.  Below the bound the width IS n_kv, so the two paths must agree EXACTLY (P1.S4's
         // isolation property, `ref/qsa.py` PROPERTY 9b); above it they must differ, or the switch is a no-op.
         require("below the bound, dense and sparse are the SAME selection",
-                ref_select(sc_want, 2000, TOPK, false) == ref_select(sc_want, 2000, TOPK, true));
+                ref_select(sc_want, W - 51, TOPK, false) == ref_select(sc_want, W - 51, TOPK, true));
         {
             // BOTH SIDES COMPUTED HERE, from their own id lists and independently of `--qsa-dense`.  The first
             // version compared against the pipeline's `attn`, which in dense mode IS the dense attention - so the
@@ -1195,7 +1214,8 @@ int main(int argc, char** argv) {
                 dn += std::fabs(dense_attn[i] - sparse_attn[i]);
                 dd += std::fabs(sparse_attn[i]);
             }
-            verdict("dense differs from sparse at n_kv = 2100 (> 2051)", dn / dd > 0.05, pct(dn / dd));
+            verdict("dense differs from sparse at n_kv = " + std::to_string(T) + " (> " + Ws + ")", dn / dd > 0.05,
+                    pct(dn / dd));
         }
     }
 

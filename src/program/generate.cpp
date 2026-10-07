@@ -379,6 +379,7 @@ struct Options {
     bool ple_sync_submit = false;      ///< A/B arm: submit reads on the token thread, no I/O worker
     std::string kv = "fp16";           ///< plan v0.3 P7: KV storage, fp16 (default) or int8 (half the VRAM)
     int64_t kv_resident = 0;           ///< KV streaming: resident cells per QSA layer (0: all in VRAM)
+    int64_t qsa_top_k = 0;             ///< --qsa-top-k / STRATA_QSA_TOP_K: QSA selection budget (0: the model's 2048)
     bool kv_grow = true;               ///< the elastic K/V (kvg_ensure): on in the fork (--no-kv-grow, STRATA_KV_GROW=0)
     bool kv_grow_given = false;        ///< --kv-grow / --no-kv-grow on the command line
     std::string dump_residual;
@@ -678,7 +679,12 @@ void usage() {
                  "                       (vs int8's 1,056); streams with --kv-resident too\n"
                  "  --kv-resident N      KV streaming: keep N cells of each QSA layer in VRAM (min 20480) and the\n"
                  "                       whole K/V in pinned RAM; the freed VRAM goes to expert slots. 0 (default):\n"
-                 "                       all of it in VRAM. A context of N cells or fewer is not streamed\n"
+                 "                       all of it in VRAM. A context of N cells or fewer is not streamed. The\n"
+                 "                       minimum is ten --qsa-top-k budgets (20480 at the model's 2048)\n"
+                 "  --qsa-top-k N        the cells each full-attention (QSA) layer's query reads, picked by its\n"
+                 "                       indexer: a multiple of 4 in 256..16384 (default: the model's 2048;\n"
+                 "                       STRATA_QSA_TOP_K=N also). A larger budget reads more of a long context per\n"
+                 "                       token and costs time; a context of N+3 tokens or fewer is read whole anyway\n"
                  "  --kv-grow            the K/V takes VRAM only for the cells the requests reach and the expert\n"
                  "                       cache holds the rest, giving slots back as the context grows (one GPU, with\n"
                  "                       --expert-profile; STRATA_KV_GROW=1/0 also). On by default in this fork;\n"
@@ -1617,6 +1623,7 @@ int main(int argc, char** argv) {
         else if (a == "--ple-sync-submit") o.ple_sync_submit = true;
         else if (a == "--kv") o.kv = next("--kv");
         else if (a == "--kv-resident") o.kv_resident = std::atoll(next("--kv-resident"));
+        else if (a == "--qsa-top-k") o.qsa_top_k = std::atoll(next("--qsa-top-k"));
         else if (a == "--kv-grow") { o.kv_grow = true; o.kv_grow_given = true; }
         else if (a == "--no-kv-grow") { o.kv_grow = false; o.kv_grow_given = true; }
         else if (a == "--stream-token") o.stream_token = true;
@@ -2151,6 +2158,25 @@ int main(int argc, char** argv) {
     if (o.kv_resident < 0) {
         std::fprintf(stderr, "strata generate: --kv-resident must be >= 0\n");
         return 2;
+    }
+    // --qsa-top-k (STRATA_QSA_TOP_K when the flag is absent): the QSA selection budget, a process constant
+    // (qsa.hpp) set here, before any QSA state, buffer or graph is sized from it. The model's 2048 changes nothing.
+    if (o.qsa_top_k == 0)
+        if (const char* e = std::getenv("STRATA_QSA_TOP_K"); e != nullptr && e[0] != '\0') o.qsa_top_k = std::atoll(e);
+    if (o.qsa_top_k != 0 && o.qsa_top_k != strata::kernels::kQsaTopKDefault) {
+        if (const char* why = strata::kernels::qsa_top_k_problem(o.qsa_top_k)) {
+            std::fprintf(stderr, "strata generate: --qsa-top-k %lld: %s\n", (long long) o.qsa_top_k, why);
+            return 2;
+        }
+#if defined(STRATA_USE_HIP) || defined(STRATA_HIP_GFX906)
+        // the selection and attention kernels take any budget, but only the CUDA build's are tested with another
+        std::fprintf(stderr, "strata generate: --qsa-top-k %lld: only the CUDA build is tested with a budget other than "
+                             "the model's 2048\n", (long long) o.qsa_top_k);
+        return 2;
+#endif
+        strata::kernels::qsa_set_top_k(o.qsa_top_k);
+        std::fprintf(stderr, "strata generate: QSA top-k %lld cells (%lld blocks; the model's 2048)\n",
+                     (long long) o.qsa_top_k, (long long) (o.qsa_top_k / 4));
     }
     strata::core::qsa_set_kv_resident(o.kv_resident);
     // Prompt lookup (the suffix drafter, on by default): the MTP keeps its --spec windows and a lookup window may be
@@ -6516,6 +6542,10 @@ int main(int argc, char** argv) {
                     {"keep_canonical", o.keep_canonical}, {"no_fused_gr", o.no_fused_gr},
                     {"no_fast_attn", o.no_fast_attn}, {"no_fused_gdn", o.no_fused_gdn},
                     {"no_fast_select", o.no_fast_select}, {"vision", o.vision}};
+                // the selection budget changes every QSA layer's output past it: a file saved under another one does
+                // not resume (only a non-default one enters, so files saved at the default keep their fingerprint)
+                if (strata::kernels::qsa_top_k() != strata::kernels::kQsaTopKDefault)
+                    c.switches.push_back({"qsa_top_k", strata::kernels::qsa_top_k()});
                 config_fp = strata::core::session_config_fingerprint(c);
             }
             id.model = *model_fp;

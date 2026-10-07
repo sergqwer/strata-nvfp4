@@ -8,7 +8,7 @@
 //   2. the new and old outputs agree to a relative 1e-4 of the output scale;
 // then times both over a prompt chunk (the old one in batches of 32, as prefill.cpp calls it).
 // HIP builds (S6): the same checks for the RDNA4 matrix-core kernel (STRATA_HIP_WMMA), skipped (77) off gfx12.
-// Usage: qsa_prompt_attn_parity [context=32768] [queries=2048] [reps=5]
+// Usage: qsa_prompt_attn_parity [context=32768] [queries=2048] [reps=5] [top_k=2048]   (top_k: --qsa-top-k)
 #include "strata/kernels/qsa.hpp"
 #include "strata/kernels/qsa_decode_attn.hpp"
 #include "strata/kernels/qsa_prompt_attn.hpp"
@@ -358,6 +358,10 @@ int main(int argc, char** argv) {
     const int64_t ctx = argc > 1 ? std::atoll(argv[1]) : 32768;
     const int64_t nq = argc > 2 ? std::atoll(argv[2]) : 2048;
     const int reps = argc > 3 ? std::atoi(argv[3]) : 5;
+    if (argc > 4 && !k::qsa_set_top_k(std::atoll(argv[4]))) {   // the widths below follow qsa_real_shapes()
+        std::fprintf(stderr, "qsa_prompt_attn_parity: top_k %s: %s\n", argv[4], k::qsa_top_k_problem(std::atoll(argv[4])));
+        return 2;
+    }
     int fails = 0;
     fails += run(1, ctx, nq, reps);
 #if !defined(__HIP_PLATFORM_AMD__)
