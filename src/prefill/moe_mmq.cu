@@ -2,6 +2,7 @@
 // from the pinned llama.cpp checkout the build already takes ggml from; src/prefill/ggml_cuda_host.cu supplies the
 // few host symbols of ggml-cuda.cu it references.
 #include "strata/prefill/moe_mmq.hpp"
+#include "strata/core/emulate.hpp"
 
 #include "common.cuh"
 #include "mmq.cuh"
@@ -184,7 +185,6 @@ Nvfp4Mode nvfp4_mode() {
         if (std::strcmp(e, "w4a8") == 0) return Nvfp4Mode::W4A8;
         if (std::strcmp(e, "w4a4") == 0) return Nvfp4Mode::W4A4;
         if (std::strcmp(e, "fp16") == 0) return Nvfp4Mode::FP16;
-        if (std::strcmp(e, "w4a4x2") == 0) return Nvfp4Mode::W4A4X2;
         std::fprintf(stderr, "STRATA_PREFILL_NVFP4=%s: expected w4a8, w4a4, w4a4x2 or fp16\n", e);
         std::exit(1);
     }();
@@ -278,12 +278,17 @@ bool x2_mode() {
     return false;
 #else
     if (nvfp4_mode() != Nvfp4Mode::W4A4X2) return false;
-    static const bool on = [] {
-        const bool ok = a44_available();
-        if (!ok) std::fprintf(stderr, "prefill mmq: STRATA_PREFILL_NVFP4=w4a4x2 needs an sm_12x card in a 12x build; W4A8\n");
-        return ok;
-    }();
-    return on;
+    // per device (a layer split can mix cards): the FP4 MMA needs an sm_12x card in a 12x build, else W4A8 - said only
+    // when w4a4x2 was asked for (it is the default)
+    static int known[64] = {};   // 0 not asked yet, 1 yes, 2 no
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { (void) cudaGetLastError(); return false; }
+    if (known[dev] == 0) {
+        known[dev] = !strata::emulated_cc() && a44_available() ? 1 : 2;   // an emulated card is older than sm_120
+        if (known[dev] == 2 && std::getenv("STRATA_PREFILL_NVFP4") != nullptr)
+            std::fprintf(stderr, "prefill mmq: STRATA_PREFILL_NVFP4=w4a4x2 needs an sm_12x card in a 12x build; W4A8\n");
+    }
+    return known[dev] == 1;
 #endif
 }
 

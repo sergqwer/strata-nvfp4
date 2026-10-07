@@ -1926,7 +1926,11 @@ __global__ void __launch_bounds__(256) gr_upmix_kernel(const uint16_t* __restric
 // 407-412 ms.
 constexpr int UC_BM = 128, UC_BD = 32, UC_KC = 32, UC_LD = UC_KC + 8;   // tokens, columns a stream, k a slice, row
 __device__ __forceinline__ void uc_cp16(void* s, const void* g) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"((unsigned) __cvta_generic_to_shared(s)), "l"(g));
+#else
+    (void) s; (void) g;   // never launched before sm_80 (gr_upmix checks the device)
+#endif
 }
 __device__ __forceinline__ void uc_ldm4(unsigned (&r)[4], const void* p) {
     asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
@@ -1950,6 +1954,7 @@ __global__ void __launch_bounds__(256, 2) gr_upmix_cuda_kernel(const uint16_t* _
                                                               uint16_t* __restrict__ mixed16,
                                                               uint16_t* __restrict__ mixed_h,
                                                               uint16_t* __restrict__ mixed16_lo, int64_t T) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800   // cp.async, bf16 mma; never launched before sm_80
     __shared__ __align__(16) uint16_t sA[2][UC_BM][UC_LD];
     __shared__ __align__(16) uint16_t sB[2][HC * UC_BD][UC_LD];
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, wm = warp >> 1, wn = warp & 1;
@@ -2045,6 +2050,7 @@ __global__ void __launch_bounds__(256, 2) gr_upmix_cuda_kernel(const uint16_t* _
                     *reinterpret_cast<uint32_t*>(mixed_h + t * N + d) = (uint32_t) hf(sm[0]) | ((uint32_t) hf(sm[1]) << 16);
             }
         }
+#endif
 }
 #endif
 }  // namespace
@@ -2124,7 +2130,8 @@ bool gr_upmix(const uint16_t* lo16, const uint16_t* w_up, const float* R, const 
     if (T <= 0 || cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { cudaGetLastError(); return false; }
     if (ok_dev[dev] == 0) {
         int major = 0;
-        ok_dev[dev] = cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess && major >= 8
+        ok_dev[dev] = cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess &&
+                      strata::cc_major_of(major) >= 8
                           ? 1 : 2;
         cudaGetLastError();
     }
