@@ -372,6 +372,74 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### Upstream 0.1.40.2 (2026-10-07, release 0.1.40.2-nvfp4.1)
+
+- **What upstream brought that matters here** (its release notes have the full list):
+  - **This fork's CPU share** (#1282), opt-in upstream: `STRATA_PREFILL_CPU_SHARE=auto|x` (978d3558). Two follow-ups
+    of the maintainer's: the CPU-share thread makes no ExpertSource call, its blobs are taken on the prompt thread
+    through `blob_stable` (667f2eca; `blob()` counts reads without a lock and raced the prompt thread's own calls), and
+    `STRATA_DBG_NAN` leaves out the CPU's rows of GU and H, which the GPU never writes (4322e241).
+  - **#789:** the routing ids are read first and the shared expert is queued after the host grouping, so it overlaps
+    the routed-only path's first uploads; the staging ring counts real transfers. On by default
+    (`STRATA_PREFILL_STREAM_AHEAD=0`: the old schedule), the same bits here (the checks below).
+  - **Eddoursul's F4:** the verify window's 2-4 token dense projections read an interleaved copy of the q8_1
+    activations, bitwise the multi-column kernel's (`STRATA_MMVQ_IL=0`: off).
+  - **Opt-ins:** PDL in the verify window (`STRATA_DF_PDL=1`), mixer work on graph side streams (`STRATA_DF_BRANCH`),
+    per-layer slot sizes with `--expert-cache-per-layer`, the pipeline windows beside the asynchronous adaptive tier,
+    sampled-draft acceptance (`STRATA_SPEC_PROB`, `STRATA_SPEC_GUMBEL`). The Stager's sleeping waits are Linux-only;
+    Windows keeps the yield spin.
+  - **Server:** #615's token accounting (which this fork carried; upstream's version replaces it), Prometheus
+    `/metrics` (#793), chunked request bodies (#893), read timeouts for the engine's READY line and the image encoder
+    (#1317), the vision encoder loaded with a lazy model, and the setup's SHA-256 check of the downloaded engine.
+- **The port.** rel/0.1.40 has 70 commits and five round merges; `port_rebase.sh` had taken first parents without
+  merges, which dropped the five commits the merges bring (fixed: a merge that changed the tree stands for its
+  branch's commits). Of the 75, 63 are carried:
+  - dropped: 0.1.40.1's seven commits (the same patch-ids are upstream), the fork's #1058 gate and `/metrics` counter
+    with their two reverts (net zero, checked), and #615 (upstream's);
+  - **the CPU share:** upstream's code is the base. The fork's three commits shrink to what the fork adds: `auto` is the
+    default (upstream: off); the CPU's NVFP4 rows carry s_down, so their `row_sd` is 1 (`cpu_ones`); NVFP4 packs read
+    routed-only up to 4,096 tokens (other formats 1,024, as upstream);
+  - `STRATA_MMVQ_V2` (opt-in) groups k, v and q only without upstream's query branch (`STRATA_DF_BRANCH` makes q on a
+    side stream); otherwise it falls back to upstream's `mm()` (F4's path);
+  - the card check, which the fork runs before the arena thread starts, carries upstream's new HIP hints (#1318,
+    #1261); `--image-max-tokens` sits beside upstream's lazy vision load.
+- **The contention gate** (sent upstream as #1379). `auto` balanced the CPU's time per expert against the GPU's,
+  both measured with the share on, so nothing compared a layer with and without it: on an RX 7900 GRE + Ryzen 7
+  5700X3D the host's time per streamed expert rose 107 -> 200 us with the share and the prompt was 4.5% slower. Now
+  each eligible layer is timed with CUDA events from before its routing sync to its combine, per non-resident expert;
+  adjacent layers alternate without / with the share until three ratios are in, then `auto` shares while the median
+  of the last five favours it, with one layer in 29 in the other arm. In the fork `auto` is the default, so the gate
+  decides the default prompt path, and on NVFP4 packs also for 1K-4K chunks. A fixed share (the checks' 0.5) and 0 are
+  untouched. Here (RTX 5090 + 9950X3D, the GPTQ + Q8_0-down pack) it keeps sharing: on 600-, 1,300- and
+  2,099-token prompts its decision was "share" after 44 of its 45 readings each (`STRATA_DBG_CPU_GATE=1`), the share
+  0.48-0.51 as before. Not measured yet: the gated `auto` against the ungated one in time.
+- **The chunked recurrence from 128 tokens** (on 0.1.40-nvfp4.3, just before the port). PR #1372's fix: one
+  cudaMalloc of the 25.6 MB scratch per device and the kernels' attributes set once, instead of an allocation and
+  `cudaFuncSetAttribute` on every call, whose host time on Windows had made a 2K prompt ~35 ms slower. The recurrence
+  phase: 600 tokens 9 -> 6 ms, 2K 32-33 -> 21-22, 8K 123-129 -> 82-88, 32K 514-515 -> 310-328. A quiet 2K A/B, 3
+  rounds: 1,063.5 / 1,043.6 / 1,047.2 ms with it off, 1,044.2 / 1,038.7 / 1,034.7 with it on. The same bits as
+  `STRATA_GDN_CHUNKED=1` before.
+- **Checks** (release build, sha 09cd28dc):
+  - **Fresh references first.** The chunked default changed 2K after 0.1.40-nvfp4.3's references were made, so the
+    fork's head (a release build of 48fb1b5b) made new ones (`port-refs\0.1.40n4pre`): against 0.1.40-nvfp4.3, 32K
+    identical, 2K different by that change alone (GPTQ + Q8_0-down KL 0.0010, ModelOpt 0.0050, the same top token).
+  - **Against those references,** the logits and 32 tokens are identical on both packs (GPTQ + Q8_0-down after 2K and
+    32K, ModelOpt after 2K; CPU share 0.5, decode's PCIe model off, 6,000 slots). Nothing in the port moved a bit.
+  - **With every fork default off** (the 0.1.40-nvfp4.3 ones and the arena thread included), the logits equal upstream
+    0.1.40.2's byte for byte on IQ2_XS (32K, 12,000 slots, a budget-bound cache).
+  - **Tests:** 97 of 101 pass. Three need model files this machine does not have; `qsa_select_bench` fails its FP64
+    accuracy line the same way in upstream's own 0.1.40.2 build (the fast scorer 2.4e-4 off at a score scale of 229).
+    The server's tests: 570 OK.
+- **Speed** with the GPTQ + Q8_0-down pack, interleaved chats (1,000 tokens, `--stop-eos`) against the tray's
+  0.1.40-nvfp4.3, two sets of 5 pairs (an earlier attempt was stopped: another build started during it):
+
+  | ms a round | 0.1.40-nvfp4.3 | 0.1.40.2-nvfp4.1 |
+  |---|---|---|
+  | first 5 pairs | 15.34 +- 0.22 (158.9 tokens/s) | 16.10 +- 0.88 (155.2) |
+  | next 5 pairs | 15.63 +- 0.54 (156.8) | 15.62 +- 0.57 (160.0) |
+
+  The same within the noise (10 pairs: 157.8 against 157.6 tokens/s).
+
 ### A round of kernels (2026-10-07, release 0.1.40-nvfp4.3)
 
 Where the time goes, from nsys profiles of the tray engine (RTX 5090; the card's own peaks measured: VRAM read 1640
@@ -523,6 +591,8 @@ not in VRAM over PCIe (~9,900 of them, ~30 GB, for 600 tokens), and that copy wa
   (CUDA events, read after the next layer's routing sync - the host reaches the combine long before the GPU does;
   timing the host gave 0.18 and was slower), and the next layers hand the CPU g / (c + g), where both end together.
   It settles at 0.51 here (~75 us an expert each side).
+- **The share is gated** (since 0.1.40.2-nvfp4.1): `auto` also times layers with and without it and shares only
+  while sharing is faster (#1379, "Upstream 0.1.40.2").
 
 Warm serve turns at 95K (ms, two runs each):
 
