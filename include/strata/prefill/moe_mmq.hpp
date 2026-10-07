@@ -22,8 +22,10 @@ bool supported(int ggml_type);
 bool fits(int ggml_type, int64_t w_rows);
 /// NVFP4 prompt precision, STRATA_PREFILL_NVFP4: w4a8 (default) - int8 tensor cores, Q8_1 activations, what decode
 /// runs at; w4a4 - Blackwell's FP4 x FP4 MMA, activations rounded to NVFP4 (faster, first-token KL up to 0.03 vs
-/// fp16); fp16 - the dequantize + FP16 GEMM path (the reference).
-enum class Nvfp4Mode { W4A8, W4A4, FP16 };
+/// fp16); fp16 - the dequantize + FP16 GEMM path (the reference); w4a4x2 - the products with K >= 2048 (gate/up)
+/// on the FP4 MMA with each activation row as two FP4 terms (x ~ q1 + q2, the residual's own NVFP4: W4A8's precision),
+/// the others (down, K 640) as w4a8 (mmq_nvfp4_a44.cu).
+enum class Nvfp4Mode { W4A8, W4A4, FP16, W4A4X2 };
 Nvfp4Mode nvfp4_mode();
 /// Bytes of one expert's gate+up ([2*n_ff, n_embd]) or down ([n_embd, n_ff]) weights in `ggml_type`.
 size_t matrix_bytes(int ggml_type, int64_t rows, int64_t cols);
@@ -31,12 +33,16 @@ size_t matrix_bytes(int ggml_type, int64_t rows, int64_t cols);
 size_t q8_bytes(int64_t rows, int64_t cols);
 
 /// q8_1 activations for MMQ against weights of `ggml_type`: row i of the output is row ids[i] of x (or row i when
-/// ids is null); `x` has `ld` floats per row.
+/// ids is null); `x` has `ld` floats per row.  With `slot` (the inverse map: token t's k-th row is slot[t * k_used +
+/// k], rows = tokens x k_used) each token is quantized once and written to its k_used rows - the same bytes
+/// (STRATA_QUANT_GATHER=1: per row, as before).
 void quantize(const float* x, const int32_t* ids, void* xq, int ggml_type, int64_t cols, int64_t ld, int64_t rows,
-              void* stream, float* yscale = nullptr);
+              void* stream, float* yscale = nullptr, const int32_t* slot = nullptr, int k_used = 0);
 /// NVFP4 on Blackwell in w4a4 mode: the MMQ kernel multiplies FP4 x FP4, so its activations are NVFP4 too, with
 /// one float scale per row that `quantize` writes to `yscale` and the product reads as Product::y_scale.  Decided
-/// by the mode and a device probe of the same compile.
+/// by the mode and a device probe of the same compile.  In w4a4x2 mode true as well (the gate/up input's terms share
+/// one row scale); `quantize` and `Context::run` pick per product by its K: a product with K < 2048 takes q8_1 and
+/// w4a8 (its y_scale ignored).
 bool fp4_activations(int ggml_type);
 /// NVFP4 expert tails: GU rows [row0, row0 + nrows) of a group of `n` experts (absolute `bounds`, n + 1 of them,
 /// on the device) scaled by their expert's {s_gate, s_up, s_down, 0} (`tails`, 4 floats each, on the device): the
