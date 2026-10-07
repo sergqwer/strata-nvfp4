@@ -61,6 +61,9 @@ bool fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
 
 /// The bench only: the AMD latency-hidden kernels on (1) or off (0); -1 = STRATA_GR_FAST.
 void fused_gr_set_fast(int on);
+/// The bench and tests only: the hyper-connection read v4 (0 = v3, 1 = v4, 2 = v4 with programmatic dependent launch
+/// on sm_90+); -1 = STRATA_GR_V4 (unset: 2, the fork's default).
+void fused_gr_set_v4(int mode);
 /// The multi read's variants (#315; not main's opt-in STRATA_GR_V3 read, which sums in another order), all computing
 /// every output with the plain read's operations in its order, so bitwise the plain read's and the single-token
 /// read's: plain (0.1.31's default: the norm one block per token, the down projection on 41 blocks), split (the norm
