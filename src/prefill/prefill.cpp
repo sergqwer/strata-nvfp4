@@ -3457,6 +3457,9 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
     std::string ple_next_err;
     std::future<bool> ple_next;             // declared after everything it reads: an early return waits for it
     int ple_buf = 0;
+    // STRATA_PLE_TRACE=1: when a chunk's read started, when layer 1 asked for its rows, how long it waited
+    static const bool ple_trace = std::getenv("STRATA_PLE_TRACE") != nullptr;
+    Clock::time_point ple_t0 = t_start;
 
     if (hand_in_ == nullptr) stopped_at_ = -1;
 #if defined(STRATA_HAVE_DFLASH2)
@@ -3611,11 +3614,13 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
         // ---- the PLE rows of the whole chunk, one batched SSD request on a thread (see ple_gather).  A later chunk's
         // were read ahead during the previous chunk; the first chunk's are read beside layer 0 - they are needed from
         // layer 1 on, and gathering them here first left the GPU idle for the whole read (~0.4 s of a 32K prompt)
-        if (ple_on && !ple_next.valid())
+        if (ple_on && !ple_next.valid()) {
             ple_next = std::async(std::launch::async, [&ple_gather, &ple_next_err, c0, b = ple_buf] {
                 strata::aux_cpus::pin_current_thread();
                 return ple_gather(c0, b, ple_next_err);
             });
+            ple_t0 = Clock::now();
+        }
         bool ple_pending = ple_on;
         // the chunk's rows onto the device just before layer 1 reads them, and the next chunk's gather started
         auto ple_land = [&]() -> bool {
@@ -3626,6 +3631,10 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                 err = ple_next_err;
                 return false;
             }
+            if (ple_trace)
+                std::fprintf(stderr, "strata ple: chunk %lld: read started %.1f ms into the run, layer 1 reached at %.1f, "
+                                     "waited %.1f ms\n", (long long) c0, std::chrono::duration<double, std::milli>(ple_t0 - t_start).count(),
+                             std::chrono::duration<double, std::milli>(tp - t_start).count(), ms_since(tp));
             // #1996: the pageable fallback (no RAM to pin) goes up through a pinned slot; the pinned buffers as before
             const size_t raw_bytes = (size_t) T * strata::kernels::PLE_N_HEADS * strata::kernels::PLE_ROW_BYTES;
             // STRATA_PLE_COPY_STREAM: the raw rows go up on their own stream once the previous chunk's dequant has read
@@ -3663,6 +3672,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     strata::aux_cpus::pin_current_thread();
                     return ple_gather(c1, b, ple_next_err);
                 });
+                ple_t0 = Clock::now();
             }
             ple_buf ^= 1;
             stats_.ms_ple += ms_since(tp);
