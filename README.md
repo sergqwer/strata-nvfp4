@@ -75,22 +75,24 @@ upstream's; the original README is kept as [README.upstream.md](README.upstream.
   - The result is 73.8 GiB of experts instead of 63.3 GiB. Against an all-Q8_0 reference, the answers' KL is half of the ModelOpt pack's, about 2.6x less once run-to-run noise is taken out, for 12-15% of the decode speed.
   - GPTQ alone, without the 8-bit layers, is 1.7x closer at no speed cost.
   - docs/NVFP4.md, "Re-quantized from BF16", has the method and every measurement.
-- **On upstream Strata 0.1.40.** Since 0.1.39 upstream added:
-  - crash and NaN fixes, among them this fork's #838 and #550;
-  - the image fixes this fork carried (#553, #554, #555, a tool's unreadable picture as a note);
-  - this fork's elastic K/V as `--kv-grow` and its deferred arena registration as `STRATA_DEFERRED_REGISTER=1`, both opt-in there;
-  - decode fusions and kernels from Eddoursul's fork and #783;
-  - Q4_0 / Q4_1 experts, more PLE table formats, Strix Halo, and a long list of opt-ins.
+- **On upstream Strata 0.1.40.2.** Since 0.1.40.1 upstream added:
+  - this fork's CPU share of small prompt chunks (`STRATA_PREFILL_CPU_SHARE=auto`, opt-in there), with the CPU's
+    thread kept off the expert source (its blobs are taken on the prompt thread);
+  - routed expert uploads that overlap the shared expert (#789), and an interleaved q8_1 copy for the verify
+    window's 2-4 token dense projections (Eddoursul's fork), both the same bits;
+  - per-layer slot sizes with `--expert-cache-per-layer`, opt-in verify-window work (PDL, graph branches), `--gpu`,
+    Prometheus `/metrics`, the vision encoder loaded with a lazy model, request-body and timeout fixes in the server,
+    and #615's token accounting, which this fork carried.
 
-  The fork runs upstream's code for both. The K/V keeps this fork's default: it grows with the context
-  (`--no-kv-grow` allocates it whole), with two fixes upstream's version lacks. The registration keeps upstream's
-  default, off, which decodes at the same speed here. A tool call that the model
-  writes inside its thinking now counts only when it ends the turn. 0.1.40 also took a call the model only quoted
-  there, even on a reply cut by max tokens (upstream #1058; fixed in 0.1.40.1, which 0.1.40-nvfp4.2 takes). #567's prompt encoder is
-  the author's current version: a conversation that quotes `<think>` or a control token now re-encodes only its new
-  part. With the fork's own defaults off, the logits equal upstream 0.1.40 byte for byte on IQ2_XS. Against
-  0.1.39-nvfp4.4, with the CPU share fixed, they are identical on both packs.
-  Decode is as fast as 0.1.39-nvfp4.4's (16.1 ms a round).
+  The CPU share is upstream's code now, with this fork's three additions: `auto` is the default (upstream: off), the
+  CPU's NVFP4 rows come with their down scale applied (`row_sd` 1), and NVFP4 packs read routed-only up to 4,096
+  tokens. `auto` also takes the gate sent upstream as #1379: it times layers with and without the share and shares
+  only while sharing is faster, so where the CPU's work slows the stream down the experts stay on the GPU. The DeltaNet
+  recurrence now runs in chunks from 128 tokens (its scratch is kept per device; a 2K prompt 1,044 / 1,039 / 1,035
+  against 1,064 / 1,044 / 1,047 ms). With the CPU share fixed, the logits and tokens are identical to
+  0.1.40-nvfp4.3 plus that change on both packs; with the fork's own defaults off they equal upstream 0.1.40.2 byte
+  for byte on IQ2_XS. Decode is as fast as 0.1.40-nvfp4.3's (10 interleaved chats each: 157.6 against 157.8
+  tokens/s).
 
 - **0.1.40-nvfp4.3:** a round of kernels after a roofline of where the time goes. A 32K prompt reads 8% faster:
   the experts' gate/up on the FP4 tensor cores with two FP4 terms per activation (w4a4x2), the prompt attention on
@@ -347,7 +349,7 @@ either way - CUDA pins it for the GPU's copies.
 | `STRATA_COMMIT_SYNC=1` | the verify commit waits for its graph again (A/B) |
 | `--pcie-frac F` | a fixed share of cache misses fetched over PCIe (default: each layer's count from measured costs, from the link probe's share; NVFP4 0.25) |
 | `STRATA_PCIE_BALANCE=0` | decode keeps the link probe's fixed PCIe share |
-| `STRATA_PREFILL_CPU_SHARE=x\|0` | a fixed CPU share of a small prompt chunk's streamed experts / none (default: measured) |
+| `STRATA_PREFILL_CPU_SHARE=x\|0` | a fixed CPU share of a small prompt chunk's streamed experts / none (default: `auto`, measured, and only while sharing is faster; `STRATA_DBG_CPU_GATE=1` prints its readings) |
 | `STRATA_NO_LARGEPAGES=1` | 4 KB pages even when large pages are allowed (A/B) |
 | `STRATA_NO_NVFP4_512=1` | CPU pool on ggml-cpu's NVFP4 dot instead of the AVX-512 rows |
 | `STRATA_NO_NVFP4_256=1` | without AVX-512: ggml-cpu's NVFP4 dot instead of the AVX2 rows |
