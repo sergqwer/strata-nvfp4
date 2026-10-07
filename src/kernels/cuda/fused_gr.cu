@@ -548,6 +548,362 @@ __global__ void __launch_bounds__(THREADS) gr_up_v3_kernel(GrMulti m, const floa
         m.a[k].mixed[d0 + col] = sum / (float) HC;
     }
 }
+// ================================ hc read v4 (the fork's default) - v3's arithmetic, scheduled better ===========
+// The same sums in the same order as v3 (the same bits: gr_v4_check, T 1..8, direct and in graphs).  v3 was not held
+// back by its 13.1 MB of weights a read but by its per-token work: a read took 14 us at 1 token and +3.2 us per token.
+//  - Every lane loads its whole share of the weights into registers first: they depend on nothing the kernel waits for.
+//  - Activations through the read-only path (__ldg): generic loads could alias the shared-memory stores, so each
+//    token's loads waited behind the previous token's stores.  w_norm (one for every token) is read once.
+//  - `down`'s staged activations and `up`'s lo in two planes (floats 0-3 and 4-7 of every chunk of 8 apart): the
+//    float4 reads of a warp are consecutive (v3's were 2-way bank conflicts).
+//  - `down`: R2 rows per warp (STRATA_GR_V4_R2, default 2): half the blocks stage the same activations (an L2-bound
+//    copy per token), and a staged float4 serves two rows.
+//  - `up`: tokens outer, each token's lo read once into registers (v3 re-read it from shared memory for every row);
+//    the warp's 8 rows reduced together by one butterfly (9 shuffles a token instead of 40; every pairwise sum is
+//    warp_sum's own + partner, and addition commutes bit for bit); the epilogue spread over the lanes (a lane: one row,
+//    tokens ko and ko + 4) instead of lane k doing all 8 rows of token k.
+//  - =2 also launches both as programmatic dependents (PDL): a kernel starts while the one before it finishes, loads its
+//    weights, and waits (griddepcontrol.wait) before its first read or write of anything another kernel produces.
+// RTX 5090, a read (down + up), weights from DRAM: 1.16-1.39x v3's kernels at T = 1..8 (1 token 14.0 -> 11.8 us, 5
+// tokens 24.6 -> 18.1 us = 536 -> 729 GB/s, 8 tokens 36.2 -> 26.3 us); a decode round's GPU time 7.21 -> 6.97 ms, and
+// the decode A/B (5 interleaved chats) 15.88 -> 15.56 ms a round: -2%, within the run-to-run noise.  The same bits as
+// v3, so the fork's default: STRATA_GR_V4 unset = v4 with PDL where the card has it (sm_90+; elsewhere v4 without),
+// =1 v4 without PDL, =0 v3.  One column half only (S = 1: the cards v3 runs on).  CUDA only.
+#if !defined(__HIPCC__)
+__device__ __forceinline__ void gr_pdl_wait() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900 && !defined(__HIPCC__)
+    asm volatile("griddepcontrol.wait;" ::: "memory");
+#endif
+}
+__device__ __forceinline__ void gr_pdl_launch_dependents() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900 && !defined(__HIPCC__)
+    asm volatile("griddepcontrol.launch_dependents;" :::);
+#endif
+}
+
+template <int MAX_T = kFusedGrMaxT, bool EXACT_T = false, bool PDL = false, int R2 = 1>
+__global__ void __launch_bounds__(THREADS) gr_down_v4_kernel(GrMulti m, float* __restrict__ part, float* __restrict__ ssg) {
+    extern __shared__ __align__(16) float xs[];    // [T][N]
+    __shared__ float red[WARPS][MAX_T];
+    const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
+    const int T = EXACT_T ? MAX_T : m.T;
+    constexpr int SL = N, TQS = SL / 8 / 32;      // 10 uint4 chunks per lane
+    const int rg = blockIdx.x, c = blockIdx.y;
+    // R2 rows per warp (rows row0 .. row0 + R2 - 1): fewer blocks stage the same activations, and every staged float4
+    // read serves R2 rows; the inject block keeps one row per warp (warps 0-3)
+    constexpr int NDB = LR / (WARPS * R2);        // down row blocks per stream; block NDB = the inject rows
+    const bool inject_block = rg == NDB;
+    const int row0 = inject_block ? warp : (rg * WARPS + warp) * R2;
+    const bool active = inject_block ? (m.a[0].w_inject != nullptr && warp < HC) : true;
+    const int nrows = inject_block ? (active ? 1 : 0) : R2;
+    const uint16_t* wbase = inject_block ? m.a[0].w_inject : m.a[0].w_down;
+    uint4 wq[R2][TQS];
+#pragma unroll
+    for (int r = 0; r < R2; ++r) {
+        if (r >= nrows) break;
+        const uint4* w4 = reinterpret_cast<const uint4*>(wbase + (size_t) (row0 + r) * D + (size_t) c * N);
+#pragma unroll
+        for (int q = 0; q < TQS; ++q) wq[r][q] = __ldg(w4 + lane + 32 * q);
+    }
+    // w_norm is the same for every token and constant: read once, before the wait.  The activations go through the
+    // read-only path (ld.global.nc): unlike generic loads they cannot alias the shared-memory stores, so the next
+    // token's loads are not held behind this token's stores.
+    constexpr int NI = (SL / 4 + THREADS - 1) / THREADS;   // float4s per thread and token (2.5 -> 3)
+    float4 gv[NI];
+    {
+        const float4* G4 = reinterpret_cast<const float4*>(m.a[0].w_norm + (size_t) c * N);
+#pragma unroll
+        for (int u = 0; u < NI; ++u)
+            if (t + u * THREADS < SL / 4) gv[u] = __ldg(G4 + t + u * THREADS);
+    }
+    if constexpr (PDL) {
+        gr_pdl_launch_dependents();               // `up` may start loading its weights now
+        gr_pdl_wait();                            // R, bo_prev, inj_prev and the scratch are the kernels' before
+    }
+    float ssp[MAX_T];
+#pragma unroll
+    for (int k = 0; k < MAX_T; ++k) {
+        ssp[k] = 0.0f;
+        if (!EXACT_T && k >= T) continue;
+        const FusedGrArgs& a = m.a[k];
+        const bool apply = a.apply;
+        const float gw = apply ? 2.0f * sigmoidf_(__ldg(a.inj_prev + c) / (float) HC) : 0.0f;
+        const float4* R4 = reinterpret_cast<const float4*>(a.R + (size_t) c * N);
+        const float4* B4 = reinterpret_cast<const float4*>(a.bo_prev);
+        float4* X4 = reinterpret_cast<float4*>(xs + (size_t) k * SL);
+        float4 rr[NI], bb[NI];
+#pragma unroll
+        for (int u = 0; u < NI; ++u) {
+            const int i = t + u * THREADS;
+            if (i < SL / 4) {
+                rr[u] = __ldg(R4 + i);
+                if (apply) bb[u] = __ldg(B4 + i);
+            }
+        }
+#pragma unroll
+        for (int u = 0; u < NI; ++u) {
+            const int i = t + u * THREADS;
+            if (i >= SL / 4) break;
+            float4 r = rr[u];
+            if (apply) {
+                const float4 b = bb[u];
+                r.x = fmaf(b.x, gw, r.x); r.y = fmaf(b.y, gw, r.y);
+                r.z = fmaf(b.z, gw, r.z); r.w = fmaf(b.w, gw, r.w);
+            }
+            const float4 g = gv[u];
+            ssp[k] += r.x * r.x + r.y * r.y + r.z * r.z + r.w * r.w;
+            // two planes: halves 0 and 1 of every chunk of 8 apart, so the dots' float4 reads are consecutive
+            X4[(i & 1) * (SL / 8) + (i >> 1)] = make_float4(r.x * g.x, r.y * g.y, r.z * g.z, r.w * g.w);
+        }
+    }
+#pragma unroll
+    for (int k = 0; k < MAX_T; ++k) {
+        if (!EXACT_T && k >= T) break;
+        const float v = warp_sum(ssp[k]);
+        if (lane == 0) red[warp][k] = v;
+    }
+    __syncthreads();
+    if (rg == 0 && t < T) {
+        float sum = 0.0f;
+        for (int w = 0; w < WARPS; ++w) sum += red[w][t];
+        ssg[t * HC + c] = sum;
+    }
+    if (!active) return;
+    float acc[R2][MAX_T];
+#pragma unroll
+    for (int r = 0; r < R2; ++r)
+#pragma unroll
+        for (int k = 0; k < MAX_T; ++k) acc[r][k] = 0.0f;
+#pragma unroll
+    for (int q = 0; q < TQS; ++q) {
+        const int j = lane + 32 * q;
+#pragma unroll
+        for (int k = 0; k < MAX_T; ++k)
+            if (EXACT_T || k < T) {
+                const float4* xp = reinterpret_cast<const float4*>(xs + (size_t) k * SL);
+                const float4 x0 = xp[j], x1 = xp[SL / 8 + j];
+#pragma unroll
+                for (int r = 0; r < R2; ++r)
+                    if (r < nrows) acc[r][k] += dot8u(unpack8(wq[r][q]), x0, x1);
+            }
+    }
+#pragma unroll
+    for (int r = 0; r < R2; ++r) {
+        if (r >= nrows) break;
+        const int prow = inject_block ? LR + warp : row0 + r;
+#pragma unroll
+        for (int k = 0; k < MAX_T; ++k) {
+            if (!EXACT_T && k >= T) break;
+            const float v = warp_sum(acc[r][k]);
+            if (lane == 0) part[((size_t) k * HC + c) * PR + prow] = v;
+        }
+    }
+}
+
+template <int MAX_T = kFusedGrMaxT, bool EXACT_T = false, bool PDL = false>
+__global__ void __launch_bounds__(THREADS) gr_up_v4_kernel(GrMulti m, const float* __restrict__ part,
+                                                           const float* __restrict__ ssg) {
+    __shared__ __align__(16) float lo[MAX_T][LR];  // two planes: floats 0-3 and 4-7 of every chunk of 8 apart
+    __shared__ float rsS[MAX_T][HC];
+    __shared__ float g[MAX_T][HC][UPM_COLS];
+    const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
+    const int T = EXACT_T ? MAX_T : m.T;
+    const int d0 = blockIdx.x * UPM_COLS;
+    constexpr int RPW = HC * UPM_COLS / WARPS;     // 8 rows per warp: row warp + q * WARPS
+    static_assert(RPW == 8, "the butterfly below reduces 8 rows");
+    uint4 wa4[RPW], wb4[RPW];
+#pragma unroll
+    for (int q = 0; q < RPW; ++q) {
+        const int r = warp + q * WARPS;
+        const int c = r / UPM_COLS, dd = r - c * UPM_COLS, i = c * N + d0 + dd;
+        const uint4* w4 = reinterpret_cast<const uint4*>(m.a[0].w_up + (size_t) i * LR);
+        wa4[q] = __ldg(w4 + lane);
+        wb4[q] = lane < LR / 8 - 32 ? __ldg(w4 + 32 + lane) : make_uint4(0, 0, 0, 0);
+    }
+    // the epilogue's share of this lane: row qo = (lane >> 2) & 7 of the warp, tokens ko = lane & 3 and ko + 4
+    const int qo = (lane >> 2) & 7, ko = lane & 3;
+    const int ro = warp + qo * WARPS, co = ro / UPM_COLS, ddo = ro - co * UPM_COLS, io = co * N + d0 + ddo;
+    const float wn = __ldg(m.a[0].w_norm + io);   // the same w_norm for every token; constant: before the wait
+    if constexpr (PDL) gr_pdl_wait();             // part / ssg are `down`'s, R and the rest the kernels' before
+    float rvq[2] = {0.0f, 0.0f}, boq[2] = {0.0f, 0.0f}, ipq[2] = {0.0f, 0.0f};
+    bool apq[2] = {false, false};
+#pragma unroll
+    for (int j = 0; j < 2; ++j) {
+        const int k = ko + 4 * j;
+        if (k < T) {
+            const FusedGrArgs& a = m.a[k];
+            apq[j] = a.apply;
+            rvq[j] = a.R[io];
+            if (apq[j]) { boq[j] = __ldg(a.bo_prev + d0 + ddo); ipq[j] = __ldg(a.inj_prev + co); }
+        }
+    }
+    if (t < T * HC) {
+        const int k = t / HC, c = t - k * HC;
+        float ss = 0.0f;
+        ss += __ldg(ssg + t);
+        const float r = rsqrtf(ss / (float) N + m.a[k].eps);
+        rsS[k][c] = r;
+        if (blockIdx.x == 0) m.a[k].rs[c] = r;
+    }
+    __syncthreads();
+    for (int i = t; i < T * LR; i += THREADS) {
+        const int k = i / LR, r = i - k * LR;
+        float sum = 0.0f;
+#pragma unroll
+        for (int c = 0; c < HC; ++c) {
+            float p = 0.0f;
+            p += __ldg(part + ((size_t) k * HC + c) * PR + r);
+            sum = fmaf(rsS[k][c], p, sum);
+        }
+        const float x = sum / (float) HC;
+        lo[k][((r & 7) >> 2) * (LR / 2) + (r >> 3) * 4 + (r & 3)] = x / (1.0f + __expf(-x));   // two planes
+    }
+    if (blockIdx.x == 0 && t < T * HC) {
+        const int k = t / HC, cc = t - k * HC;
+        if (m.a[k].w_inject != nullptr) {
+            float sum = 0.0f;
+#pragma unroll
+            for (int c = 0; c < HC; ++c) {
+                float p = 0.0f;
+                p += __ldg(part + ((size_t) k * HC + c) * PR + LR + cc);
+                sum = fmaf(rsS[k][c], p, sum);
+            }
+            m.a[k].inject_out[cc] = sum;
+        }
+    }
+    __syncthreads();
+    float mine[2] = {0.0f, 0.0f};
+    const bool b4 = (lane & 16) != 0, b3 = (lane & 8) != 0, b2 = (lane & 4) != 0;
+#pragma unroll
+    for (int k = 0; k < MAX_T; ++k) {
+        if (!EXACT_T && k >= T) break;
+        // lo for token k in registers once (the rows below all use it)
+        const float4* lp = reinterpret_cast<const float4*>(lo[k]);
+        const float4 la0 = lp[lane], la1 = lp[LR / 8 + lane];
+        float4 lb0 = make_float4(0.f, 0.f, 0.f, 0.f), lb1 = lb0;
+        if (lane < LR / 8 - 32) { lb0 = lp[32 + lane]; lb1 = lp[LR / 8 + 32 + lane]; }
+        float sv[RPW];
+#pragma unroll
+        for (int q = 0; q < RPW; ++q) {
+            float acc = dot8u(unpack8(wa4[q]), la0, la1);
+            if (lane < LR / 8 - 32) acc += dot8u(unpack8(wb4[q]), lb0, lb1);
+            sv[q] = acc;
+        }
+        // warp_sum of all 8 rows at once: at each butterfly level a lane keeps half of its rows and adds the
+        // partner's partial of the same row - every sum is warp_sum's own + partner (addition commutes bit for bit)
+        float h4[4], h2[2];
+#pragma unroll
+        for (int r = 0; r < 4; ++r) {
+            const float send = b4 ? sv[r] : sv[4 + r];
+            const float got = __shfl_xor_sync(0xffffffffu, send, 16);
+            h4[r] = (b4 ? sv[4 + r] : sv[r]) + got;
+        }
+#pragma unroll
+        for (int r = 0; r < 2; ++r) {
+            const float send = b3 ? h4[r] : h4[2 + r];
+            const float got = __shfl_xor_sync(0xffffffffu, send, 8);
+            h2[r] = (b3 ? h4[2 + r] : h4[r]) + got;
+        }
+        float fin;
+        {
+            const float send = b2 ? h2[0] : h2[1];
+            const float got = __shfl_xor_sync(0xffffffffu, send, 4);
+            fin = (b2 ? h2[1] : h2[0]) + got;
+        }
+        fin += __shfl_xor_sync(0xffffffffu, fin, 2);
+        fin += __shfl_xor_sync(0xffffffffu, fin, 1);   // row qo's sum for token k, in lanes 4 qo .. 4 qo + 3
+        if ((k & 3) == ko) mine[k >> 2] = fin;
+    }
+#pragma unroll
+    for (int j = 0; j < 2; ++j) {
+        const int k = ko + 4 * j;
+        if (k < T) {
+            float rv = rvq[j];
+            if (apq[j]) {
+                rv = fmaf(boq[j], 2.0f * sigmoidf_(ipq[j] / (float) HC), rv);
+                m.a[k].R_out[io] = rv;
+            }
+            const float x = rv * wn * rsS[k][co];
+            g[k][co][ddo] = x * sigmoidf_(mine[j]);
+        }
+    }
+    __syncthreads();
+    for (int i = t; i < T * UPM_COLS; i += THREADS) {
+        const int k = i / UPM_COLS, col = i - k * UPM_COLS;
+        float sum = 0.0f;
+#pragma unroll
+        for (int c = 0; c < HC; ++c) sum += g[k][c][col];
+        m.a[k].mixed[d0 + col] = sum / (float) HC;
+    }
+}
+#endif
+
+// v4 (=1; =2: and launched as programmatic dependents, the default): one launch of each kernel at this T.
+// 0 = v3, 1 = v4, 2 = v4 + PDL (sm_90+); -2 = not read yet (STRATA_GR_V4, unset: 2); fused_gr_set_v4 (tests) overrides it
+int g_gr_v4 = -2;
+int g_gr_v4_r2 = 0;   // rows per warp of v4's `down` (STRATA_GR_V4_R2: 1, 2 or 4)
+int gr_v4_r2() {
+    if (g_gr_v4_r2 == 0) {
+        const char* v = std::getenv("STRATA_GR_V4_R2");
+        const int r = v == nullptr ? 2 : std::atoi(v);
+        g_gr_v4_r2 = r == 1 || r == 4 ? r : 2;
+    }
+    return g_gr_v4_r2;
+}
+int gr_v4_mode() {
+    if (g_gr_v4 == -2) {
+        const char* v = std::getenv("STRATA_GR_V4");
+        g_gr_v4 = v == nullptr ? 2 : std::atoi(v);
+        if (g_gr_v4 < 0 || g_gr_v4 > 2) g_gr_v4 = 2;
+    }
+    return g_gr_v4;
+}
+#if !defined(__HIPCC__)
+template <int TT, bool EX>
+cudaError_t launch_v4_t(const GrMulti& m, float* part, float* ssg, size_t sm, cudaStream_t st, bool pdl) {
+    cudaLaunchAttribute attr[1];
+    attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    attr[0].val.programmaticStreamSerializationAllowed = 1;
+    cudaLaunchConfig_t cd = {};
+    const int r2 = gr_v4_r2();
+    cd.gridDim = dim3(LR / (WARPS * r2) + 1, HC);
+    cd.blockDim = dim3(THREADS);
+    cd.dynamicSmemBytes = sm;
+    cd.stream = st;
+    cd.attrs = pdl ? attr : nullptr;
+    cd.numAttrs = pdl ? 1 : 0;
+    cudaLaunchConfig_t cu = cd;
+    cu.gridDim = dim3(UPM_BLOCKS);
+    cu.dynamicSmemBytes = 0;
+    const float* cpart = part;
+    const float* cssg = ssg;
+    cudaError_t e;
+    if (pdl) {
+        e = r2 == 4 ? cudaLaunchKernelEx(&cd, gr_down_v4_kernel<TT, EX, true, 4>, m, part, ssg)
+          : r2 == 2 ? cudaLaunchKernelEx(&cd, gr_down_v4_kernel<TT, EX, true, 2>, m, part, ssg)
+                    : cudaLaunchKernelEx(&cd, gr_down_v4_kernel<TT, EX, true, 1>, m, part, ssg);
+        if (e == cudaSuccess) e = cudaLaunchKernelEx(&cu, gr_up_v4_kernel<TT, EX, true>, m, cpart, cssg);
+    } else {
+        e = r2 == 4 ? cudaLaunchKernelEx(&cd, gr_down_v4_kernel<TT, EX, false, 4>, m, part, ssg)
+          : r2 == 2 ? cudaLaunchKernelEx(&cd, gr_down_v4_kernel<TT, EX, false, 2>, m, part, ssg)
+                    : cudaLaunchKernelEx(&cd, gr_down_v4_kernel<TT, EX, false, 1>, m, part, ssg);
+        if (e == cudaSuccess) e = cudaLaunchKernelEx(&cu, gr_up_v4_kernel<TT, EX, false>, m, cpart, cssg);
+    }
+    return e;
+}
+template <int TT, bool EX>
+bool v4_attrs(size_t need) {
+    bool ok = true;
+    auto set = [&](auto fd) {
+        ok = ok && cudaFuncSetAttribute(fd, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) need) == cudaSuccess;
+        cudaFuncSetAttribute(fd, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    };
+    set(gr_down_v4_kernel<TT, EX, false, 1>); set(gr_down_v4_kernel<TT, EX, true, 1>);
+    set(gr_down_v4_kernel<TT, EX, false, 2>); set(gr_down_v4_kernel<TT, EX, true, 2>);
+    set(gr_down_v4_kernel<TT, EX, false, 4>); set(gr_down_v4_kernel<TT, EX, true, 4>);
+    return ok;
+}
+#endif
 // ================================ #315: split / staged - the same arithmetic, split differently ==================
 // The multi read's variants beside the plain read (0.1.31's default; not main's opt-in STRATA_GR_V3 read, which sums
 // in another order).  Every variant computes each output with exactly the plain read's operations in its order (so
@@ -1617,6 +1973,7 @@ static bool gr_fast() {
 int g_gr_fast = -1;
 #endif
 void fused_gr_set_fast(int on) { g_gr_fast = on; }
+void fused_gr_set_v4(int mode) { g_gr_v4 = mode < 0 ? -2 : mode; }
 
 bool fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, void* stream, unsigned long long* stamp_buf,
                          int stamp_i0) {
@@ -1653,7 +2010,8 @@ bool fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
         }
         return q8;
     }
-    // the two-kernel read above: on by default in this fork (upstream: opt-in, STRATA_GR_V3=1), STRATA_GR_V3=0 the
+    // the two-kernel read above: on by default in this fork (upstream: opt-in, STRATA_GR_V3=1; the fork runs it as v4,
+    // the same bits, see below; STRATA_GR_V4=0 the v3 kernels themselves), STRATA_GR_V3=0 the
     // default kernels.  The same maths in another summation order, deterministic: RTX 5090, NVFP4 pack, a decode round
     // 3-5% shorter (41 blocks of `down` on 170 SMs became 164; the norm kernel's ~16 us of latency is gone), and with
     // the adaptive tier off the same 205 greedy tokens before a near-tie goes the other way
@@ -1692,6 +2050,52 @@ bool fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
         }
     }
     const int split = v3 && dev3 >= 0 && dev3 < 64 ? split3[dev3] : -1;
+#if !defined(__HIPCC__)
+    const int v4 = split == 1 ? gr_v4_mode() : 0;
+    if (v4 > 0 && stamp_buf == nullptr && dev3 >= 0 && dev3 < 64) {   // v4 (=2: and PDL); no stamps between
+        // per device: whether v4's launches fit, and whether it has programmatic dependent launch (sm_90+; there
+        // STRATA_GR_V4=2 runs as =1)
+        static bool v4ok[64] = {}, v4tried[64] = {}, v4pdl[64] = {};
+        if (!v4tried[dev3]) {
+            v4tried[dev3] = true;
+            const size_t n1 = kFusedGrMaxT * N * sizeof(float);
+            v4ok[dev3] = v4_attrs<1, true>(1 * N * 4) && v4_attrs<2, true>(2 * N * 4) && v4_attrs<3, true>(3 * N * 4) &&
+                         v4_attrs<4, true>(4 * N * 4) && v4_attrs<5, true>(5 * N * 4) && v4_attrs<6, true>(6 * N * 4) &&
+                         v4_attrs<kFusedGrMaxT, false>(n1);
+            int major = 0;
+            v4pdl[dev3] = cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev3) == cudaSuccess &&
+                          major >= 9;
+            cudaGetLastError();
+            std::fprintf(stderr, "strata: the hyper-connection read v4%s\n",
+                         !v4ok[dev3] ? " does not fit this card: v3"
+                         : v4 == 2 && v4pdl[dev3] ? " (programmatic dependent launch)"
+                         : v4 == 2 ? " (no programmatic dependent launch before sm_90)" : " (STRATA_GR_V4=1: without PDL)");
+        }
+        if (v4ok[dev3]) {
+            float* part = xn_scratch;
+            float* ssg = xn_scratch + (size_t) n_tok * HC * 2 * PR;
+            const size_t sm = (size_t) n_tok * N * sizeof(float);
+            const bool pdl = v4 == 2 && v4pdl[dev3];
+            cudaError_t e4;
+            switch (n_tok) {
+                case 1: e4 = launch_v4_t<1, true>(m, part, ssg, sm, st, pdl); break;
+                case 2: e4 = launch_v4_t<2, true>(m, part, ssg, sm, st, pdl); break;
+                case 3: e4 = launch_v4_t<3, true>(m, part, ssg, sm, st, pdl); break;
+                case 4: e4 = launch_v4_t<4, true>(m, part, ssg, sm, st, pdl); break;
+                case 5: e4 = launch_v4_t<5, true>(m, part, ssg, sm, st, pdl); break;
+                case 6: e4 = launch_v4_t<6, true>(m, part, ssg, sm, st, pdl); break;
+                default: e4 = launch_v4_t<kFusedGrMaxT, false>(m, part, ssg, sm, st, pdl); break;
+            }
+            if (e4 == cudaSuccess) return false;   // like v3: no q8_1 (the caller quantizes)
+            // a launch v4 could not make: v3 from here on, on this device (it recomputes everything `down` wrote;
+            // nothing of the read's outputs is written before `up`)
+            std::fprintf(stderr, "strata: the hyper-connection read v4 failed to launch (%s): v3 from now on\n",
+                         cudaGetErrorString(e4));
+            cudaGetLastError();
+            v4ok[dev3] = false;
+        }
+    }
+#endif
     if (split > 0) {   // 2 kernels; scratch = partials + sums of squares
         float* part = xn_scratch;
         float* ssg = xn_scratch + (size_t) n_tok * HC * 2 * PR;   // room for S = 2
