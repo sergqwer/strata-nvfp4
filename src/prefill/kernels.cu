@@ -2231,10 +2231,15 @@ void gdn_recurrence_variant(int variant, float* state, const float* h, const flo
     } else {
         static const bool pipe = [] { const char* v = std::getenv("STRATA_GDN_PIPELINE"); return v == nullptr || std::atoi(v) != 0; }();
 #if !defined(__HIPCC__)
-        // the fork, opt-in: the recurrence in chunks (other bits; falls back when its scratch cannot be had)
-        static const bool chunked = [] { const char* v = std::getenv("STRATA_GDN_CHUNKED"); return v != nullptr && std::atoi(v) != 0; }();
-        // (from 128 tokens: RTX 5090, 64 tokens 39 against kh3's 31 us, 256 1.40x, 600 1.60x, 2048-8192 1.7x)
-        if (chunked && T >= 128 && gdn_rec_chunked(state, h, gate, beta, y, T, (cudaStream_t) stream) == cudaSuccess) {
+        // the fork: the recurrence in chunks (other bits; falls back when its scratch cannot be had).  By default for
+        // chunks of >= 16384 tokens: a 2K prompt was ~35 ms slower with it (3 rounds: 1087 against 1052 ms), an 8K one
+        // even, a 32K one -3.7%.  STRATA_GDN_CHUNKED=1: from 128 tokens (RTX 5090, 64 tokens 39 against kh3's 31 us,
+        // 256 1.40x, 600 1.60x, 2048-8192 1.7x the recurrence alone); =0: never.
+        static const int64_t chunked_min = [] {
+            const char* v = std::getenv("STRATA_GDN_CHUNKED");
+            return v == nullptr ? (int64_t) 16384 : std::atoi(v) != 0 ? (int64_t) 128 : INT64_MAX;
+        }();
+        if (T >= chunked_min && gdn_rec_chunked(state, h, gate, beta, y, T, (cudaStream_t) stream) == cudaSuccess) {
         } else if (pipe && gdn_keyhead_ok() && gdn_kh3_ok())   // the fork: a thread per value head of the key head (same bits)
             gdn_rec_kh3_kernel<<<HK * NCB, dim3(CB, RG, VPK), 0, (cudaStream_t) stream>>>(state, h, gate, beta, y, T);
         else if (pipe && gdn_keyhead_ok())   // the value heads of a key head in one thread (same bits)

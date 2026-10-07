@@ -1863,10 +1863,10 @@ bool qsa_prompt_attn_batch(const float* q, const QsaAttnPools& pools, const int3
         static const bool v1 = std::getenv("STRATA_PROMPT_ATTN_V1") != nullptr;
         if (volta) return launch70<1>(q, pools, ids, steps, cap, s, attn, n_q, st);
         if (v1 || turing) return launch<1>(q, pools, ids, steps, cap, s, attn, n_q, st);
-        // STRATA_PROMPT_ATTN_IMMA=1 (the fork): both products on INT8 tensor cores (prompt_attn_i8v3_kernel)
+        // the fork's default: both products on INT8 tensor cores (prompt_attn_i8v3_kernel); STRATA_PROMPT_ATTN_IMMA=0: v2
         if (g_pa_imma < 0) {
             const char* v = std::getenv("STRATA_PROMPT_ATTN_IMMA");
-            g_pa_imma = v != nullptr && v[0] == '1' ? 1 : 0;
+            g_pa_imma = v != nullptr && v[0] == '0' ? 0 : 1;
         }
         if (g_pa_imma == 1) return launch_i8v3(q, pools, ids, steps, cap, s, attn, n_q, st);
         return launch_i8(q, pools, ids, steps, cap, s, attn, n_q, st);
