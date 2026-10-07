@@ -358,6 +358,7 @@ either way - CUDA pins it for the GPU's copies.
 | `--no-kv-grow`, `STRATA_KV_GROW=0` | the K/V allocated for the whole context at start (before 0.1.31-nvfp4.2) |
 | `STRATA_KV_GROW_INIT` / `_STEP` | the K/V's cells at start (16384) and its growth step (8192) |
 | `STRATA_PREFILL_GROUP_GATHER=0` | the prompt path gathers, waits and releases one expert at a time (A/B) |
+| `STRATA_HC_UPMIX=0\|1` | the prompt path's hyper-connection up projection with the mix fused (gr_upmix): default on compute capability 12.x (sm_120, bitwise the cuBLAS + mix pair there at chunks of 33+ tokens) / opt-in elsewhere / off |
 | `STRATA_GR_V3=0` | upstream's default hyper-connection read (0.1.32: #315's staged variant, `STRATA_HC_SPLIT`) instead of the split V3 kernels (A/B: 18.49 vs 18.23 ms a round) |
 | `STRATA_GR_V4=0\|1` | the hyper-connection read: the split V3 kernels / V4 without PDL (default: V4 with programmatic dependent launch on sm_90+; the same bits as V3, its kernels 1.16-1.39x faster at 1-8 tokens) |
 | `--ple-inflight N` | outstanding n-gram row reads (default 256; 64 before 0.1.31-nvfp4.2) |
