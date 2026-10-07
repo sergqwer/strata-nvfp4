@@ -1383,7 +1383,7 @@ if(STRATA_NATIVE_EXPERTS)
     # binary is unchanged and runs on sm_121; a card without that image falls back to W4A8 at run time)
     set(_strata_w4a4_archs ${CMAKE_CUDA_ARCHITECTURES})
     list(TRANSFORM _strata_w4a4_archs REPLACE "^(12[0-9])(-real|-virtual)?$" "\\1a\\2")
-    add_library(strata_mmq_w4a4 STATIC src/prefill/mmq_nvfp4_w4a4.cu)
+    add_library(strata_mmq_w4a4 STATIC src/prefill/mmq_nvfp4_w4a4.cu src/prefill/mmq_nvfp4_a44.cu)
     set_target_properties(strata_mmq_w4a4 PROPERTIES CUDA_ARCHITECTURES "${_strata_w4a4_archs}")
     target_include_directories(strata_mmq_w4a4 PRIVATE ${_strata_gg}/include ${_strata_gg}/src ${_strata_mmq})
     target_compile_options(strata_mmq_w4a4 PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda -use_fast_math>)
@@ -1433,6 +1433,9 @@ if(STRATA_NATIVE_EXPERTS)
     # the NVFP4 expert products (w4a8 / w4a4, STRATA_PREFILL_NVFP4) against a double-precision reference
     add_executable(mmq_nvfp4_parity src/prefill/mmq_nvfp4_parity.cpp)
     target_link_libraries(mmq_nvfp4_parity PRIVATE strata_mmq ggml-base CUDA::cudart)
+    # the routed-expert products (MMQ) timed at the prompt path's shapes (16 experts a launch)
+    add_executable(mmq_expert_bench src/prefill/mmq_expert_bench.cpp)
+    target_link_libraries(mmq_expert_bench PRIVATE strata_mmq ggml-base CUDA::cudart)
   elseif(STRATA_PREFILL_MMQ)
     # Compile only the pinned GGML MMQ and activation-quantizer sources used by prefill. This uses
     # common.cuh's native HIP path without enabling a second GGML HIP backend.
