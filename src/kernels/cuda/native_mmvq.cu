@@ -1896,6 +1896,76 @@ bool q6_packed_mmvq(const void* weights, const void* x_q8_1, float* y, int n_in,
     launch_check();
     return true;
 }
+
+// ============================ STRATA_MMVQ_V2=1: up to three Q8_0 matrices on one input in one launch ============
+//
+// Attention's k, v and q (and the drafter's k and v) read the SAME Q8_1 input and were a launch each; a short launch
+// is mostly its ramp and its tail (k / v: 1.4 MB in ~3.5 us, ~400 GB/s against the card's 1640).  Here one launch
+// covers the matrices, each block computing V2_ROWS rows of one of them with the code of
+// native_mmvq_multi_kernel<SmallTraits<Q80Block, 8>, NC, 4, 2> (the EXACT layout, which every column count and
+// native_small_mmvq_kernel agree with bitwise): the same blocks per thread in the same order, the same cross-warp sum
+// and XOR tree, so every output is the same bits as its separate call (mmvq_v2_parity).  RTX 5090, cold weights in a
+// graph: attention k + v + q 1.05-1.08x the three calls at T = 2-5, two 640-row matrices (the shared expert's gate +
+// up shape) 1.18-1.21x at T >= 2; in the engine the GPU's round shrinks by only 0.05-0.1 ms.  Not taken: GDN's qkv +
+// gate (0.93-1.01x: both are long enough already) and a thread loading all its blocks before its first dot product
+// (0.42-0.94x the old loop, which reaches ~1.5 TB/s on the 10240-row qkv).
+bool g_mmvq_v2 = [] { const char* v = std::getenv("STRATA_MMVQ_V2"); return v != nullptr && v[0] == '1'; }();
+constexpr int V2_ROWS = 2, V2_MAX_MATS = 3;
+struct Q8Group { const Q80Block* w[V2_MAX_MATS]; float* y[V2_MAX_MATS]; int n_out[V2_MAX_MATS]; int blk0[V2_MAX_MATS + 1]; int n; };
+
+template<int NCOLS>
+__launch_bounds__(WARPS * WARP, 4)
+__global__ void native_q8_0_group_kernel(const Q8Group g, const Q81Block* __restrict__ x, int n_in) {
+    using F = SmallTraits<Q80Block, 8>;
+    constexpr int ROWS = V2_ROWS, NW = WARPS, BPI = F::BPI;
+    const int b = int(blockIdx.x);
+    const int m = (g.n > 1 && b >= g.blk0[1]) ? ((g.n > 2 && b >= g.blk0[2]) ? 2 : 1) : 0;
+    const Q80Block* __restrict__ w = g.w[m];
+    float* __restrict__ y = g.y[m];
+    const int n_out = g.n_out[m];
+    const int row0 = ROWS * (b - g.blk0[m]);
+    const int tid = WARP * int(threadIdx.y) + int(threadIdx.x);
+    const int blocks_per_row = n_in / F::DIV;
+    const int x_stride = n_in / Q8K;
+    float tmp[NCOLS][ROWS] = {};
+    for (int kbx = tid / F::T; kbx < blocks_per_row; kbx += BPI) {
+        const int kby = kbx * F::KBY;
+        const int kqs = F::kqs(tid);
+#pragma unroll
+        for (int i = 0; i < ROWS; ++i) {
+            if (row0 + i < n_out) {
+                const std::size_t block = std::size_t(row0 + i) * blocks_per_row + kbx;
+                const typename F::W wv = F::load(w + block, kqs);
+#pragma unroll
+                for (int j = 0; j < NCOLS; ++j) tmp[j][i] += F::apply(wv, x + std::size_t(j) * x_stride + kby, kqs);
+            }
+        }
+    }
+    __shared__ float partial[NW - 1][NCOLS][ROWS][WARP];
+    if (threadIdx.y > 0) {
+#pragma unroll
+        for (int j = 0; j < NCOLS; ++j)
+#pragma unroll
+            for (int i = 0; i < ROWS; ++i) partial[threadIdx.y - 1][j][i][threadIdx.x] = tmp[j][i];
+    }
+    __syncthreads();
+    if (threadIdx.y > 0) return;
+#pragma unroll
+    for (int j = 0; j < NCOLS; ++j) {
+#pragma unroll
+        for (int i = 0; i < ROWS; ++i) {
+#pragma unroll
+            for (int l = 0; l < NW - 1; ++l) tmp[j][i] += partial[l][j][i][threadIdx.x];
+            tmp[j][i] = warp_sum(tmp[j][i]);
+            if (threadIdx.x == i && row0 + i < n_out) y[std::size_t(j) * n_out + row0 + i] = tmp[j][i];
+        }
+    }
+}
+
+template<int NCOLS>
+void v2_launch_c(const Q8Group& g, const Q81Block* x, int n_in, cudaStream_t s) {
+    native_q8_0_group_kernel<NCOLS><<<unsigned(g.blk0[g.n]), dim3(WARP, WARPS), 0, s>>>(g, x, n_in);
+}
 } // namespace
 
 bool native_q8_0_packed_enabled() {
@@ -2391,6 +2461,41 @@ bool native_mmvq_pair(int ggml_type, const void* w1, const void* w2, const void*
         case 6: q8_0_pair_launch<6>(a, b, x, y1, y2, n_in, n_out, s); break;
         case 7: q8_0_pair_launch<7>(a, b, x, y1, y2, n_in, n_out, s); break;
         default: q8_0_pair_launch<8>(a, b, x, y1, y2, n_in, n_out, s); break;
+    }
+    launch_check();
+    return true;
+}
+
+
+bool native_mmvq_v2_enabled() { return g_mmvq_v2; }
+void native_mmvq_set_v2(bool on) { g_mmvq_v2 = on; }
+
+bool native_q8_0_mmvq_group(int n, const void* const* weights, float* const* y, const int* n_out, const void* x_q8_1,
+                            int n_in, int ncols, void* stream) {
+    if (!g_mmvq_v2 || n < 1 || n > V2_MAX_MATS || ncols < 1 || ncols > 8 || n_in <= 0 || n_in % 32 != 0) return false;
+    if (ncols > 1 && !g_multi_exact) return false;   // the group kernel is the EXACT layout
+    if (!x_q8_1 || !stream) return false;
+    const auto& reg = q8_packed_registry();
+    Q8Group g{};
+    g.n = n;
+    for (int m = 0; m < n; ++m) {
+        if (!weights[m] || !y[m] || n_out[m] <= 0 || reg.count(weights[m])) return false;   // packed keeps its kernel
+        g.w[m] = static_cast<const Q80Block*>(weights[m]);
+        g.y[m] = y[m];
+        g.n_out[m] = n_out[m];
+        g.blk0[m + 1] = g.blk0[m] + (n_out[m] + V2_ROWS - 1) / V2_ROWS;
+    }
+    const auto* x = static_cast<const Q81Block*>(x_q8_1);
+    const auto s = static_cast<cudaStream_t>(stream);
+    switch (ncols) {
+        case 1: v2_launch_c<1>(g, x, n_in, s); break;
+        case 2: v2_launch_c<2>(g, x, n_in, s); break;
+        case 3: v2_launch_c<3>(g, x, n_in, s); break;
+        case 4: v2_launch_c<4>(g, x, n_in, s); break;
+        case 5: v2_launch_c<5>(g, x, n_in, s); break;
+        case 6: v2_launch_c<6>(g, x, n_in, s); break;
+        case 7: v2_launch_c<7>(g, x, n_in, s); break;
+        default: v2_launch_c<8>(g, x, n_in, s); break;
     }
     launch_check();
     return true;
