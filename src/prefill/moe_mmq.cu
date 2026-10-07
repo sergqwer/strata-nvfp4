@@ -176,8 +176,12 @@ bool built() { return true; }
 
 Nvfp4Mode nvfp4_mode() {
     static const Nvfp4Mode m = [] {
+        // the fork's default: w4a4x2 (falls back to w4a8 without sm_120a).  8 prompts (250 tokens - 32K) against a
+        // high-precision reference, with the IMMA attention and the chunked recurrence: first-token KL median 0.0026
+        // against w4a8's 0.0025, the same top token, the 32 greedy tokens the reference's on 7 of 8 (w4a8: 6)
         const char* e = std::getenv("STRATA_PREFILL_NVFP4");
-        if (e == nullptr || std::strcmp(e, "w4a8") == 0) return Nvfp4Mode::W4A8;
+        if (e == nullptr || std::strcmp(e, "w4a4x2") == 0) return Nvfp4Mode::W4A4X2;
+        if (std::strcmp(e, "w4a8") == 0) return Nvfp4Mode::W4A8;
         if (std::strcmp(e, "w4a4") == 0) return Nvfp4Mode::W4A4;
         if (std::strcmp(e, "fp16") == 0) return Nvfp4Mode::FP16;
         if (std::strcmp(e, "w4a4x2") == 0) return Nvfp4Mode::W4A4X2;
