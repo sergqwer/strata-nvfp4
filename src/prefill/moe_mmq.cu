@@ -160,6 +160,17 @@ bool w4a4_available();
 void run_nvfp4_w4a4(ggml_backend_cuda_context& ctx, const mmq_args& a, cudaStream_t s);
 void quantize_nvfp4_w4a4(const float* x, const int32_t* ids, void* xq, float* yscale, bool aligned, int64_t cols,
                          int64_t ld, int64_t rows, int64_t padded, cudaStream_t s);
+// mmq_nvfp4_a44.cu (12xa too): two FP4 activation terms through the FP4 MMA, and their quantizer
+bool a44_available();
+void run_nvfp4_a44(ggml_backend_cuda_context& ctx, const mmq_args& a, cudaStream_t s);
+void quantize_nvfp4_x2(const float* x, const int32_t* ids, void* xq, float* yscale, int64_t cols, int64_t ld,
+                       int64_t rows, int64_t padded, cudaStream_t s);
+void quantize_nvfp4_x2_scatter(const float* x, const int32_t* slot, void* xq, float* yscale, int64_t cols, int64_t ld,
+                               int64_t tokens, int k_used, int64_t padded, cudaStream_t s);
+// w4a4x2: the products whose K is at least this take two FP4 terms (gate/up, K 2560); below it w4a8 (down, K 640:
+// two FP4 passes there, 0.206 ms, lose to w4a8's 0.185 at 32K - mmq_expert_bench)
+constexpr int64_t kX2MinK = 2048;
+bool x2_mode();
 
 bool built() { return true; }
 
@@ -169,7 +180,8 @@ Nvfp4Mode nvfp4_mode() {
         if (e == nullptr || std::strcmp(e, "w4a8") == 0) return Nvfp4Mode::W4A8;
         if (std::strcmp(e, "w4a4") == 0) return Nvfp4Mode::W4A4;
         if (std::strcmp(e, "fp16") == 0) return Nvfp4Mode::FP16;
-        std::fprintf(stderr, "STRATA_PREFILL_NVFP4=%s: expected w4a8, w4a4 or fp16\n", e);
+        if (std::strcmp(e, "w4a4x2") == 0) return Nvfp4Mode::W4A4X2;
+        std::fprintf(stderr, "STRATA_PREFILL_NVFP4=%s: expected w4a8, w4a4, w4a4x2 or fp16\n", e);
         std::exit(1);
     }();
     return m;
@@ -257,11 +269,26 @@ __global__ void scale_down_rows_kernel(float* __restrict__ d, int64_t ld, const 
 }
 }  // namespace
 
+bool x2_mode() {
+#if defined(GGML_USE_HIP)
+    return false;
+#else
+    if (nvfp4_mode() != Nvfp4Mode::W4A4X2) return false;
+    static const bool on = [] {
+        const bool ok = a44_available();
+        if (!ok) std::fprintf(stderr, "prefill mmq: STRATA_PREFILL_NVFP4=w4a4x2 needs an sm_12x card in a 12x build; W4A8\n");
+        return ok;
+    }();
+    return on;
+#endif
+}
+
 bool fp4_activations(int t) {
 #if defined(GGML_USE_HIP)   // no NVFP4 MMQ on HIP (and no W4A4 unit)
     (void) t;
     return false;
 #else
+    if (t == GGML_TYPE_NVFP4 && x2_mode()) return true;
     if (t != GGML_TYPE_NVFP4 || nvfp4_mode() != Nvfp4Mode::W4A4) return false;
     static const bool on = [] {
         const bool ok = w4a4_available();
@@ -286,10 +313,20 @@ void scale_down_rows(float* d, int64_t ld, const int32_t* bounds, int n, const f
 }
 
 void quantize(const float* x, const int32_t* ids, void* xq, int t, int64_t cols, int64_t ld, int64_t rows, void* stream,
-              float* yscale) {
+              float* yscale, const int32_t* slot, int k_used) {
     if (rows <= 0) return;
+    // a token's K rows are the same row of x: quantized once and scattered (the per-row gather did it K times)
+    static const bool gather = [] { const char* e = std::getenv("STRATA_QUANT_GATHER"); return e != nullptr && std::atoi(e) != 0; }();
+    const bool scatter = slot != nullptr && k_used > 0 && rows % k_used == 0 && !gather;
 #if !defined(GGML_USE_HIP)
-    if (fp4_activations(t)) {
+    if (t == GGML_TYPE_NVFP4 && x2_mode() && cols >= kX2MinK) {   // w4a4x2: two FP4 terms (gate/up)
+        if (yscale == nullptr) { std::fprintf(stderr, "prefill mmq: NVFP4 activations need a scale buffer\n"); std::exit(1); }
+        if (scatter) quantize_nvfp4_x2_scatter(x, slot, xq, yscale, cols, ld, rows / k_used, k_used, pad512(cols), (cudaStream_t) stream);
+        else quantize_nvfp4_x2(x, ids, xq, yscale, cols, ld, rows, pad512(cols), (cudaStream_t) stream);
+        ck(cudaGetLastError(), "quantize");
+        return;
+    }
+    if (fp4_activations(t) && !x2_mode()) {
         if (yscale == nullptr) { std::fprintf(stderr, "prefill mmq: NVFP4 activations need a scale buffer\n"); std::exit(1); }
         const bool aligned = ((uintptr_t) x % 32 == 0) && ((size_t) ld * sizeof(float)) % 32 == 0;
         quantize_nvfp4_w4a4(x, ids, xq, yscale, aligned, cols, ld, rows, pad512(cols), (cudaStream_t) stream);
@@ -298,6 +335,12 @@ void quantize(const float* x, const int32_t* ids, void* xq, int t, int64_t cols,
     }
 #endif
     (void) yscale;
+    if (scatter) {
+        quantize_scatter_mmq_q8_1_cuda(x, slot, xq, (ggml_type) t, cols, ld, pad512(cols), rows / k_used, rows, k_used,
+                                       (cudaStream_t) stream);
+        ck(cudaGetLastError(), "quantize");
+        return;
+    }
     quantize_mmq_q8_1_cuda(x, ids, xq, (ggml_type) t, cols, ld, rows * ld, rows * ld, pad512(cols), rows, 1, 1,
                            (cudaStream_t) stream);
     ck(cudaGetLastError(), "quantize");
@@ -344,7 +387,15 @@ void Context::run(const Product& p, void* stream) {
 #endif
 #if !defined(GGML_USE_HIP)   // NVFP4: CUDA only (no HIP instance, no W4A8 unit)
         case GGML_TYPE_NVFP4:
-            if (fp4_activations(t)) run_nvfp4_w4a4(ctx, a, s);
+            if (x2_mode()) {
+                if (p.w_cols >= kX2MinK) {
+                    run_nvfp4_a44(ctx, a, s);
+                } else {   // below kX2MinK the activations are q8_1 (quantize): w4a8, without the FP4 row scale
+                    mmq_args a8 = a;
+                    a8.y_scale = nullptr;
+                    run_nvfp4_w4a8(ctx, a8, s);
+                }
+            } else if (fp4_activations(t)) run_nvfp4_w4a4(ctx, a, s);
             else run_nvfp4_w4a8(ctx, a, s);
             break;
 #endif
