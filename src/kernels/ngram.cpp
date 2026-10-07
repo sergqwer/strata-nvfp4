@@ -269,6 +269,7 @@ struct PleTable::Impl {
     uint8_t prefetch_raw[kMaxPrefetch][PLE_N_HEADS * PLE_ROW_BYTES_MAX] = {};
     float scale = 1.0f;               // the FP8 table's one scale
     uint32_t rb = PLE_ROW_BYTES;      // bytes per row
+    std::vector<uint8_t> batch_raw;   // a batch gather's raw rows, kept between calls
     void decode(const uint8_t* row, float* out160) const { fmt->dequant(row, scale, out160); }
     // STRATA_PLE_CHECK=1 (a diagnostic for #3602, off by default): the file and the table's offset, to re-read a row whose decoded
     // values are not plausible and compare the bytes the direct reader delivered with the file's own
@@ -430,6 +431,18 @@ bool PleTable::open(const std::string& gguf_path, std::string& err, const PleIoO
         }
         impl_->reader.set_keepalive(io.keepalive_ms, io.keepalive_window_s);
         impl_->n_rows = n_rows;
+        int readers = io.batch_readers;
+        if (readers < 0) {   // POSIX: a reader there is one blocking pread at a time, fewer than DirectFile's pool
+            const char* v = std::getenv("STRATA_PLE_READERS");
+#if defined(_WIN32)
+            readers = v != nullptr && *v ? std::clamp(std::atoi(v), 0, 64) : 8;
+#else
+            readers = v != nullptr && *v ? std::clamp(std::atoi(v), 0, 64) : 0;
+#endif
+        }
+        std::string berr;
+        if (readers > 0 && !impl_->reader.set_batch_readers((unsigned) readers, berr))
+            std::fprintf(stderr, "strata: the PLE batch readers are off (%s)\n", berr.c_str());
     }
     if (io.mode == PleIo::Mmap && io.lock && impl_->data != nullptr) {
 #if defined(_WIN32)
@@ -650,6 +663,19 @@ bool PleTable::gather_batch(const uint32_t* rows, size_t n_tokens, float* out, s
     std::lock_guard<std::recursive_mutex> lk(impl_->mu);
     if (impl_->pending) { err = "PleTable::gather_batch while a token is in flight"; return false; }
     const size_t n = n_tokens * (size_t) PLE_N_HEADS;
+    // a prompt chunk (256 tokens or more): the batch readers; the rows that have landed are decoded while the rest
+    // are read
+    if (impl_->mode == PleIo::Direct && impl_->reader.batch_readers() > 0 && n_tokens >= 256) {
+        if (impl_->batch_raw.size() < n * impl_->rb) impl_->batch_raw.resize(n * impl_->rb);
+        const uint8_t* raw = impl_->batch_raw.data();
+        size_t decoded = 0;
+        auto land = [&](size_t r) {
+            for (; decoded < r; ++decoded) impl_->decode(raw + decoded * impl_->rb, out + decoded * PLE_HEAD_DIM);
+        };
+        if (!impl_->reader.read_batch(rows, n, impl_->batch_raw.data(), err, land)) return false;
+        impl_->bytes_read += (uint64_t) n * impl_->rb;
+        return true;
+    }
     if (impl_->mode == PleIo::Direct) {
         // Fast path: match each requested token to any in-flight/completed prefetch slot, then collect directly
         // without issuing a second PleReader ticket or copying through RowCache.
