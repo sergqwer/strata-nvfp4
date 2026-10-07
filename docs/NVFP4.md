@@ -372,6 +372,76 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### A round of kernels (2026-10-07, release 0.1.40-nvfp4.3)
+
+Where the time goes, from nsys profiles of the tray engine (RTX 5090; the card's own peaks measured: VRAM read 1640
+GB/s, BF16 tensor 233 TFLOPS, INT8 tensor 732 TOPS, FP32 113 TFLOPS, PCIe 57.3 GB/s). A 32K prompt (4.22 s of kernels):
+
+| stage | ms | share | work | at peak | of peak |
+|---|---|---|---|---|---|
+| experts' MMQ (W4A8, INT8 MMA) | 900 | 21% | 151 TOP | 207 ms | 23% |
+| dense projections (cuBLAS BF16) | 953 | 23% | ~192 TFLOP | 824 ms | 87% |
+| hyper-connection GEMMs | 216 | 5% | 40 TFLOP | 173 ms | 80% |
+| DeltaNet recurrence | 513 | 12% | 7.3 TFLOP FP32 | 64 ms | 12% (token by token) |
+| prompt attention | 416 | 10% | ~19 TFLOP | ~85 ms | ~20% |
+| hyper-connection elementwise | 474 | 11% | ~6.4 GB a call pair | - | ~95% of bandwidth |
+| MoE elementwise | 386 | 9% | memory | - | ~65-80% |
+
+A decode round (15.7 ms): dense GEMVs 3.5 ms (the big matrices at 81-100% of bandwidth, the rest launch latency), the
+cache's experts 2.4 (~bandwidth), PCIe misses 3.4 (the link), waiting for the CPU pool 1.7, the hyper-connection read
+1.9 (41% of bandwidth), attention + GDN steps 1.5, small kernels 1.3. The 26% "idle" an nsys profile shows between
+windows is mostly CUPTI's own cost (node-level graph tracing): with host timestamps it is ~0.5 ms a round (3%), the
+graph launches' latency on WDDM.
+
+Seven parallel agents, each reviewed, tested and committed separately:
+
+- **Experts' gate/up on FP4 tensor cores (w4a4x2, default).** What bounded the MMQ: the FP32 scale epilogue after
+  every int8 MMA (NVFP4's scales every 16 values). Blackwell's block-scaled FP4 MMA applies them in hardware (649 TOPS
+  at the engine's shapes against w4a8's 241), but plain W4A4 rounds activations to E2M1 (8.5% per element). w4a4x2
+  gives each activation row two FP4 terms sharing the row scale (x ~ q1 + q2, q2 the NVFP4 of the remainder), both
+  multiplied in one kernel: 0.71-0.73% against double (w4a8 0.53%); down stays w4a8 (K 640, two passes are slower).
+  The same bytes as q8_1. 32K -4.4% alone. Also the prompt path quantizes each token once and scatters it to its 10
+  expert rows (the same bytes; 66 -> 44 ms at 32K).
+- **The prompt attention on INT8 tensor cores (default).** v2 used FP16 MMA with q and p split hi/lo and converted
+  each int8 K / V value to fp16; the new kernel takes K / V as stored and the other operand as three exact 8-bit parts
+  (24 bits, exact int32 sums), 3 blocks an SM instead of 2. 1.34-1.46x the kernel, 346 -> 246 ms at 32K; against
+  FP64 2.2e-6 (v2 3.2e-6); end to end closer to the FP32 kernel than v2 at 2K (KL 0.007 against 0.10).
+- **The DeltaNet recurrence in chunks (default for chunks of 16384+).** The gated delta rule's chunked WY form in
+  FP32 (chunks of 32; T = (I + A)^-1 per chunk in parallel, then a scan over chunks): 1.69x the recurrence at 8K-32K,
+  2.7e-7 - 1.1e-6 from the sequential kernel; a 32K prompt -3.7%. A 2K prompt was ~35 ms slower with it, hence the
+  start at 16384. The sequential kernel itself got a variant with a thread per value head (the same bits, 1.05-1.13x).
+- **The hyper-connection up projection fused with its mix (default on sm_120).** gr_mix_r and gr_write_norm_rs were
+  already at ~95% of bandwidth; the fused kernel never writes / reads the up GEMM's FP32 output (2.6 GB a call at
+  32K): 1.45-1.77x the pair, the same bits at chunks of 33+ tokens on the RTX 5090.
+- **The hyper-connection read v4 in decode (default).** v3's arithmetic scheduled better (weights first, __ldg,
+  no bank conflicts, two rows a warp, one butterfly reduction, PDL on sm_90+): the same bits, 1.16-1.39x the kernels
+  at T = 1..8; bound by per-token FP32 work, not its 13 MB of weights.
+- **Measured, not taken:** decode's dense GEMVs grouped (STRATA_MMVQ_V2, opt-in, the same bits, under 1%); upstream
+  0.1.40's hyper-connection kernels (17.02 against v3's 16.63 ms a round); the recurrence's row groups through
+  __shfl_sync (0.91-0.98x) or 8 row groups (0.83x); a GPU-side chain to hide the host between windows (~3% to gain).
+
+**Quality**, 8 prompts against a high-precision reference (FP16 experts, FP32 attention, the sequential recurrence,
+no CPU share; first-token KL, the 32 greedy tokens):
+
+| prompt | old defaults | 0.1.40-nvfp4.3 |
+|---|---|---|
+| 250 | 0.00035 | 0.00004 |
+| 600 | 0.0049 | 0.0032 |
+| 900 | 0.0015 | 0.0019 |
+| 1,300 | 0.0021 | 0.00009 |
+| 1,700 | 0.052 | 0.192 |
+| 2K | 0.026 | 0.0095 |
+| 8K | 0.0004 | 0.0007 |
+| 32K | 0.0028 | 0.0055 |
+
+Median 0.0025 against 0.0026, the same top token on all 8, the greedy tokens the reference's on 7 of 8 (old: 6).
+p1700 is the prompt a routing flip moves (0.008-0.76 across CPU shares in 0.1.39-nvfp4.4).
+Against 0.1.40-nvfp4.2 itself (port_check1's deterministic settings, CPU share 0.5): the GPTQ + Q8_0-down pack after
+2K KL 0.19 and 32K 0.008, the ModelOpt pack after 2K 0.006, the same top token - the new defaults; the table above
+is the comparison that says which side is closer.
+
+**Speed**, 3 interleaved pairs: a 32K prompt 4110-4410 -> 3868-3994 ms (-8%), 8K even, 2K even (3 pairs: 1036-1095 against 1043-1083 ms). Decode against 0.1.40-nvfp4.2: 15.8 against 16.1 ms a round, 5 interleaved chats, the GPU ring 7.06 against 7.41 ms.
+
 ### Upstream 0.1.40.1 (2026-10-07, release 0.1.40-nvfp4.2)
 
 Upstream's hotfix changes the server and setup only. The engine is 0.1.40-nvfp4.1's, byte for byte (the same exe).
