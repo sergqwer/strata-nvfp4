@@ -612,29 +612,26 @@ __global__ void __launch_bounds__(128 * VPK) gdn_chunk_scan_kernel(float* __rest
         for (int y = 0; y < 4; ++y) state[(size_t) (4 * rq + xx) * rs + (size_t) vh * S + c0 + vv + y] = s[xx][y];
 }
 
-// The scratch's memory pool, one a device, never shrunk: the default pool hands its memory back at every sync, and
-// taking it again cost ~0.5 ms a call (a 600-token chunk then ran 2.6x slower than kh3).  It keeps at most the largest
-// scratch asked for (25.6 MB).  Created on first use; prefill calls one device from one host thread.
-cudaMemPool_t gdn_chunk_pool() {
-    static cudaMemPool_t pools[64] = {};
+// The scratch, one a device: allocated on first use at its largest (GSB / GCH chunks of T, P and gamma: 25.6 MB) and
+// kept (a device runs its prompt on one stream, from one host thread).  A stream-ordered allocation and free per call,
+// even from a pool that keeps its memory, cost host time the GPU waited for (upstream PR #1372: a 2K prompt's
+// recurrence took 78 ms against 34 ms for gdn_rec_kh_kernel; with the scratch kept, 21 ms).
+float* gdn_chunk_scratch() {
+    static float* bufs[64] = {};
     int dev = 0;
     if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { cudaGetLastError(); return nullptr; }
-    if (pools[dev] == nullptr) {
-        cudaMemPoolProps props = {};
-        props.allocType = cudaMemAllocationTypePinned;
-        props.location.type = cudaMemLocationTypeDevice;
-        props.location.id = dev;
-        cudaMemPool_t p = nullptr;
-        if (cudaMemPoolCreate(&p, &props) != cudaSuccess) { cudaGetLastError(); return nullptr; }
-        uint64_t keep = UINT64_MAX;
-        cudaMemPoolSetAttribute(p, cudaMemPoolAttrReleaseThreshold, &keep);
-        pools[dev] = p;
+    if (bufs[dev] == nullptr) {
+        const size_t n = (size_t) (GSB / GCH) * HV * (2 * GCH * GCH + GCH);
+        if (cudaMalloc((void**) &bufs[dev], n * sizeof(float)) != cudaSuccess) {
+            cudaGetLastError();
+            bufs[dev] = nullptr;
+        }
     }
-    return pools[dev];
+    return bufs[dev];
 }
 
 // The whole recurrence of T tokens in super-blocks of GSB: a prep and a scan launch each, the scratch (T, P and gamma
-// of a super-block's chunks: up to GSB / GCH x 48 heads x (2 x 32 x 32 + 32) floats, 25.6 MB) from gdn_chunk_pool.
+// of a super-block's chunks: up to GSB / GCH x 48 heads x (2 x 32 x 32 + 32) floats, 25.6 MB) from gdn_chunk_scratch.
 // y: the [T][HV][S] output.  An error return means nothing was launched (the caller takes another kernel): the scratch
 // could not be had, or the card has fewer than 128 SMs (a second wave of the scan would double it) or too little
 // shared memory for it (Turing).
@@ -651,22 +648,26 @@ cudaError_t gdn_rec_chunked(float* state, const float* h, const float* gate, con
         }
         if (sms < HK * (S / GDV) || (size_t) smem < kChunkScanSmem) return cudaErrorNotSupported;
     }
-    cudaMemPool_t pool = gdn_chunk_pool();
-    if (pool == nullptr) return cudaErrorMemoryAllocation;
+    float* scratch = gdn_chunk_scratch();
+    if (scratch == nullptr) return cudaErrorMemoryAllocation;
     const int nb = (int) ((std::min<int64_t>(GSB, T) + GCH - 1) / GCH);
     const size_t tsz = (size_t) nb * HV * GCH * GCH;
-    float* scratch = nullptr;
-    cudaError_t e = cudaMallocFromPoolAsync((void**) &scratch, (2 * tsz + (size_t) nb * HV * GCH) * sizeof(float), pool, s);
-    if (e != cudaSuccess) return e;
     float *tm = scratch, *pm = tm + tsz, *gm = pm + tsz;
-    cudaFuncSetAttribute(gdn_chunk_prep_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) kChunkPrepSmem);
-    cudaFuncSetAttribute(gdn_chunk_scan_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) kChunkScanSmem);
+    {   // the kernels' shared-memory attributes, once a device
+        static bool attrs[64] = {};
+        int dev = 0;
+        cudaGetDevice(&dev);
+        if (dev >= 0 && dev < 64 && !attrs[dev]) {
+            cudaFuncSetAttribute(gdn_chunk_prep_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) kChunkPrepSmem);
+            cudaFuncSetAttribute(gdn_chunk_scan_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) kChunkScanSmem);
+            attrs[dev] = true;
+        }
+    }
     for (int64_t t0 = 0; t0 < T; t0 += GSB) {
         const int nch = (int) ((std::min<int64_t>(GSB, T - t0) + GCH - 1) / GCH);
         gdn_chunk_prep_kernel<<<dim3((unsigned) nch, HK), 256, kChunkPrepSmem, s>>>(h, gate, beta, tm, pm, gm, t0, T);
         gdn_chunk_scan_kernel<<<dim3(HK, S / GDV), 128 * VPK, kChunkScanSmem, s>>>(state, h, beta, tm, pm, gm, y, t0, nch, T);
     }
-    cudaFreeAsync(scratch, s);
     return cudaSuccess;   // launch errors surface at the caller's check; an error above means nothing ran
 }
 // the output norm over a head's 128 columns, into the FP16 copy the out projection reads (the FP32 output before the
