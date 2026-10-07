@@ -685,6 +685,95 @@ __global__ void __launch_bounds__(CB * RG) gdn_rec_kh_kernel(float* __restrict__
         for (int r = 0; r < RPG; ++r) base[r * rs] = s[j][r];
     }
 }
+// The fork (0.1.40-nvfp4): gdn_rec_kh_kernel's block and staging (a key head, 32 columns, its q / k staged once for the
+// three value heads) with a thread per (column, row group, VALUE HEAD): 384 threads, a third of the work each.  Per
+// value head and column the same arithmetic in the same order (kv and o as fmaf chains over the thread's 32 rows, the
+// four row groups' partials added in order): the same bits (gdn_rec_parity checks them).  The original thread runs
+// its three heads back to back, one warp per scheduler; here three warps share each scheduler.  RTX 5090: 1.07-1.13x
+// the recurrence (0.41 -> 0.38-0.39 us a token, ~0.6% of a 32K prompt).  Tried and slower there: the four row groups
+// in one warp meeting through __shfl_sync instead of shared memory (0.91-0.98x, padded against bank conflicts) and
+// 8 row groups of 16 rows (0.83x, other bits).  Only where its 64 blocks fit one per SM (gdn_kh3_ok); measured on 170
+// SMs only, so smaller cards keep gdn_rec_kh_kernel.  STRATA_GDN_KH3=0: gdn_rec_kh_kernel.
+__global__ void __launch_bounds__(CB * RG * VPK) gdn_rec_kh3_kernel(float* __restrict__ state, const float* __restrict__ h,
+                                                                    const float* __restrict__ gate,
+                                                                    const float* __restrict__ beta,
+                                                                    float* __restrict__ oc_out, int64_t T) {
+    constexpr int TB = GDN_TB, NT = CB * RG * VPK, QKP = S / 4, VP = CB / 4;
+    __shared__ __align__(16) float sq[2][TB][S];
+    __shared__ __align__(16) float sk[2][TB][S];
+    __shared__ __align__(16) float sv[2][TB][VPK][CB];
+    __shared__ float sg[2][TB][VPK], sb[2][TB][VPK], rkv[VPK][RG][CB], ro[VPK][RG][CB];
+    const int qh = blockIdx.x / NCB, cb = blockIdx.x % NCB;
+    const int c = threadIdx.x, rg = threadIdx.y, j = threadIdx.z, tid = (j * RG + rg) * CB + c, col = cb * CB + c;
+    const int vh = qh + j * HK;                           // this thread's value head
+    float s[RPG];
+    const size_t rs = (size_t) HV * S;
+    {
+        const float* base = state + ((size_t) (rg * RPG) * HV + vh) * S + col;
+#pragma unroll
+        for (int r = 0; r < RPG; ++r) s[r] = base[r * rs];
+    }
+    const int64_t nblk = (T + TB - 1) / TB;
+    auto stage = [&](int64_t k) {
+        const int bb = (int) (k & 1);
+        const int64_t t0 = k * TB;
+        for (int p = tid; p < TB * 2 * QKP; p += NT) {
+            const int i = p / (2 * QKP), w = p % (2 * QKP), isk = w / QKP, jj = (w % QKP) * 4;
+            if (t0 + i < T)
+                gdn_cp16(isk ? &sk[bb][i][jj] : &sq[bb][i][jj], h + (t0 + i) * C + (isk ? HK * S : 0) + qh * S + jj);
+        }
+        for (int p = tid; p < TB * VPK * VP; p += NT) {
+            const int i = p / (VPK * VP), w = p % (VPK * VP), jh = w / VP, jj = (w % VP) * 4;
+            if (t0 + i < T)
+                gdn_cp16(&sv[bb][i][jh][jj], h + (t0 + i) * C + 2 * HK * S + (qh + jh * HK) * S + cb * CB + jj);
+        }
+        for (int p = tid; p < 2 * TB * VPK; p += NT) {
+            const int isb = p / (TB * VPK), w = p % (TB * VPK), i = w / VPK, jh = w % VPK;
+            if (t0 + i < T)
+                gdn_cp4(isb ? &sb[bb][i][jh] : &sg[bb][i][jh], (isb ? beta : gate) + (t0 + i) * HV + qh + jh * HK);
+        }
+    };
+    if (nblk > 0) stage(0);
+    gdn_cp_commit();
+    for (int64_t k = 0; k < nblk; ++k) {
+        // buffer (k + 1) & 1 was read by block k - 1, whose last token's second __syncthreads every thread has passed
+        if (k + 1 < nblk) stage(k + 1);
+        gdn_cp_commit();
+        gdn_cp_wait_prev();
+        __syncthreads();
+        const int bb = (int) (k & 1);
+        const int n = (int) ((T - k * TB) < TB ? (T - k * TB) : TB);
+        for (int i = 0; i < n; ++i) {
+            const int64_t t = k * TB + i;
+            float kc[RPG];
+#pragma unroll
+            for (int r = 0; r < RPG; ++r) kc[r] = sk[bb][i][rg * RPG + r];
+            const float g = __expf(sg[bb][i][j]);
+            float kv = 0.0f, o = 0.0f;
+#pragma unroll
+            for (int r = 0; r < RPG; ++r) kv = fmaf(s[r], kc[r], kv);
+            rkv[j][rg][c] = kv;
+            __syncthreads();
+            const float kv_col = rkv[j][0][c] + rkv[j][1][c] + rkv[j][2][c] + rkv[j][3][c];
+            const float delta = (sv[bb][i][j][c] - g * kv_col) * sb[bb][i][j];
+#pragma unroll
+            for (int r = 0; r < RPG; ++r) {
+                s[r] = fmaf(g, s[r], kc[r] * delta);
+                o = fmaf(s[r], sq[bb][i][rg * RPG + r], o);
+            }
+            ro[j][rg][c] = o;
+            __syncthreads();
+            if (rg == 0)   // head j's output, from its four row groups in order
+                oc_out[t * HV * S + vh * S + col] = (ro[j][0][c] + ro[j][1][c] + ro[j][2][c] + ro[j][3][c]) * rsqrtf((float) S);
+        }
+    }
+    {
+        float* base = state + ((size_t) (rg * RPG) * HV + vh) * S + col;
+#pragma unroll
+        for (int r = 0; r < RPG; ++r) base[r * rs] = s[r];
+    }
+}
+
 // gdn_rec_kh_kernel where it pays: a CUDA card with cp.async (sm_80+) that holds all 64 of its blocks at once (each
 // walks the whole chunk, so blocks left for a second wave would double the time).  The busiest SM sets the pace: from
 // 64 SMs up this kernel has one block per SM, below that two on some SMs, while the kernel before has ceil(192 / SMs).
@@ -705,6 +794,23 @@ bool gdn_keyhead_ok() {
                          cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, gdn_rec_kh_kernel, CB * RG, 0) ==
                              cudaSuccess &&
                          (int64_t) per_sm * sms >= (int64_t) HK * NCB;
+        if (!yes) cudaGetLastError();
+        known[dev] = yes ? 1 : 2;
+    }
+    return known[dev] == 1;
+}
+bool gdn_kh3_ok() {
+    static const bool off = [] { const char* v = std::getenv("STRATA_GDN_KH3"); return v != nullptr && std::atoi(v) == 0; }();
+    if (off) return false;
+    static int known[64] = {};   // per device: 0 not asked yet, 1 yes, 2 no
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { cudaGetLastError(); return false; }
+    if (known[dev] == 0) {
+        int sms = 0, per_sm = 0;
+        const bool yes = cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev) == cudaSuccess &&
+                         sms >= HK * NCB &&
+                         cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, gdn_rec_kh3_kernel, CB * RG * VPK, 0) ==
+                             cudaSuccess && per_sm >= 1;
         if (!yes) cudaGetLastError();
         known[dev] = yes ? 1 : 2;
     }
@@ -1637,7 +1743,9 @@ void gdn_recurrence_variant(int variant, float* state, const float* h, const flo
     } else {
         static const bool pipe = [] { const char* v = std::getenv("STRATA_GDN_PIPELINE"); return v == nullptr || std::atoi(v) != 0; }();
 #if !defined(__HIPCC__)
-        if (pipe && gdn_keyhead_ok())   // the value heads of a key head in one thread (same bits)
+        if (pipe && gdn_keyhead_ok() && gdn_kh3_ok())   // the fork: a thread per value head of the key head (same bits)
+            gdn_rec_kh3_kernel<<<HK * NCB, dim3(CB, RG, VPK), 0, (cudaStream_t) stream>>>(state, h, gate, beta, y, T);
+        else if (pipe && gdn_keyhead_ok())   // the value heads of a key head in one thread (same bits)
             gdn_rec_kh_kernel<<<HK * NCB, dim3(CB, RG), 0, (cudaStream_t) stream>>>(state, h, gate, beta, y, T);
         else
 #endif
