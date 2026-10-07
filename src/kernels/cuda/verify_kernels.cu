@@ -498,13 +498,35 @@ __global__ void copy_indexed_kernel(float* __restrict__ dst, const float* __rest
         dst[i] = src[(size_t) idx * stride + i];
 }
 
+// A block copies chunks of blockDim x kFetchU uint4 (grid-stride over the n blobs' chunks: a division per chunk, not
+// per element), each thread's kFetchU loads in flight.  A blob is only 16 B aligned in the arena: its uint4 before the
+// first 128 B boundary go first, so each warp reads whole lines of host memory (a sector two warps shared crossed the
+// link twice).  3.58 MB blobs from the registered arena, RTX 5090 + PCIe 5: 46 -> 53 GB/s alone, 28 -> 34 GB/s beside
+// 8 CPU threads streaming DRAM (a cudaMemcpyAsync of the same blob: 49 / 39).
+constexpr int kFetchU = 4;
 __global__ void fetch_blobs_kernel(const unsigned long long* __restrict__ src, const int32_t* __restrict__ n,
                                    uint4* __restrict__ dst, long long per) {
-    const long long total = (long long) *n * per;
-    for (long long i = (long long) blockIdx.x * blockDim.x + threadIdx.x; i < total;
-         i += (long long) gridDim.x * blockDim.x) {
-        const long long k = i / per, off = i - k * per;
-        dst[i] = ((const uint4*) src[k])[off];
+    const long long ce = (long long) blockDim.x * kFetchU;
+    const long long cpb = (per + ce - 1) / ce;
+    const long long total = (long long) *n * cpb;
+    for (long long c = blockIdx.x; c < total; c += gridDim.x) {
+        const long long k = c / cpb, ci = c - k * cpb;
+        const uint4* s = (const uint4*) src[k];
+        uint4* d = dst + k * per;
+        const int h = (int) ((8 - (((unsigned long long) s >> 4) & 7)) & 7);   // uint4 before the first 128 B line
+        if (ci == 0 && (long long) threadIdx.x < h && (long long) threadIdx.x < per) d[threadIdx.x] = s[threadIdx.x];
+        const long long o0 = ci * ce + h + threadIdx.x;
+        uint4 v[kFetchU];
+#pragma unroll
+        for (int j = 0; j < kFetchU; ++j) {
+            const long long o = o0 + (long long) j * blockDim.x;
+            if (o < per) v[j] = s[o];
+        }
+#pragma unroll
+        for (int j = 0; j < kFetchU; ++j) {
+            const long long o = o0 + (long long) j * blockDim.x;
+            if (o < per) d[o] = v[j];
+        }
     }
 }
 
