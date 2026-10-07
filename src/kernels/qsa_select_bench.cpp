@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <random>
+#include <utility>
 #include <vector>
 
 namespace k = strata::kernels;
@@ -122,11 +123,12 @@ int main(int argc, char** argv) {
     }
     // accuracy against an FP64 host reference on a sample (blocks below n_bid; the tail block is the warp kernel's own
     // arithmetic in both scorers). Gate, as the prompt-attention harness's: the scorer under test is no worse than 4x
-    // the warp kernel's error, floored at 1e-5 of the score scale.  The floor is the fast scorer's own: measured against the FP64
-    // reference it sits at 1.0e-6 of the scale (RTX 5070 sm_120, ctx 32K: 0.99e-6, which a 1e-6 floor failed by rounding; 131K: 0.97e-6)
-    // against the warp kernel's 7e-8, i.e. FP32-accumulated TF32-split products; 1e-5 keeps ten times that margin and is still
-    // two orders below a plain single-TF32 product (~1e-3), which is the error this gate exists to catch.
-    double err_old = 0, err_new = 0, scale = 0;
+    // the warp kernel's error, floored per sample at a K = 128 FP32 dot product's worst case, 128 x 2^-24 = 2^-17 of
+    // the sample's sum of |q * k|. (3xTF32 accumulates 48 MMAs at <= 2^-23 each plus the dropped lo * lo terms, ~7e-6.)
+    // The floor was a fixed share of the score scale (1e-6, then 1e-5), though the method's own error is ~1e-6 of it: an
+    // MSVC build, whose std::normal_distribution draws other data than libstdc++'s, measured 1.03e-6 on an RTX 5090.
+    double err_old = 0, err_new = 0, scale = 0, worst_rel = 0;
+    std::vector<std::pair<double, double>> errs_new;   // (|ref - fast scorer|, sum |q * k|) per sample
     {
         std::mt19937 srng(11);
         const int64_t nqs = std::min<int64_t>(nq, 32);
@@ -136,19 +138,31 @@ int main(int argc, char** argv) {
             if (nbid <= 0) continue;
             for (int sidx = 0; sidx < 1024; ++sidx) {
                 const int64_t j = sidx < 64 ? std::min<int64_t>(nbid - 1, sidx) : (int64_t) (srng() % (uint64_t) nbid);
-                double ref = 0;
+                double ref = 0, mag = 0;
                 for (int h = 0; h < 4; ++h) {
                     double d = 0;
-                    for (int c = 0; c < 128; ++c) d += (double) q[(size_t) (i * 512 + h * 128 + c)] * (double) pooled[(size_t) (j * 128 + c)];
+                    for (int c = 0; c < 128; ++c) {
+                        const double t = (double) q[(size_t) (i * 512 + h * 128 + c)] * (double) pooled[(size_t) (j * 128 + c)];
+                        d += t;
+                        mag += std::fabs(t);
+                    }
                     ref += d > 0 ? d : 0;
                 }
                 scale = std::max(scale, std::fabs(ref));
                 err_old = std::max(err_old, std::fabs(ref - (double) a[(size_t) (i * max_blocks + j)]));
-                err_new = std::max(err_new, std::fabs(ref - (double) b[(size_t) (i * max_blocks + j)]));
+                const double e = std::fabs(ref - (double) b[(size_t) (i * max_blocks + j)]);
+                err_new = std::max(err_new, e);
+                errs_new.emplace_back(e, mag);
             }
         }
     }
-    const bool acc_ok = !have_tc || err_new <= std::max(4.0 * err_old, 1e-5 * scale);
+    const double kFloor = std::ldexp(1.0, -17);
+    bool acc_ok = true;
+    for (const auto& e : errs_new) {
+        acc_ok = acc_ok && e.first <= std::max(4.0 * err_old, kFloor * e.second);
+        if (e.second > 0) worst_rel = std::max(worst_rel, e.first / e.second);
+    }
+    acc_ok = !have_tc || acc_ok;
     // time
     cudaEvent_t e0, e1;
     cudaEventCreate(&e0); cudaEventCreate(&e1);
@@ -166,8 +180,9 @@ int main(int argc, char** argv) {
     const float t_tk2 = timed([&] { k::qsa_block_topk(sc_old, d_steps, nq, max_blocks, cap, s, ids_reg, nullptr, active); });
     std::printf("top-k %.3f -> %.3f ms (%.1fx), register top-k identical to the reference %lld/%lld\n", t_tk, t_tk2,
                 t_tk / t_tk2, (long long) reg_same, (long long) nq);
-    std::printf("%s accuracy vs FP64 (score scale %.3g): warp kernel max err %.3g, fast scorer max err %.3g (%.2g of scale)\n",
-                !have_tc ? "SKIP" : acc_ok ? "PASS" : "FAIL", scale, err_old, err_new, scale > 0 ? err_new / scale : 0.0);
+    std::printf("%s accuracy vs FP64 (score scale %.3g): warp kernel max err %.3g, fast scorer max err %.3g (%.2g of scale; "
+                "at worst %.2g of a sample's sum |q*k|, floor %.2g)\n", !have_tc ? "SKIP" : acc_ok ? "PASS" : "FAIL", scale,
+                err_old, err_new, scale > 0 ? err_new / scale : 0.0, worst_rel, kFloor);
     if (!have_tc) std::printf("fast scorer not available on this device: warp scorer %.3f ms, top-k %.3f ms (%.0f%% of the two)\n", t_old, t_tk2, 100.0 * t_tk2 / (t_old + t_tk2));
     std::printf("ctx %lld, %lld queries x %lld blocks: scores %.3f -> %.3f ms (%.1fx), top-k %.3f ms; score rel diff "
                 "mean %.2g max %.2g; selections identical %lld/%lld, cells differing %.4f%%\n", (long long) ctx,
