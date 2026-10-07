@@ -724,8 +724,18 @@ bool MtpDrafter::record_front(int T, int row0, cudaStream_t cs, std::string& err
         }
         // ---- attention: K/V into the layer's own cache
         native_quantize_q8_1(mixed_, xq_, (int) N, T, cs);
-        native_mmvq(wt_k_proj, wp_k_proj, xq_, kcur_, (int) N, (int) (NKV * HD), T, cs);
-        native_mmvq(wt_v_proj, wp_v_proj, xq_, vcur_, (int) N, (int) (NKV * HD), T, cs);
+        // STRATA_MMVQ_V2=1: k and v in one launch, the same bits (q is in the attention pass below)
+        bool kv_done = false;
+        if (strata::kernels::native_mmvq_v2_enabled() && wt_k_proj == 8 && wt_v_proj == 8) {
+            const void* gw[2] = {wp_k_proj, wp_v_proj};
+            float* gy[2] = {kcur_, vcur_};
+            const int go[2] = {(int) (NKV * HD), (int) (NKV * HD)};
+            kv_done = strata::kernels::native_q8_0_mmvq_group(2, gw, gy, go, xq_, (int) N, T, cs);
+        }
+        if (!kv_done) {
+            native_mmvq(wt_k_proj, wp_k_proj, xq_, kcur_, (int) N, (int) (NKV * HD), T, cs);
+            native_mmvq(wt_v_proj, wp_v_proj, xq_, vcur_, (int) N, (int) (NKV * HD), T, cs);
+        }
         // #783 PR-d (stuchapin909): the T tokens' K norm, K/V rotation and K/V append each run once over all T rows
         // (every row is independent; the rope keeps its per-token positions). STRATA_NO_BATCH_KV_STEP=1 appends per token.
         static const bool no_batch_kv = [] {
