@@ -899,6 +899,9 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   target_include_directories(qsa_parity PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(qsa_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
   add_test(NAME qsa_parity COMMAND qsa_parity --selftest)
+  # --qsa-top-k: the same checks at twice the model's selection budget and at the largest the engine takes
+  add_test(NAME qsa_parity_top_k_4096 COMMAND qsa_parity --selftest --top-k 4096)
+  add_test(NAME qsa_parity_top_k_16384 COMMAND qsa_parity --selftest --top-k 16384)
 
   # the QSA top-k the engine dispatches against the original kernel: identical ids on both sides of the register
   # kernel's reach, with tied and with equal scores (synthetic, no model)

@@ -101,15 +101,49 @@ struct QsaShapes {
     int64_t idx_n_head = 0; ///< indexer query heads (4)
     int64_t idx_dim = 0;    ///< indexer key width (128)
     int64_t idx_block = 0;  ///< r = 4: the indexer pools one key per 4 cells
-    int64_t idx_top_k = 0;  ///< 2048 cells of selection budget
+    int64_t idx_top_k = 0;  ///< 2048 cells of selection budget (the artifact's; --qsa-top-k, see qsa_top_k)
     int64_t page_size = 0;  ///< KV page granule in CELLS; 1 is a legal unpaged configuration
 };
 
-/// The real artifact's geometry, so no caller transcribes it by hand.
+/// THE SELECTION BUDGET, `idx_top_k`, IS THE ONE RUNTIME KNOB OF THESE SHAPES (`--qsa-top-k`, STRATA_QSA_TOP_K).
+/// The artifact's own value is its GGUF's `attention.indexer.top_k`, 2048 cells (512 blocks), and that stays the
+/// default.  A larger budget lets each query attend to more of a long context (at 32K, 2,048 cells are 6% of it and
+/// 4,096 are 12.5%), at the cost of reading that many more cells per QSA layer and token.  A context shorter than
+/// both widths (`qsa_selection_width`: 2,051 cells at the default) selects every cell either way.
+///
+/// A PROCESS CONSTANT, like the rope scaling: set once at startup, after the CLI is parsed and before any QSA state
+/// is sized or any graph captured.  Every capacity the engine allocates - the selected ids, the gathered K/V, the
+/// attention scratch, the prompt path's selections - is `qsa_selection_width(kTopkMaxCells, s)` of these shapes, and
+/// KV streaming keeps 10 budgets resident (`qsa_kv_resident_min`), so a change after that would read past them.
+/// The range: a multiple of `idx_block` (the selection is whole blocks), from kQsaTopKMin to kQsaTopKMax.  The upper
+/// end is what the kernels are tested for (`qsa_parity --top-k`, `qsa_topk_parity`, `decode_cluster_parity`,
+/// `kv_stream_parity`); the hard limit is kTopkMaxCells, past which the capacity would cut the selection short.
+inline constexpr int64_t kQsaTopKDefault = 2048;
+inline constexpr int64_t kQsaTopKMin = 256;     ///< the native short-context attention's own floor
+inline constexpr int64_t kQsaTopKMax = 16384;   ///< 4,096 blocks, 8x the artifact's budget
+namespace detail {
+inline int64_t& qsa_top_k_cell() { static int64_t v = kQsaTopKDefault; return v; }
+}  // namespace detail
+/// The budget the shapes below carry.
+inline int64_t qsa_top_k() { return detail::qsa_top_k_cell(); }
+/// Null when `cells` is a legal budget, else why not (for the CLI's message).
+inline const char* qsa_top_k_problem(int64_t cells) {
+    if (cells < kQsaTopKMin || cells > kQsaTopKMax) return "out of range (256..16384 cells)";
+    if (cells % 4 != 0) return "not a multiple of the indexer block (4 cells)";
+    return nullptr;
+}
+/// Startup only (see above).  Returns false, changing nothing, for an illegal budget.
+inline bool qsa_set_top_k(int64_t cells) {
+    if (qsa_top_k_problem(cells) != nullptr) return false;
+    detail::qsa_top_k_cell() = cells;
+    return true;
+}
+
+/// The real artifact's geometry, so no caller transcribes it by hand (`idx_top_k`: the budget above).
 inline QsaShapes qsa_real_shapes() {
     QsaShapes s;
     s.n_head = 24; s.n_head_kv = 2; s.head_dim = 256; s.n_rot = 64;
-    s.idx_n_head = 4; s.idx_dim = 128; s.idx_block = 4; s.idx_top_k = 2048;
+    s.idx_n_head = 4; s.idx_dim = 128; s.idx_block = 4; s.idx_top_k = qsa_top_k();
     // one page = one indexer block (4 cells): the granule KV streaming keeps resident (kv_stream.hpp). The readers
     // resolve a row per cell anyway, so the page size costs them nothing (measured: identical output and speed).
     s.page_size = 4;
@@ -280,6 +314,8 @@ void qsa_index(const float* pooled, int64_t n_bid, const float* q_idx, const flo
 /// ascending tie rule deterministic without a second pass over global memory.  Phase 3 replaces this with a
 /// radix select and Phase 7 raises the cap; until then a longer context is refused loudly.
 inline constexpr int64_t kTopkMaxCells = 32768;
+// every legal budget's width fits the capacity `qsa_selection_width(kTopkMaxCells, s)`, so no buffer cuts it short
+static_assert(kQsaTopKMax + 4 - 1 <= kTopkMaxCells, "the largest --qsa-top-k must fit the selection capacity");
 
 void topk_512(const float* cell_scores, int64_t n_kv, const QsaShapes& s, int64_t cap, int32_t* ids,
               void* stream);

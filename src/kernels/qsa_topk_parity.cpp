@@ -29,8 +29,9 @@ void ck(cudaError_t e, const char* w) {
     if (e != cudaSuccess) { std::fprintf(stderr, "%s: %s\n", w, cudaGetErrorString(e)); std::exit(2); }
 }
 
-bool run_case(int64_t ctx, int64_t nq, int reps, int64_t capacity, bool counted) {
-    const k::QsaShapes s = k::qsa_real_shapes();
+bool run_case(int64_t ctx, int64_t nq, int reps, int64_t capacity, bool counted, int64_t top_k = 0) {
+    k::QsaShapes s = k::qsa_real_shapes();
+    if (top_k > 0) s.idx_top_k = top_k;   // another selection budget (--qsa-top-k)
     const int64_t max_blocks = capacity / s.idx_block + 2, cap = k::qsa_selection_width(k::kTopkMaxCells, s);
     std::vector<int32_t> steps((size_t) (nq * k::kStepCount));
     for (int64_t i = 0; i < nq; ++i) {
@@ -96,9 +97,10 @@ bool run_case(int64_t ctx, int64_t nq, int reps, int64_t capacity, bool counted)
     cudaEventDestroy(e0); cudaEventDestroy(e1);
     cudaFree(d_steps); cudaFree(d_scores); cudaFree(ids_ref); cudaFree(ids_new);
     const bool ok = same_cont == nq && same_tied == nq && same_equal == nq;
-    std::printf("%s context %lld under a capacity of %lld (%lld blocks), %lld queries %s: reference %.3f ms, "
-                "dispatched %.3f ms (%.1fx); identical ids: continuous %lld/%lld, 64 levels %lld/%lld, equal scores "
+    std::printf("%s context %lld under a capacity of %lld (%lld blocks), top-k %lld, %lld queries %s: reference %.3f "
+                "ms, dispatched %.3f ms (%.1fx); identical ids: continuous %lld/%lld, 64 levels %lld/%lld, equal scores "
                 "%lld/%lld\n", ok ? "PASS" : "FAIL", (long long) ctx, (long long) capacity, (long long) max_blocks,
+                (long long) s.idx_top_k,
                 (long long) nq, counted ? "with their block count" : "without a block count", t_ref, t_new, t_ref / t_new,
                 (long long) same_cont, (long long) nq, (long long) same_tied,
                 (long long) nq, (long long) same_equal, (long long) nq);
@@ -118,6 +120,16 @@ int main(int argc, char** argv) {
         for (const auto& c : cases) {
             ok = run_case(c[0], 8, 3, c[1], false) && ok;     // a decode window's call
             ok = run_case(c[0], 64, 3, c[1], true) && ok;     // the prompt path's
+        }
+        // --qsa-top-k: wider selections through the same kernels - just past the identity, a sparse middle under a
+        // long capacity, both sides of the register kernel's reach, and the longest context
+        for (const int64_t tk : {(int64_t) 4096, (int64_t) 16384}) {
+            const int64_t wide[][2] = {{tk + 3 + 64, tk + 3 + 64}, {tk + 3 + 64, 262144}, {32768, 262144},
+                                       {135160, 135160}, {135176, 135176}, {262144, 262144}};
+            for (const auto& c : wide) {
+                ok = run_case(c[0], 8, 3, c[1], false, tk) && ok;
+                ok = run_case(c[0], 64, 3, c[1], true, tk) && ok;
+            }
         }
         std::printf("%s\n", ok ? "qsa_topk_parity: PASS" : "qsa_topk_parity: FAIL");
         return ok ? 0 : 1;

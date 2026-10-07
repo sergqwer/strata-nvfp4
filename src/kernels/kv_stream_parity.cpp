@@ -24,6 +24,7 @@
 #include <cstring>
 #include <random>
 #include <set>
+#include <string>
 #include <vector>
 
 namespace k = strata::kernels;
@@ -114,11 +115,17 @@ std::vector<int32_t> selection(int64_t n_kv, int64_t width, std::mt19937& rng) {
     return ids;
 }
 
-bool run(int fmt) {
-    const char* name = fmt == k::kKvHybrid ? "k8v4" : fmt == k::kKvQ4 ? "q4_0" : fmt == k::kKvInt8 ? "int8" : "fp16";
+bool run(int fmt, int64_t top_k = 0) {   // top_k > 0: another selection budget (--qsa-top-k)
+    const char* fname = fmt == k::kKvHybrid ? "k8v4" : fmt == k::kKvQ4 ? "q4_0" : fmt == k::kKvInt8 ? "int8" : "fp16";
     k::QsaShapes s = k::qsa_real_shapes();
-    const int64_t N = 40000, n_blocks = (N + 3) / 4, n_slots = 8 * 516 + 700;   // must evict: slots < blocks
+    if (top_k > 0) s.idx_top_k = top_k;
+    const std::string label = top_k > 0 ? std::string(fname) + " top-k " + std::to_string(top_k) : std::string(fname);
+    const char* name = label.c_str();
     const int64_t cap = k::qsa_selection_width(k::kTopkMaxCells, s), NQ = 8;
+    // slots for NQ disjoint selections and slack (8 x 516 + 700 at the model's budget), and a sequence long enough
+    // that they must evict: slots < blocks (40,000 cells at the model's budget)
+    const int64_t n_slots = NQ * ((cap + 3) / 4 + 3) + 700, N = std::max<int64_t>(40000, n_slots * 5),
+                  n_blocks = (N + 3) / 4;
     const int64_t H = s.n_head_kv, D = s.head_dim, NH = s.n_head;
     std::mt19937 rng(7 + 4 * fmt);
     std::normal_distribution<float> nd(0.f, 1.f);
@@ -213,7 +220,7 @@ bool run(int fmt) {
 
     // 4. a ring over the same host copy: blocks [b1 - R, b1) restored, read through `b % R`
     {
-        const int64_t R = 1500, b1 = n_blocks, b0 = b1 - R;
+        const int64_t R = std::max<int64_t>(1500, (cap + 3) / 4 + 488), b1 = n_blocks, b0 = b1 - R;   // holds the window
         Pools ring;
         ring.alloc(R, s, fmt, false);
         int32_t* rt = dalloc<int32_t>(n_blocks);
@@ -241,6 +248,10 @@ int main() {
     std::printf("kv_stream_parity: streamed vs resident KV, bitwise\n");
     const bool a = run(k::kKvInt8), b = run(k::kKvF16), c = run(k::kKvQ4), d = run(k::kKvHybrid);
     if (!a || !b || !c || !d) ++g_fail;
+    // --qsa-top-k: twice the model's budget in every format, and the largest the engine takes in INT8
+    for (const int fmt : {k::kKvInt8, k::kKvF16, k::kKvQ4, k::kKvHybrid})
+        if (!run(fmt, 4096)) ++g_fail;
+    if (!run(k::kKvInt8, 16384)) ++g_fail;
     std::printf(g_fail ? "FAIL\n" : "PASS\n");
     return g_fail ? 1 : 0;
 }

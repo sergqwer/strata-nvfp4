@@ -1694,6 +1694,12 @@ int main(int argc, char **argv) try {
         else if (a == "--ple-sync-submit") o.ple_sync_submit = true;
         else if (a == "--kv") o.kv = next("--kv");
         else if (a == "--kv-resident") o.kv_resident = std::atoll(next("--kv-resident"));
+        else if (a == "--qsa-top-k") {   // the CUDA build's (qsa.hpp): the port keeps the model's budget
+            if (std::atoll(next("--qsa-top-k")) != 2048) {
+                std::fprintf(stderr, "strata generate: --qsa-top-k: the SYCL port keeps the model's QSA top-k (2048)\n");
+                return 2;
+            }
+        }
         else if (a == "--kv-grow") o.kv_grow = true;
         else if (a == "--no-kv-grow") o.kv_grow = false;
         else if (a == "--stream-token") o.stream_token = true;
@@ -2209,6 +2215,10 @@ int main(int argc, char **argv) try {
     strata::core::qsa_set_kv_hybrid(o.kv == "k8v4");   // K8V4: INT8 K + rotated Q4_0 V, 816 B/cell
     if (o.kv_resident < 0) {
         std::fprintf(stderr, "strata generate: --kv-resident must be >= 0\n");
+        return 2;
+    }
+    if (const char* e = std::getenv("STRATA_QSA_TOP_K"); e != nullptr && e[0] != '\0' && std::atoll(e) != 2048) {
+        std::fprintf(stderr, "strata generate: STRATA_QSA_TOP_K: the SYCL port keeps the model's QSA top-k (2048)\n");
         return 2;
     }
     strata::core::qsa_set_kv_resident(o.kv_resident);
