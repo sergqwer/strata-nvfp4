@@ -55,11 +55,12 @@ SwiGLU input has the heavier tails), `w4a4` 7.2% and 8.4%, `fp16` 0.017% and 0.0
 ## The n-gram (PLE) table
 
 Layer 1 adds 16 rows of a 320,001,536 x 160 n-gram table per token. Qwen ships it in FP8 E4M3 (128 shards of
-[2500012, 160] and one scale, 51.2 GB); no source holds more precision (OrcaRouter's BF16 copy is this FP8
-widened). Strata read only IQ4_NL (ISTA-DASLab's shard 2, 28.8 GB), which is 8.1% off the FP8 values per row -
-correlation 0.996-0.997 on rows from every shard, so the same table in the same order, and the abliteration left it
-alone. `tools/ple_fp8_pack.py` copies the FP8 bytes into a GGUF (I8, `strata.ple.format` = f8_e4m3,
-`strata.ple.scale`); `ple_fp8_parity` checks the engine's rows against torch's decode of the checkpoint, bit for bit.
+[2500012, 160] and one scale, 51.2 GB). It is not the same as the BF16 table: measured (2026-10-08), the FP8
+values are ~2.7% RMS off the BF16 ones. Strata read only IQ4_NL (ISTA-DASLab's shard 2, 28.8 GB), which is 8.1%
+off the FP8 values per row - correlation 0.996-0.997 on rows from every shard, so the same table in the same order,
+and the abliteration left it alone. `tools/ple_fp8_pack.py` copies the FP8 bytes into a GGUF (I8,
+`strata.ple.format` = f8_e4m3, `strata.ple.scale`); `ple_fp8_parity` checks the engine's rows against torch's decode
+of the checkpoint, bit for bit.
 
 | first-token KL, 8 prompts (1K-8K) | mean | median | max | top-1 |
 | --- | ---: | ---: | ---: | ---: |
@@ -372,6 +373,62 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### Upstream 0.1.41 (2026-10-08, release 0.1.41-nvfp4.1)
+
+- **What upstream brought that matters here** (0.1.41 with the hotfix 0.1.40.4's Pascal decode fix; its release
+  notes have the full list):
+  - **The CPU share on by default** (162ce64e): `auto` on CUDA builds with one GPU and no batch slots - the paths the
+    fork's default already ran on - with the contention gate this fork sent as #1379. Its chunk limit is the share's
+    own now, `STRATA_PREFILL_CPU_SHARE_MAX` (92bce20e: 1,024 tokens by default, 3,072 with the variable set).
+  - **The loan for the staged chunk** (92bce20e): with the share on, the prompt path borrows expert slots for the
+    chunk it stages, not the largest one: a 2K prompt borrows 364 slots instead of 795 (5,468 experts resident instead
+    of 5,095), so more of them stay in VRAM and the GPU / CPU split of a 2K prompt changes. That alone moves 2K's bits
+    (below); with the share off nothing changes.
+  - **#1372's chunked DeltaNet recurrence** as upstream's opt-in (`STRATA_GDN_CHUNKED=1`, cards with 128 SMs or more)
+    and **#1399's** `qsa_select_bench` accuracy line fixed upstream's way (dfa26c19, a 1e-5 floor).
+  - **Same bits by default:** the prompt's half output in the embedding's storage (#1454, #1465), the q8_1 scale
+    clamp at its three remaining sites (#1448), the peer prompt share without P2P (#1251, opt-in), the staging
+    buffers page-locked (`STRATA_STAGE_PIN=1`, opt-in: it corrupted IQ3_S answers upstream).
+  - **Server and setup:** several `--api-key`s (#1344), oversized bodies refused, a hung engine with an idle GPU
+    restarted (#1317, #1407), `<function= NAME>` tool calls (#1430); setup's compute-mode warning (#1445, which this
+    fork's NVFP4 branch calls too), `--remote-expert-opt` only beside a helper cache (#1447), and the replaced
+    engine's BUILD.json kept for its `.previous` copy (#1403).
+- **The port.** rel/0.1.40.3's first-parent chain holds 76 commits (the fork PR #3's one included). 71 are carried;
+  `STRATA_GDN_CHUNKED` (#1372) and the contention gate (#1379) are upstream's now and dropped; the fork's `auto`
+  default and NVFP4's 4,096-token routed-only walk become what the fork adds to upstream's code ("Was 47243fdc",
+  "Was 66b9646f": `cpu_share_max` returns 4,096 on an NVFP4 pack unless `STRATA_PREFILL_CPU_SHARE_MAX` is set, and
+  the start line says so); the fork's `qsa_select_bench` floor gives way to upstream's. The kh3 recurrence and
+  upstream's chunked one met in `kernels.cu` and `gdn_rec_parity.cu`: the brace both sides shared stayed after the
+  chunked code (cd9e9eab puts it back). `tools/test_strata_tokenizer.py` holds both test sets (upstream's tokenizer
+  cache and #567's). The fused combine write (eba30ab4) leaves upstream's new peer sums (#1251) to the two kernels.
+  `port_diffcheck.py` shows only these, the CPU share's (`prefill.cpp` / `.hpp`,
+  `docs/DETAILS.md`) and the bench's floor; the other 115 files carry the same change as on 0.1.40.3.
+- **Setup** (the installer change, cherry-picked onto the port as one commit): the NVFP4 families from Hugging Face,
+  always this fork's engine, `strata-windows-x64.zip` and `release-manifest.json` in the release, the bundle's
+  `update.cmd`. Two conflicts with 0.1.41: `get_prebuilt` keeps the fork's flow (an upstream engine kept while this
+  fork's cannot replace it) with #1403's `BUILD.json.prev` where the fork had deleted the file; the hotfix-tag test
+  holds both sides, upstream's lines against `UPSTREAM_MIN_ENGINE` (the fork's `MIN_ENGINE` is its own release's
+  version).
+- **Checks** (release build, sha ae4ea8fd):
+  - **Against 0.1.40.3-nvfp4.1's references,** the GPTQ + Q8_0-down pack after 32K gives the same logits and 32
+    tokens. After 2K the logits differ - GPTQ + Q8_0-down KL 0.016, ModelOpt 0.0017, the same top token - by the
+    loan above: 0.1.40.3-nvfp4.1's own build still reproduces its references, and with `STRATA_PREFILL_CPU_SHARE=0`
+    both builds give the same bits. Against the share-off logits, 0.1.41's are closer than before (KL 0.0067
+    against 0.0645). A 2K prompt with the default share, 5 pairs: 918.0 +- 19.3 ms against 922.6 +- 10.9.
+  - **With every fork default off,** the logits equal upstream 0.1.41's byte for byte on IQ2_XS (32K, 12,000 slots).
+  - **Tests:** 103 of 106 pass; the three that fail need model files this machine does not have. The server's
+    tests: 601 OK (13 skipped). With setup's commit on top: the setup, bundle, `nvfp4_table` and `calibrate`
+    tests 503 OK, the other tools' 174 OK (8 skipped), the server's 601 OK (13 skipped).
+- **Speed** with the GPTQ + Q8_0-down pack, interleaved chats (1,000 tokens, `--stop-eos`) against the tray's
+  0.1.40.3-nvfp4.1, 5 pairs:
+
+  | ms a round | 0.1.40.3-nvfp4.1 | 0.1.41-nvfp4.1 |
+  |---|---|---|
+  | 5 pairs | 14.05 +- 0.29 (174.8 tokens/s) | 14.05 +- 0.10 (175.9) |
+
+  The same within the noise (misses a layer 2.70 against 2.72, cache hits 0.926 against 0.925; `ev_rel.sh`'s
+  `--spec 4 --spec-min-p 0.5` in both arms).
+
 ### A second round of kernels (2026-10-08, release 0.1.40.3-nvfp4.1)
 
 A profile of the tray engine (0.1.40.2-nvfp4.1) first, then seven agents, each reviewed, tested and merged on its own.
@@ -502,6 +559,8 @@ the sequential recurrence, no admission, no CPU share). First-token KL and the 3
   - **Tests:** 102 of 105 pass; the three that fail need model files this machine does not have (`ple_parity`,
     `expert_parity`, `pool_test`). `qsa_select_bench` passes with its floor from each sample's sum |q*k|. The
     server's tests: 571 OK (upstream's new threads-vs-serial tokenizer test included).
+
+### Upstream 0.1.40.2 (2026-10-07, release 0.1.40.2-nvfp4.1)
 
 - **What upstream brought that matters here** (its release notes have the full list):
   - **This fork's CPU share** (#1282), opt-in upstream: `STRATA_PREFILL_CPU_SHARE=auto|x` (978d3558). Two follow-ups
