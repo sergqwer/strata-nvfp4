@@ -95,6 +95,59 @@ int main() {
             }
         }
         std::printf("fetch_blobs: %d cases\n", cases);
+        // STRATA_ADAPT_FETCH: dst2[k] != 0 sends blob k to that address (a cache slot) instead of dst + k * bb, and
+        // rebase_ptrs points the group there; the staging place it skipped stays untouched
+        {
+            unsigned long long* d_dst2 = nullptr;
+            uint8_t* d_slots = nullptr;
+            ck(cudaMalloc(&d_dst2, cap * sizeof(unsigned long long)), "malloc dst2");
+            ck(cudaMalloc(&d_slots, dst_bytes), "malloc slots");
+            std::vector<uint8_t> got2(dst_bytes);
+            int cases2 = 0;
+            for (int64_t bb : {(int64_t) 144, (int64_t) 2764816, (int64_t) 3584016}) {
+                for (int n : {1, 5, 16}) {
+                    std::vector<unsigned long long> ptr(cap, 0), dst2(cap, 0);
+                    std::vector<size_t> off(cap, 0);
+                    const size_t slot = ((size_t) bb + 128 + 4095) / 4096 * 4096;
+                    const size_t slots = host_bytes / slot;
+                    for (int k = 0; k < n; ++k) {
+                        off[(size_t) k] = (size_t) (rng() % slots) * slot + 16 * (size_t) (k % 8);
+                        ptr[(size_t) k] = (unsigned long long) (alias + off[(size_t) k]);
+                        if (k % 2 == 0) dst2[(size_t) k] = (unsigned long long) (d_slots + (size_t) (cap - 1 - k) * (size_t) bb);
+                    }
+                    ck(cudaMemcpy(d_ptr, ptr.data(), cap * sizeof(unsigned long long), cudaMemcpyHostToDevice), "ptr");
+                    ck(cudaMemcpy(d_dst2, dst2.data(), cap * sizeof(unsigned long long), cudaMemcpyHostToDevice), "dst2");
+                    ck(cudaMemcpy(d_n, &n, sizeof(int32_t), cudaMemcpyHostToDevice), "n");
+                    ck(cudaMemset(d_dst, kGuard, dst_bytes), "memset");
+                    ck(cudaMemset(d_slots, kGuard, dst_bytes), "memset slots");
+                    strata::kernels::fetch_blobs(d_ptr, d_n, d_dst, bb, cap, s, d_dst2);
+                    strata::kernels::rebase_ptrs(d_ptr, d_n, d_dst, bb, s, d_dst2);
+                    ck(cudaStreamSynchronize(s), "fetch_blobs dst2");
+                    ck(cudaMemcpy(got.data(), d_dst, dst_bytes, cudaMemcpyDeviceToHost), "back");
+                    ck(cudaMemcpy(got2.data(), d_slots, dst_bytes, cudaMemcpyDeviceToHost), "back slots");
+                    std::vector<unsigned long long> rp(cap, 0);
+                    ck(cudaMemcpy(rp.data(), d_ptr, cap * sizeof(unsigned long long), cudaMemcpyDeviceToHost), "back ptr");
+                    bool ok = true;
+                    for (int k = 0; k < n && ok; ++k) {
+                        const size_t at = (size_t) (k % 2 == 0 ? cap - 1 - k : k) * (size_t) bb;
+                        const uint8_t* where = (k % 2 == 0 ? got2.data() : got.data()) + at;
+                        const uint8_t* skipped = (k % 2 == 0 ? got.data() + (size_t) k * (size_t) bb : nullptr);
+                        ok = std::memcmp(where, host + off[(size_t) k], (size_t) bb) == 0 &&
+                             rp[(size_t) k] == (k % 2 == 0 ? dst2[(size_t) k]
+                                                           : (unsigned long long) (d_dst + (size_t) k * (size_t) bb));
+                        for (size_t i = 0; skipped != nullptr && i < (size_t) bb && ok; ++i) ok = skipped[i] == kGuard;
+                    }
+                    if (!ok) {
+                        std::printf("fetch_blobs dst2: blob %lld B, %d blobs: wrong bytes or pointers\n", (long long) bb, n);
+                        ++failures;
+                    }
+                    ++cases2;
+                }
+            }
+            std::printf("fetch_blobs into slots (dst2): %d cases\n", cases2);
+            cudaFree(d_dst2);
+            cudaFree(d_slots);
+        }
         cudaFree(d_ptr);
         cudaFree(d_n);
         cudaFree(d_dst);
