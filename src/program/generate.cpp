@@ -1247,11 +1247,13 @@ int adapt_lag() {
     return v;
 }
 
-/// STRATA_ADAPT_FETCH (opt-in): 1 = the PCIe share also admits into the VRAM tier (ExpertDispatch::fetch_admit), beside
-/// the tier's own copies from RAM; 2 = instead of them (the tier's counts still decay).  STRATA_ADAPT_FETCH_MIN and
-/// STRATA_ADAPT_FETCH_MARGIN: the admission's thresholds (default 1 and 0.5, chosen by tools/sim_tier.py's replay).
+/// STRATA_ADAPT_FETCH: 1 = the PCIe share also admits into the VRAM tier (ExpertDispatch::fetch_admit), beside the
+/// tier's own copies from RAM; 2 = instead of them where an admission ran (the tier's counts still decay); 0 = off.
+/// The fork's default is 2 (RTX 5090 + DDR5-5600: chat +4%, 32K +9% tok/s, RAM bytes a round -17% / -27%).  Upstream's
+/// default is off.  STRATA_ADAPT_FETCH_MIN and STRATA_ADAPT_FETCH_MARGIN: the admission's thresholds (default 1 and
+/// 0.5, chosen by tools/sim_tier.py's replay).
 int adapt_fetch() {
-    static const int v = [] { const char* e = std::getenv("STRATA_ADAPT_FETCH"); return e ? std::max(0, std::min(2, std::atoi(e))) : 0; }();
+    static const int v = [] { const char* e = std::getenv("STRATA_ADAPT_FETCH"); return e ? std::max(0, std::min(2, std::atoi(e))) : 2; }();
     return v;
 }
 
