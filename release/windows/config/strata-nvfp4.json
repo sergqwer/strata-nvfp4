@@ -7,7 +7,7 @@
     "--ple-gguf", "models/ple-fp8.gguf",
     "--embd-gguf", "models/token-embd-bf16.gguf",
     "--expert-profile", "data/expert-profile.bin", "--expert-cache", "auto",
-    "--prefill", "auto", "--spec", "4", "--spec-min-p", "0.5",
+    "--prefill", "auto", "--spec", "6", "--spec-min-p", "0.7",
     "--mtp", "models/mtp/rt",
     "--max-context", "262144", "--kv", "int8", "--vision"
   ],
