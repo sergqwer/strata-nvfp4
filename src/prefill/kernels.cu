@@ -816,6 +816,7 @@ bool gdn_kh3_ok() {
         known[dev] = yes ? 1 : 2;
     }
     return known[dev] == 1;
+}
 // STRATA_GDN_CHUNKED=1 (opt-in): the recurrence in chunks of GCH tokens (the WY form of the gated delta rule, as
 // flash-linear-attention computes it), all in FP32.  Per value head, with g_t = exp(gate_t), gamma_t the gate's sum
 // from the chunk's start to t (inclusive) and S0 the state before the chunk:

@@ -332,6 +332,8 @@ __global__ void __launch_bounds__(CB * RG * VPK) gdn_rec_kh3_kernel(float* __res
 #pragma unroll
         for (int r = 0; r < RPG; ++r) base[r * rs] = s[r];
     }
+}
+
 // src/prefill/kernels.cu's chunked recurrence (STRATA_GDN_CHUNKED=1), copied as it is there
 // STRATA_GDN_CHUNKED=1 (opt-in): the recurrence in chunks of GCH tokens (the WY form of the gated delta rule, as
 // flash-linear-attention computes it), all in FP32.  Per value head, with g_t = exp(gate_t), gamma_t the gate's sum
