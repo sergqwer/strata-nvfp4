@@ -372,7 +372,50 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
-### Upstream 0.1.40.2 (2026-10-07, release 0.1.40.2-nvfp4.1)
+### A second round of kernels (2026-10-08) - TODO
+
+### Upstream 0.1.40.3 (2026-10-08, release 0.1.40.3-nvfp4.1)
+
+- **What upstream brought that matters here** (most of 0.1.40.3 is AMD and Intel: setup, Docker, the Arc
+  A-series, the bundled HIP runtime's DLL closure):
+  - **The drafter's router guard** (6c0fca38, #1357): the MTP drafter's per-token native top-10 router is called only
+    for `n_expert == 512` and `k == 10`, as the window path and the main layers already were; another model read past
+    each row. This model is 512 / 10, so nothing changes here.
+  - **#1376, the Windows auto-cache floor:** an auto cache on a card of 16 GiB or more keeps 2,560 MiB free after it
+    (044c59fe), then limited to HIP builds (4895f63a). The block sits after the fork's `gemm_prewarm_wait` and free
+    VRAM read and compiles to nothing on CUDA, so the cache sizing here (the elastic K/V's included) is unchanged.
+  - **The verify window's interleaved q8_1 projections:** made opt-in (f7610d2c) and reverted (668072aa), so
+    `STRATA_MMVQ_IL` stays on as in 0.1.40.2.
+  - **The tokenizer** (4dc544ed, #1385): `_bpe` reads `self.ranks.get` once per word; a threads-vs-serial encode
+    test in `serve/test_detok.py`. #567's prompt encoder, which the fork carries, does not touch `_bpe`.
+  - **Web** (c13ddd62, #1392): a turn with no answer text (reasoning only, a stop, an error) goes back in the
+    history as an empty assistant turn. The fork's server changes no web file.
+  - **HIP diagnostics:** why the bundled `amdhip64_7.dll` lost to another copy (#461, a `LoadLibraryEx` probe) and a
+    missing render group on Linux; Windows AMD telemetry says why it is empty (#1380).
+- **The port.** v0.1.40.2 is an ancestor of v0.1.40.3, and rel/0.1.40.2's first-parent chain since it holds the
+  0.1.40.2 port's 65 commits, `qsa_select_bench`'s floor, the round's six merges (one commit each; every merge was
+  clean, `git merge-tree` gives its tree) and the `STRATA_ADAPT_FETCH=2` default: 73 commits, all carried, none
+  empty. One conflict, resolved by hand: the fork's arena thread (f75be384) moves the card check before the arena
+  starts loading, and upstream added the #461 probe inside the old place. The old place takes the fork's side (the
+  block gone), the moved block is upstream 0.1.40.3's block line for line. `port_diffcheck.py` shows only that move;
+  the other 72 have the same patch-id as before. Of the fork's extras, #567 has no newer head (closed with the
+  history rewrite, 76b916e2); #1379's PR head and the fork's gate are the same change but for a comment that names
+  the fork's default.
+- **Checks** (release build, sha 888af0e8):
+  - **Fresh references first** (`port-refs\0.1.40.2r2pre`, a release build of 99007088). They now fix decode's PCIe
+    share too (`--pcie-frac 0.25`; with `STRATA_PCIE_BALANCE=0` the link probe's share was a timing, and with
+    `STRATA_ADAPT_FETCH=2` that share also decides what the tier admits). Against 0.1.40.2-nvfp4.1 the logits differ (GPTQ +
+    Q8_0-down 2K KL 0.00022, 32K 0.0012, ModelOpt 2K 0.000007, the same top token) by `STRATA_ADAPT_FETCH=2` alone:
+    the dumped logits are the first verify window's, a decode window. With `STRATA_ADAPT_FETCH=0` the head gives
+    0.1.40.2-nvfp4.1's bits exactly, so the round's other changes keep them.
+  - **Against those references,** the logits and 32 tokens are identical on both packs (GPTQ + Q8_0-down after 2K and
+    32K, ModelOpt after 2K; CPU share 0.5, PCIe share 0.25, 6,000 slots).
+  - **With every fork default off** (the list in `port_check.sh`, `STRATA_ADAPT_FETCH=0` and
+    `STRATA_ADAPT_EVICT_SYNC=0` included), the logits equal upstream 0.1.40.3's byte for byte on IQ2_XS (32K,
+    12,000 slots).
+  - **Tests:** 102 of 105 pass; the three that fail need model files this machine does not have (`ple_parity`,
+    `expert_parity`, `pool_test`). `qsa_select_bench` passes with its floor from each sample's sum |q*k|. The
+    server's tests: 571 OK (upstream's new threads-vs-serial tokenizer test included).
 
 - **What upstream brought that matters here** (its release notes have the full list):
   - **This fork's CPU share** (#1282), opt-in upstream: `STRATA_PREFILL_CPU_SHARE=auto|x` (978d3558). Two follow-ups
