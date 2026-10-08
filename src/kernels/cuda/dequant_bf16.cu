@@ -8,8 +8,10 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <type_traits>
 
 namespace strata::kernels {
 namespace {
@@ -174,6 +176,28 @@ __global__ void dequant_kernel(const uint8_t* __restrict__ blocks, int64_t row_b
     group32<TYPE>(blocks + (row0 + r) * row_bytes, (int) gi, out + r * ld + gi * 32);
 }
 
+// Q8_0 to FP16 (the prompt path's dense Q8_0 weights before each cuBLAS GEMM): a thread per 8 outputs, one 16-byte
+// store each (dequant_kernel's thread wrote 32 halves one by one, 64 bytes apart from its neighbours': ~13% of the
+// card's bandwidth).  The same value per element: (float) q * d, rounded to FP16 by __float2half_rn.
+__global__ void dequant_q8_0_h16_kernel(const uint8_t* __restrict__ blocks, int64_t row_bytes, int64_t row0, int64_t rows,
+                                        int64_t chunks_per_row, int64_t ld, uint16_t* __restrict__ out) {
+    const int64_t g = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (g >= rows * chunks_per_row) return;
+    const int64_t r = g / chunks_per_row, c = g % chunks_per_row;
+    const uint8_t* b = blocks + (row0 + r) * row_bytes + (c >> 2) * 34;   // blocks are 2-byte aligned
+    const float d = h2f(b);
+    const uint16_t* q2 = reinterpret_cast<const uint16_t*>(b + 2 + (c & 3) * 8);
+    uint32_t w[4];
+#pragma unroll
+    for (int k = 0; k < 4; ++k) {
+        const uint16_t qq = q2[k];
+        const uint32_t lo = __half_as_ushort(__float2half_rn((float) (int8_t) (qq & 0xff) * d));
+        const uint32_t hi = __half_as_ushort(__float2half_rn((float) (int8_t) (qq >> 8) * d));
+        w[k] = lo | (hi << 16);
+    }
+    *reinterpret_cast<uint4*>(out + r * ld + c * 8) = make_uint4(w[0], w[1], w[2], w[3]);
+}
+
 bool geometry(int type, int& block_elems, int& block_bytes) {
     switch (type) {
     case 2: block_elems = 32; block_bytes = 18; return true;
@@ -205,6 +229,16 @@ void launch(int type, const void* blocks, int64_t row0, int64_t rows, int64_t co
     const unsigned grid = (unsigned) ((total + 255) / 256);
     const uint8_t* p = (const uint8_t*) blocks;
     cudaStream_t st = (cudaStream_t) stream;
+    if constexpr (sizeof(T) == 2 && !std::is_same_v<T, uint16_t>) {   // H16
+        if (type == 8 && (uintptr_t) out % 16 == 0 && ld % 8 == 0 && (uintptr_t) p % 2 == 0 && row_bytes % 2 == 0) {
+            const int64_t chunks = rows * (cols / 8);
+            dequant_q8_0_h16_kernel<<<(unsigned) ((chunks + 255) / 256), 256, 0, st>>>(
+                p, row_bytes, row0, rows, cols / 8, ld, reinterpret_cast<uint16_t*>(out));
+            const cudaError_t e = cudaGetLastError();
+            if (e != cudaSuccess) { std::fprintf(stderr, "dequant launch: %s\n", cudaGetErrorString(e)); std::exit(1); }
+            return;
+        }
+    }
 #define STRATA_DQ(TY) dequant_kernel<TY, T><<<grid, 256, 0, st>>>(p, row_bytes, row0, rows, gpr, ld, out); break
     switch (type) {
     case 2: STRATA_DQ(2);
