@@ -551,11 +551,13 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
               mapped(T * K * N * 4, (void**) &h_ymiss_, (void**) &m_ymiss_);
     if (!ok) { err = "verify: mapped staging allocation failed"; return false; }
     // the GPU plan: counts(4) | start(cap+1) | dst(cap) | tok(cap) | pad | ptr(cap u64) | ptr2(cap u64) | start2(cap+1)
+    // | pad | dst2(kStagingBlobs u64)
     {
         const int64_t cap = (int64_t) (T * K);
         const int64_t i32 = 4 + (cap + 1) + cap + cap;
         const int64_t ptr_off = (i32 + 1) & ~1ll;
-        plan_i32_ = ptr_off + 4 * cap + (cap + 1) + 1;
+        dst2_off_ = (ptr_off + 4 * cap + (cap + 1) + 1 + 1) & ~1ll;
+        plan_i32_ = dst2_off_ + 2 * kStagingBlobs;
         if (!mapped((size_t) plan_i32_ * 4 * 2 + 64, (void**) &h_plan_, (void**) &m_plan_)) {
             err = "verify: mapped plan allocation failed";
             return false;
@@ -567,6 +569,7 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         sink_.ptr = (unsigned long long*) (h_plan_ + ptr_off);
         sink_.ptr2 = sink_.ptr + cap;
         sink_.start2 = h_plan_ + ptr_off + 4 * cap;
+        sink_.dst2 = (unsigned long long*) (h_plan_ + dst2_off_);
         sink_.cap = cap;
         sink_.publish = &Verifier::publish_plan;
         sink_.fetch = &Verifier::fetch_dma;
@@ -1534,8 +1537,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
             if (sink_.pcie_mode == 2) {                            // stage it with a copy kernel, then point at staging
                 const int64_t per = G == 2 ? kStagingBlobs / 2 : kStagingBlobs;
                 uint8_t* stage = staging_ + (size_t) (grp * per) * lay.max_blob;
-                fetch_blobs(p_ptr2, p_counts + 2, stage, (int64_t) lay.blob_bytes(l), (int) per, cs);
-                rebase_ptrs((unsigned long long*) p_ptr2, p_counts + 2, stage, (int64_t) lay.blob_bytes(l), cs);
+                const unsigned long long* p_dst2 = (const unsigned long long*) (pl + dst2_off_);   // STRATA_ADAPT_FETCH
+                fetch_blobs(p_ptr2, p_counts + 2, stage, (int64_t) lay.blob_bytes(l), (int) per, cs, p_dst2);
+                rebase_ptrs((unsigned long long*) p_ptr2, p_counts + 2, stage, (int64_t) lay.blob_bytes(l), cs, p_dst2);
             }
             stamp(l, 21, grp);
             // the PCIe share is pcie_frac of the misses: a few groups when the cache is cold, usually none (always none at
@@ -1991,6 +1995,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     const ModelGeometry& g = *g_;
     SessionState& ss = *ss_;
     if (pos0 + T > ss.qsa_states[ss.qsa_primary()].max_cells) { err = "verify: the window runs past the context"; return false; }
+    if (pre_launch_ && !pre_launch_(cs_, err)) return false;
     refresh_ar();
     if (!capture(T, err) || !capture_commit(err)) return false;
     VDBG("captured; staging\n");
@@ -2217,6 +2222,7 @@ void Verifier::set_plan_slot(int grp) {
     sink_.ptr = (unsigned long long*) (base + ptr_off);
     sink_.ptr2 = sink_.ptr + cap;
     sink_.start2 = base + ptr_off + 4 * cap;
+    sink_.dst2 = (unsigned long long*) (base + dst2_off_);
     const int G = last_batch_ ? 1 : (groups_[last_t_] > 0 ? groups_[last_t_] : 1);
     const int64_t per = G == 2 ? kStagingBlobs / 2 : kStagingBlobs;
     sink_.staging = (unsigned long long) (staging_ + (size_t) (grp * per) * strata::kernels::cpu::expert_layout().max_blob);
@@ -2686,6 +2692,7 @@ bool Verifier::run_slot_rows(const int* rows, int S, const int32_t* tokens, cons
     using namespace strata::kernels;
     const OnDevice on_device(device_);
     const ModelGeometry& g = *g_;
+    if (pre_launch_ && !pre_launch_(cs_, err)) return false;
     if (!stage_batch(rows, S, 0, tokens, pos, err)) return false;
     const cudaError_t le = cudaGraphLaunch(exec_bm_[bkey(rows, S, 0)], cs_);
     if (le != cudaSuccess) { err = std::string("verify: batch launch: ") + cudaGetErrorString(le); return false; }
@@ -2849,6 +2856,7 @@ bool Verifier::batch_launch(int base, int S, const int32_t* tokens, const int64_
     if (b_running_) { err = "verify: batch_launch while this stage is busy"; return false; }
     int rows[8] = {};
     for (int t = 0; t < S && t < 8; ++t) rows[t] = base + t;
+    if (pre_launch_ && !pre_launch_(cs_, err)) return false;
     if (!stage_batch(rows, S, base, tokens, pos, err)) return false;
     cudaError_t le = cudaGraphLaunch(exec_bm_[bkey(rows, S, base)], cs_);
     if (le == cudaSuccess) le = cudaGraphLaunch(commit_bm_[bkey(rows, S, base)], cs_);   // right behind it: every row is kept
@@ -3037,6 +3045,7 @@ bool Verifier::pl_launch(int T, const int32_t* tokens, int64_t pos0, std::string
         err = "verify: pipelined window not prepared (capture_all)";
         return false;
     }
+    if (pre_launch_ && !pre_launch_(cs_, err)) return false;
     const Clock::time_point t0 = Clock::now();
     last_batch_ = false;
     bool staged = pl_prestaged_ && last_t_ == T && last_pos0_ == pos0;

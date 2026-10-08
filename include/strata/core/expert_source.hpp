@@ -274,7 +274,8 @@ private:
     std::condition_variable cv_;
     bool quit_ = false, pending_ = false, busy_ = false;
     int64_t layer_ = -1, n_tok_ = 0;
-    const int32_t* host_res_ = nullptr;
+    std::vector<int32_t> res_;   ///< the residency rows of the layers predicted, copied at submit (admissions write the table)
+    bool has_res_ = false;
     uint64_t sub_gen_ = 0;
     ForesightSwap* fs_ = nullptr;                   ///< (under mu_)
     std::vector<float> x_;
@@ -308,6 +309,9 @@ struct GpuPlanSink {
     /// copy engine.  counts[0] = VRAM groups, counts[1] = all entries, counts[2] = PCIe groups.
     unsigned long long* ptr2 = nullptr;
     int32_t* start2 = nullptr;
+    /// STRATA_ADAPT_FETCH (pcie_mode 2): per PCIe group, the VRAM cache slot its blob is copied into instead of
+    /// staging (0: staging).  staging_cap entries.
+    unsigned long long* dst2 = nullptr;
     unsigned long long staging = 0;
     int64_t staging_cap = 0;
     int64_t cap = 0;
@@ -456,6 +460,35 @@ struct ExpertDispatch {
     /// Plan v0.3 P6: decayed routing counts per (layer, expert) during decode (sized by the caller; empty = off),
     /// which the driver uses to swap the most-routed missing experts into the VRAM tier between rounds.
     std::vector<float> usage;
+    /// Opt-in (STRATA_ADAPT_FETCH): the PCIe share admits into the VRAM tier.  Its blobs cross into VRAM anyway, so the
+    /// layer's most-routed misses (`usage`) take the share, and one routed at least `fetch_min` and `fetch_margin` more
+    /// than its layer's least-routed resident expert not routed in the window is copied into that one's slot instead
+    /// of staging - a swap with no RAM read of its own.  `res_mut` is `host_res`, written here; `res_dirty` asks the
+    /// driver to upload the device's copy before the next window; `in_flight`: experts the adaptive tier is copying in.
+    int fetch_admit = 0;
+    float fetch_min = 1.0f, fetch_margin = 0.5f;
+    int32_t* res_mut = nullptr;
+    std::vector<uint8_t> in_flight;
+    std::vector<uint8_t> fetch_mark;   ///< per expert of the layer: routed in the window
+    bool res_dirty = false;
+    std::vector<int32_t> res_dirty_idx;   ///< the entries changed since the device's table last followed (res_dirty)
+    /// The adaptive tier's evictions reach the device's table before the next window, not when the round's copies
+    /// land: until then doorbell_publish_res can skip a layer's activation while the pool computes an evicted expert
+    /// from the one published before.  The driver sets it where the tier does not wait for its copies
+    /// (STRATA_ADAPT_EVICT_SYNC=0: off, for an A/B).
+    bool evict_sync = false;
+    /// STRATA_ADAPT_FETCH: whether the pool can admit into `layer` now (a window still needs a PCIe share there)
+    bool fetch_can(int64_t layer) const;
+    /// per layer: the PCIe share fetched there since the tier's last round (the tier leaves those layers' fetchable
+    /// candidates to the admission under STRATA_ADAPT_FETCH=2, and swaps the rest itself)
+    std::vector<uint8_t> fetch_avail;
+    int64_t fetch_admitted = 0;
+    bool fetch_log_on = false;          ///< STRATA_ADAPT_FETCH_VERIFY: keep the admissions for a read-back
+    /// STRATA_ADAPT_FETCH_CHECKRES: the device's residency table as read back before the window; a layer with CPU
+    /// experts whose routed ids all look resident there publishes no activation (doorbell_publish_res) - counted
+    const int32_t* dres_check = nullptr;
+    int64_t stale_x = 0;
+    std::vector<std::pair<int64_t, int32_t>> fetch_log;   ///< (layer * n_expert + expert, slot)
     int64_t multi_misses = 0;      ///< distinct (layer, expert) pairs the CPU computed in verify windows
     int64_t multi_entries = 0;     ///< routed (token, expert) entries the CPU served in verify windows
     /// Multi-GPU: the second GPU's tier.  Its experts are computed there instead of on the CPU (kind 2).
