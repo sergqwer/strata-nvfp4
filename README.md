@@ -75,6 +75,14 @@ upstream's; the original README is kept as [README.upstream.md](README.upstream.
   - The result is 73.8 GiB of experts instead of 63.3 GiB. Against an all-Q8_0 reference, the answers' KL is half of the ModelOpt pack's, about 2.6x less once run-to-run noise is taken out, for 12-15% of the decode speed.
   - GPTQ alone, without the 8-bit layers, is 1.7x closer at no speed cost.
   - docs/NVFP4.md, "Re-quantized from BF16", has the method and every measurement.
+- **0.1.40.3-nvfp4.1:** a second round of agents after a profile of the prompt and of decode. Decode turned out
+  bound by host RAM bandwidth, not by PCIe: the CPU pool and the PCIe share read the same DDR5. So the PCIe share's
+  blobs now go into the VRAM tier instead of the tier reading them from RAM a second time (decode +9% in a chat, +10% deep in a 32K document).
+  The prompt reads its experts in place, fuses the MoE and hyper-connection kernels, reads the PLE rows with 8
+  threads and loads cuBLAS's kernels at start (a 32K prompt 3921 -> 3465 ms, -12%; the first 2K request after a load -150 ms). A fix: with the tier not waiting for its
+  copies (this fork's default) the CPU could compute an expert it had just evicted from a stale activation.
+  docs/NVFP4.md, "A second round of kernels", has every measurement.
+
 - **On upstream Strata 0.1.40.3.** Since 0.1.40.2 upstream changed, of what runs on an NVIDIA card:
   - the MTP drafter calls the native top-10 router only for the 512-expert, top-10 router it was written for, as
     the main layers already did (a model with fewer experts read past each row, #1357; this model is one, so the
@@ -373,6 +381,14 @@ either way - CUDA pins it for the GPU's copies.
 | `STRATA_UNBUFFERED_LOAD=1\|0` | force the expert reads unbuffered / through the file cache (default: unbuffered only when the cache cannot keep the files) |
 | `STRATA_DEFERRED_REGISTER=1`, `STRATA_ARENA_SYNC=1` | register the arena per layer on a thread ahead of its readers (upstream's opt-in, this fork's default until 0.1.39; the same decode speed here) / load the arena after the dense weights (A/B) |
 | `STRATA_ADAPT_WAIT=1` | each decode window waits for the adaptive tier's copies, so greedy decode repeats exactly (upstream's default since 0.1.38; ~11% slower with this fork's tier, ~2% with `STRATA_ADAPT_LAG=2`, #764) |
+| `STRATA_ADAPT_FETCH=0\|1\|2` | decode: the PCIe share's blobs admitted into the VRAM tier (2, the default since 0.1.40.3-nvfp4.1: instead of the tier's own swaps where an admission ran; 1: beside them; 0: off, the tier's swaps only) |
+| `STRATA_ADAPT_EVICT_SYNC=0` | the tier's evictions reach the device's table only when its copies land (the old behaviour: with the tier not waiting, a stale activation could be computed) |
+| `STRATA_ADAPT_FETCH_CHECKRES=1` | before each decode window, compare the device's residency table with the host's and count windows that computed a CPU expert without its activation |
+| `STRATA_PLE_READERS=N` | the prompt's PLE rows through N reader threads (default 8 on Windows; 0 = one thread reaps every read) |
+| `STRATA_PREFILL_IN_PLACE=0` | the prompt's MMQ reads experts from a gathered group buffer again (default: in place, from their ring / cache slots; the same bits) |
+| `STRATA_PREFILL_TOKEN_ROWS=0` / `STRATA_PREFILL_SWIGLU_QUANT=0` / `STRATA_PREFILL_COMBINE_WRITE=0` | the prompt path's earlier kernels: activations quantized per expert row / swiglu and quantize apart / combine then the hyper-connection write (the same bits) |
+| `STRATA_GEMM_WARM=0` | cuBLASLt's GEMM kernels load on the first prompt again (default: on the prewarm thread at start) |
+| `STRATA_SPEC_STATS=1` | decode: round time, misses and accepted drafts per window size, and the drafts' acceptance by their probability |
 | `STRATA_VERIFY_ARENA=1` | print a checksum of the loaded arena |
 | `STRATA_DUMP_FIRST_LOGITS=file` | write the first generated token's logits (compare prompt paths) |
 | `STRATA_DUMP_MOE_INPUT=file`, `STRATA_DUMP_MOE_LAYER=l` | dump one layer's real MoE input rows |
