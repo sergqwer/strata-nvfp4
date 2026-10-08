@@ -12168,13 +12168,22 @@ int main(int argc, char** argv) {
         }
         const double pool_ms0 = drive.cpu_ms;
         const int64_t misses0 = drive.d.multi_misses, entries0 = drive.d.multi_entries;
+        // STRATA_SPEC_STATS=1: per window size the round time, misses and accepted drafts; per draft depth the
+        // acceptance by the draft's own probability (diagnostics only)
+        static const bool spec_stats = std::getenv("STRATA_SPEC_STATS") != nullptr;
+        struct SizeStat { int64_t n = 0; double ms = 0.0, acc = 0.0, miss = 0.0; };
+        std::array<SizeStat, 9> size_stat{};
+        std::array<std::array<int64_t, 10>, 8> cal_n{}, cal_ok{};
+        std::vector<float> dprob_used((size_t) o.spec, 1.0f);
         while ((int64_t) produced.size() < max_new) {
             const Clock::time_point t0 = Clock::now();
+            const int64_t miss_r0 = drive.d.multi_misses + drive.d.pcie_experts;
             int T = S_mtp;
             if (use_mtp && o.spec_min_p > 0.0) {
                 T = 1;
                 while (T < S_mtp && dprob[(size_t) T - 1] >= (float) o.spec_min_p) ++T;
             }
+            if (spec_stats) dprob_used = dprob;
             if (first_window) T = 1;
             bool from_sfx = false;
             int sfx_match = 0;
@@ -12333,6 +12342,19 @@ int main(int argc, char** argv) {
             p += a + 1;
             const double round_ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
             total_ms += round_ms;
+            if (spec_stats && timed_round) {
+                SizeStat& st = size_stat[(size_t) std::clamp(T, 1, 8)];
+                ++st.n;
+                st.ms += round_ms;
+                st.acc += a;
+                st.miss += (double) (drive.d.multi_misses + drive.d.pcie_experts - miss_r0) / (double) g.n_layers;
+                if (use_mtp && !from_sfx && chain_n == 0)
+                    for (int i = 0; i + 1 < T && i <= a && i < 8; ++i) {   // draft i was judged: all before it held
+                        const int b = std::clamp((int) (dprob_used[(size_t) i] * 10.0f), 0, 9);
+                        ++cal_n[(size_t) i][(size_t) b];
+                        if (i < a) ++cal_ok[(size_t) i][(size_t) b];
+                    }
+            }
             if (timed_round && chain_n == 0) policy.observe(from_sfx, T, a, sfx_match, round_ms);
             else if (timed_round) policy.observe_chain(T_mtp, chain_n, a, cm, round_ms);
             if (rounds % 64 == 0)
@@ -12366,6 +12388,23 @@ int main(int argc, char** argv) {
         std::printf("%-24s", "accepted per round");
         for (size_t i = 0; i < accepted_hist.size(); ++i) std::printf(" %zu:%lld", i, (long long) accepted_hist[i]);
         std::printf("\n");
+        if (spec_stats) {
+            for (int t = 1; t <= 8; ++t) {
+                const SizeStat& st = size_stat[(size_t) t];
+                if (st.n > 0)
+                    std::printf("%-24s T%d: %lld rounds, %.3f ms/round, %.3f drafts accepted, %.2f misses per layer\n",
+                                "spec size", t, (long long) st.n, st.ms / st.n, st.acc / st.n, st.miss / st.n);
+            }
+            for (int i = 0; i < 8; ++i) {
+                int64_t tot = 0;
+                for (int b = 0; b < 10; ++b) tot += cal_n[(size_t) i][(size_t) b];
+                if (tot == 0) continue;
+                std::printf("%-24s depth %d:", "spec calibration", i + 1);
+                for (int b = 0; b < 10; ++b)
+                    std::printf(" %lld/%lld", (long long) cal_ok[(size_t) i][(size_t) b], (long long) cal_n[(size_t) i][(size_t) b]);
+                std::printf("  (accepted/judged by draft probability tenths)\n");
+            }
+        }
         if (rounds > 0)
             std::printf("%-24s wait for rings %.3f  pool %.3f  host %.3f  commit %.3f ms/round; CPU experts %.2f "
                         "distinct / %.2f routed per layer\n",
