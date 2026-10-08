@@ -3129,7 +3129,7 @@ int main(int argc, char** argv) {
         const uint64_t pin_limit = arena_pin_limit();
         int arena_dev = 0;
         cudaGetDevice(&arena_dev);
-        strata::prefill::gemm_prewarm();
+        strata::prefill::gemm_prewarm(o.prefill_chunk > 0);   // with the prompt path's GEMM kernels
         arena_thread = std::thread([&, pin_limit, arena_dev] {
             cudaSetDevice(arena_dev);
             arena_ok = arena_src.open(o.pack, g.n_layers, g.n_expert, /*threads=*/6, arena_err, pin_limit,
@@ -4798,6 +4798,7 @@ int main(int argc, char** argv) {
         return mib + 64;   // a margin for the allocator
     };
     if (o.expert_cache < 0) {
+        strata::prefill::gemm_prewarm_wait();   // cuBLAS and its warmed kernels are in VRAM before free VRAM is read
         size_t free_b = 0, total_b = 0;
         free_b = strata::core::device_free_bytes(); (void) total_b;
         // Plan v0.3 P5: the batched prompt path's chunk buffers are allocated later, so they are reserved here -

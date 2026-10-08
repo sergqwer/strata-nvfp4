@@ -367,6 +367,49 @@ cublasStatus_t create_handle(cublasHandle_t* h) {
     return cublasCreate(h);
 }
 
+// The first FP16 and the first BF16 cublasGemmEx of a process load cuBLASLt's GEMM kernels for that input type
+// (cuLibraryLoadData, ~65 ms each on an RTX 5090, 36 MiB of VRAM for both), whatever the shape; later shapes load
+// ~1 ms more each.  Without this the first prompt after a start paid them.  One 16x256x256 product of each type on
+// the prewarm thread pays them while the files load; a product only fills its own scratch, so nothing else changes.
+// Their VRAM is taken before the expert cache is sized (gemm_prewarm_wait), so the cache leaves it out instead of the
+// first prompt taking it from the reserve.  STRATA_GEMM_WARM=0 turns it off.
+void warm_gemm_kernels(cublasHandle_t h) {
+#if !defined(__HIPCC__)
+    static const bool on = [] { const char* v = std::getenv("STRATA_GEMM_WARM"); return v == nullptr || v[0] != '0'; }();
+    if (!on || h == nullptr) return;
+    constexpr int T = 16, N = 256, K = 256;
+    int dev = 0, major = 0;
+    (void) cudaGetDevice(&dev);
+    (void) cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
+    void* buf = nullptr;
+    cudaStream_t st = nullptr;
+    const size_t x_b = (size_t) T * K * 2, w_b = (size_t) N * K * 2, y_b = (size_t) T * N * 4;
+    if (cudaMalloc(&buf, x_b + w_b + y_b) != cudaSuccess ||
+        cudaStreamCreateWithFlags(&st, cudaStreamNonBlocking) != cudaSuccess) {
+        (void) cudaGetLastError();
+        if (buf) cudaFree(buf);
+        return;
+    }
+    uint8_t* p = (uint8_t*) buf;
+    (void) cudaMemsetAsync(p, 0, x_b + w_b, st);
+    const float alpha = 1.0f, beta = 0.0f;
+    if (cublasSetStream(h, st) == CUBLAS_STATUS_SUCCESS && cublasSetWorkspace(h, nullptr, 0) == CUBLAS_STATUS_SUCCESS) {
+        (void) cublasGemmEx(h, CUBLAS_OP_T, CUBLAS_OP_N, N, T, K, &alpha, p + x_b, CUDA_R_16F, K, p, CUDA_R_16F, K, &beta,
+                            p + x_b + w_b, CUDA_R_32F, N, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+        if (major >= 8)   // the BF16 tensor-core GEMM; below sm_80 the prompt path converts to FP16 (bf16_path)
+            (void) cublasGemmEx(h, CUBLAS_OP_T, CUBLAS_OP_N, N, T, K, &alpha, p + x_b, CUDA_R_16BF, K, p, CUDA_R_16BF, K,
+                                &beta, p + x_b + w_b, CUDA_R_32F, N, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+    }
+    (void) cudaStreamSynchronize(st);
+    (void) cublasSetStream(h, nullptr);
+    (void) cudaStreamDestroy(st);
+    (void) cudaFree(buf);
+    (void) cudaGetLastError();
+#else
+    (void) h;
+#endif
+}
+
 }  // namespace
 
 bool prompt_f16() {
@@ -396,17 +439,24 @@ bool prompt_f16() {
 #endif
 }
 
-void gemm_prewarm() {
+void gemm_prewarm(bool warm_kernels) {
     std::lock_guard<std::mutex> lock(g_prewarm_m);
     if (g_prewarm.valid()) return;
     int dev = 0;
     (void) cudaGetDevice(&dev);
     g_prewarm_dev = dev;
-    g_prewarm = std::async(std::launch::async, [dev]() -> cublasHandle_t {
+    g_prewarm = std::async(std::launch::async, [dev, warm_kernels]() -> cublasHandle_t {
         (void) cudaSetDevice(dev);
         cublasHandle_t h = nullptr;
-        return cublasCreate(&h) == CUBLAS_STATUS_SUCCESS ? h : nullptr;
+        if (cublasCreate(&h) != CUBLAS_STATUS_SUCCESS) return nullptr;
+        if (warm_kernels) warm_gemm_kernels(h);
+        return h;
     });
+}
+
+void gemm_prewarm_wait() {
+    std::lock_guard<std::mutex> lock(g_prewarm_m);
+    if (g_prewarm.valid()) g_prewarm.wait();
 }
 
 Gemm::~Gemm() {
