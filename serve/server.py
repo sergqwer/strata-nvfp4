@@ -793,16 +793,16 @@ class StrataEngine:
         for line in reversed(tail.splitlines()):
             if "issue #29" in line:
                 return ("The engine stopped itself because it had stopped making progress - a hang it caught. Its log "
-                        "line: " + line.strip() + " - please report it at github.com/Niko1221/Strata/issues.")
+                        "line: " + line.strip() + " - please report it at github.com/sergqwer/strata-nvfp4/issues.")
         proc = self.proc                                 # None while a restart has not started the next one yet
         rc = proc.poll() if proc is not None else None
         if rc is not None and rc >= 0 and self.last_err:  # its own last words on stdout: they say why
             return (f"The engine exited (code {rc}) after it reported: {self.last_err} - please report it at "
-                    "github.com/Niko1221/Strata/issues with the log.")
+                    "github.com/sergqwer/strata-nvfp4/issues with the log.")
         last = next((x.strip() for x in reversed(tail.splitlines()) if x.strip().startswith(("strata", "ERR"))), "")
         if rc is not None and rc >= 0 and last:          # it ended by itself: its own last words say why (#215)
             return (f"The engine exited (code {rc}). Its last log line: {last} - if that does not explain it, please "
-                    "report it at github.com/Niko1221/Strata/issues with the log.")
+                    "report it at github.com/sergqwer/strata-nvfp4/issues with the log.")
         return ("The usual cause is running out of RAM: Linux then ends the biggest program (check: sudo dmesg | "
                 "grep -i -E 'killed process|out of memory'); Windows slows down instead. Close other programs or use a "
                 "smaller model (Q2_0 / IQ2_XS).")
@@ -1630,7 +1630,7 @@ class StrataEngine:
         sends), so the next request starts it again: killed now, its GPU and RAM go back with the process."""
         self.silent_note = ("The engine and the server lost step (issue #481; a very slow PC can raise "
                             "\"engine_silence_s\" in the config, 0 = wait forever). If it happens again, please add "
-                            "the end of the engine log to github.com/Niko1221/Strata/issues/481.")
+                            "the end of the engine log to github.com/sergqwer/strata-nvfp4/issues.")
         self.ended = True                               # not alive from now: the next request restarts it
         proc = self.proc
         try:

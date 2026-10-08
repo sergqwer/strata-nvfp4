@@ -10,8 +10,12 @@ Refuses unless:
     default is unset, gh picks the `upstream` remote (Niko1221/Strata) and would publish there;
   - the working tree is clean and HEAD is what origin/main holds (the tag points at pushed code);
   - the zip's engine/BUILD.json names HEAD, this VERSION and a clean tree (not a stale or local bundle);
+  - setup.py's asset (dist/strata-windows-x64.zip, made beside it) holds the bundle's engine folder byte for byte
+    (BUILD.json, strata.exe, strata-vision.exe, the cuBLAS DLLs), and the bundle's release-manifest.json is this
+    version's and hashes its files right;
   - the tag does not exist yet.
-The zip's SHA-256 is appended to the notes.
+Both zips are uploaded; the bundle's SHA-256 is appended to the notes (setup.py checks its asset against the digest
+GitHub publishes for it).
 """
 import argparse
 import hashlib
@@ -38,6 +42,57 @@ def fail(msg):
     sys.exit("publish: " + msg)
 
 
+def check_zips(zip_path, setup_zip, version, head):
+    """The bundle and setup.py's asset are this version's, built from `head` on a clean tree, with one engine
+    folder between them and a manifest that hashes the bundle right; fail() otherwise."""
+    if not zip_path.exists():
+        fail("%s is missing - run release/make_windows_bundle.py" % zip_path.name)
+    with zipfile.ZipFile(zip_path) as z:
+        build = json.loads(z.read("strata-nvfp4/engine/BUILD.json"))
+    if build.get("version") != version:
+        fail("the zip is version %s, the release is %s" % (build.get("version"), version))
+    if not head.startswith(build.get("commit", "-")):
+        fail("the zip was built from %s, HEAD is %s - rebuild it" % (build.get("commit"), head[:7]))
+    if build.get("dirty", True):
+        fail("the zip was built from a tree with uncommitted changes - rebuild it from a clean tree")
+    # setup.py's asset: the bundle's engine folder at the top level, the same engine
+    if not setup_zip.exists():
+        fail("%s is missing - run release/make_windows_bundle.py" % setup_zip.name)
+    with zipfile.ZipFile(zip_path) as z, zipfile.ZipFile(setup_zip) as s:
+        # the whole engine folder, byte for byte: the same files in both (the image encoder, the cuBLAS DLLs that
+        # "cuda_libs": "bundled" promises), not only BUILD.json and strata.exe
+        pre = "strata-nvfp4/engine/"
+        bundle_eng = {n[len(pre):] for n in z.namelist() if n.startswith(pre) and not n.endswith("/")}
+        setup_eng = {n for n in s.namelist() if not n.endswith("/")}
+        if bundle_eng != setup_eng:
+            fail("%s holds %s, the bundle's engine folder %s - rebuild both" % (
+                setup_zip.name, sorted(setup_eng - bundle_eng) or "nothing more", sorted(bundle_eng - setup_eng)
+                or "nothing more"))
+        for n in sorted(setup_eng):
+            if s.read(n) != z.read(pre + n):
+                fail("%s's %s is not the bundle's - rebuild both" % (setup_zip.name, n))
+        need = {"strata.exe", "BUILD.json"} | ({"strata-vision.exe"} if build.get("vision") else set()) | \
+            ({"cublas64_13.dll", "cublasLt64_13.dll"} if build.get("cuda_libs") == "bundled" else set())
+        if need - setup_eng:
+            fail("the engine folder lacks %s (BUILD.json promises it)" % ", ".join(sorted(need - setup_eng)))
+        if hashlib.sha256(s.read("strata.exe")).hexdigest() != build.get("engine_sha256"):
+            fail("strata.exe does not hash to BUILD.json's engine_sha256")
+        try:                                           # update.cmd's manifest (tools/bundle_update.py)
+            manifest = json.loads(z.read("strata-nvfp4/release-manifest.json"))
+        except KeyError:
+            fail("the bundle has no release-manifest.json - rebuild it with release/make_windows_bundle.py")
+        if manifest.get("version") != version:
+            fail("release-manifest.json is version %s, the release is %s" % (manifest.get("version"), version))
+        listed = manifest.get("files") or {}
+        held = {n[len("strata-nvfp4/"):] for n in z.namelist() if not n.endswith("/")} - {"release-manifest.json"}
+        if set(listed) != held:
+            fail("release-manifest.json does not list the zip's files (%s) - rebuild it"
+                 % ", ".join(sorted(set(listed) ^ held)[:5]))
+        for n, sha in listed.items():
+            if hashlib.sha256(z.read("strata-nvfp4/" + n)).hexdigest() != sha:
+                fail("release-manifest.json's SHA-256 of %s is not the zip's - rebuild it" % n)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--title", help="required for a new release")
@@ -62,16 +117,8 @@ def main():
     if head != run("git", "rev-parse", "origin/main").stdout.strip():
         fail("HEAD %s is not origin/main - push first (git push origin HEAD:main)" % head[:7])
 
-    if not zip_path.exists():
-        fail("%s is missing - run release/make_windows_bundle.py" % zip_path.name)
-    with zipfile.ZipFile(zip_path) as z:
-        build = json.loads(z.read("strata-nvfp4/engine/BUILD.json"))
-    if build.get("version") != version:
-        fail("the zip is version %s, the release is %s" % (build.get("version"), version))
-    if not head.startswith(build.get("commit", "-")):
-        fail("the zip was built from %s, HEAD is %s - rebuild it" % (build.get("commit"), head[:7]))
-    if build.get("dirty", True):
-        fail("the zip was built from a tree with uncommitted changes - rebuild it from a clean tree")
+    setup_zip = REPO / "dist" / "strata-windows-x64.zip"
+    check_zips(zip_path, setup_zip, version, head)
 
     exists = run("gh", "release", "view", tag, "-R", SLUG, check=False).returncode == 0
     if exists and not a.replace:
@@ -92,9 +139,9 @@ def main():
         if n != 1:
             fail("the notes of %s have %d SHA-256 lines, expected 1 - pass --notes" % (tag, n))
         notes += "\n"
-    print("publish: %s %s on %s, commit %s, %s (%.1f MB), SHA-256 %s" % (
+    print("publish: %s %s on %s, commit %s, %s (%.1f MB), SHA-256 %s; with %s (%.1f MB) for setup.py" % (
         "replacing" if a.replace else "creating", tag, SLUG, head[:7], zip_path.name, zip_path.stat().st_size / 1e6,
-        h.hexdigest()))
+        h.hexdigest(), setup_zip.name, setup_zip.stat().st_size / 1e6))
     if a.dry_run:
         print("publish: --dry-run, every check passed; nothing published")
         return
@@ -103,7 +150,7 @@ def main():
     if a.replace:
         run("git", "tag", "-f", tag, head)
         run("git", "push", "-f", "origin", "refs/tags/" + tag)
-        run("gh", "release", "upload", tag, str(zip_path), "--clobber", "-R", SLUG)
+        run("gh", "release", "upload", tag, str(zip_path), str(setup_zip), "--clobber", "-R", SLUG)
         edit = ["gh", "release", "edit", tag, "-R", SLUG, "--notes-file", nf.name]
         if a.title:
             edit += ["--title", a.title]
@@ -111,7 +158,7 @@ def main():
         print("publish: %s now at %s with the new zip" % (tag, head[:7]))
     else:
         r = run("gh", "release", "create", tag, "-R", SLUG, "--target", head, "--title", a.title,
-                "--notes-file", nf.name, str(zip_path))
+                "--notes-file", nf.name, str(zip_path), str(setup_zip))
         print(r.stdout.strip())
 
 

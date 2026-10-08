@@ -100,8 +100,11 @@ class SmallCardNote(unittest.TestCase):
             if not p.exists():
                 self.skipTest(f"data/{name} is not in this checkout")
             sizes[choice] = p.stat().st_size // 4
+        # this fork ships the Cyrillic subset as data/draft_vocab.bin (64f78268): the others scale with that one
+        base = "cyrillic" if (ROOT / "data" / setup.DRAFT_VOCABS["cjk"]).read_bytes() == \
+            (ROOT / "data" / setup.DRAFT_VOCABS["cyrillic"]).read_bytes() else "cjk"
         for choice in ("en", "cyrillic", "fr"):
-            want = setup.DRAFT_VOCAB_MIB["cjk"] * sizes[choice] / sizes["cjk"]
+            want = setup.DRAFT_VOCAB_MIB[base] * sizes[choice] / sizes[base]
             self.assertAlmostEqual(setup.DRAFT_VOCAB_MIB[choice], want, delta=3)
 
 

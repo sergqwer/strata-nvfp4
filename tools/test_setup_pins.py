@@ -25,6 +25,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 import setup  # noqa: E402
 
 SHA = re.compile(r"/resolve/[0-9a-f]{40}/")
+FORK = "https://github.com/sergqwer/strata-nvfp4"
 
 
 class Response(io.BytesIO):
@@ -170,7 +171,7 @@ class Engine(unittest.TestCase):
         self.root = Path(self.tmp.name)
         (self.root / "engine").mkdir()
         self.patches = [mock.patch.object(setup, "ROOT", self.root),
-                        mock.patch.object(setup, "source_version", lambda: "0.1.31")]
+                        mock.patch.object(setup, "release_version", lambda: "0.1.40.3-nvfp4.1")]
         for p in self.patches:
             p.start()
 
@@ -185,7 +186,8 @@ class Engine(unittest.TestCase):
             if wrote is not None:
                 wrote.append(Path(dst))
             with zipfile.ZipFile(dst, "w") as z:
-                z.writestr("BUILD.json", json.dumps({"version": ".".join(map(str, setup.MIN_ENGINE)), "archs": [89]}))
+                z.writestr("BUILD.json", json.dumps({"version": setup.version_text(setup.MIN_ENGINE), "archs": [89],
+                                                     "fork": FORK}))
                 z.writestr(setup.EXE, b"engine")
         return download
 
@@ -218,12 +220,14 @@ class Engine(unittest.TestCase):
         return eng, out, heads, got
 
     def test_bases(self):
+        # this fork's releases, under the fork's tag (v<release>, not CMakeLists.txt's engine version)
+        self.assertEqual(setup.PREBUILT_URL, f"{FORK}/releases/latest/download/")
         self.assertEqual(setup.prebuilt_bases(setup.PREBUILT_URL),
-                         ["https://github.com/Niko1221/Strata/releases/download/v0.1.31/", setup.PREBUILT_URL])
+                         [f"{FORK}/releases/download/v0.1.40.3-nvfp4.1/", setup.PREBUILT_URL])
         self.assertEqual(setup.prebuilt_bases("https://mirror.example/x"), ["https://mirror.example/x/"])
 
     def test_the_checkout_s_release_first(self):
-        tag = "https://github.com/Niko1221/Strata/releases/download/v0.1.31/"
+        tag = f"{FORK}/releases/download/v0.1.40.3-nvfp4.1/"
         eng, out, heads, got = self.run_get([tag, setup.PREBUILT_URL])
         self.assertEqual(eng, self.root / "engine")
         self.assertEqual(got, [tag + setup.PREBUILT_ASSET])
@@ -233,7 +237,7 @@ class Engine(unittest.TestCase):
         eng, out, heads, got = self.run_get([setup.PREBUILT_URL])
         self.assertEqual(eng, self.root / "engine")
         self.assertEqual(got, [setup.PREBUILT_URL + setup.PREBUILT_ASSET])
-        self.assertIn("No ready-made engine for v0.1.31", out)
+        self.assertIn("No ready-made engine for v0.1.40.3-nvfp4.1", out)
 
     def test_a_refused_archive_is_not_kept(self):
         """PR #324: a refused archive (too old, or no code for the GPU) kept its zip and .done mark, and every later
@@ -276,7 +280,7 @@ class Engine(unittest.TestCase):
 
     def test_an_installed_engine_is_kept(self):
         (self.root / "engine" / "BUILD.json").write_text(json.dumps(
-            {"version": ".".join(map(str, setup.MIN_ENGINE)), "archs": [89]}))
+            {"version": setup.version_text(setup.MIN_ENGINE), "archs": [89], "fork": FORK}))
         (self.root / "engine" / setup.EXE).write_bytes(b"old")
 
         def urlopen(req, timeout=None):
@@ -286,6 +290,49 @@ class Engine(unittest.TestCase):
             eng, out = quiet(setup.get_prebuilt, setup.PREBUILT_URL, {"arch": 89}, "gpu")
         self.assertEqual(eng, self.root / "engine")
         self.assertEqual((self.root / "engine" / setup.EXE).read_bytes(), b"old")
+
+    def test_upstream_s_installed_engine_is_replaced_by_the_fork_s(self):
+        # upstream's ready-made engine (no "fork" in BUILD.json) cannot run the NVFP4 models: the fork's replaces it,
+        # even when its version is not older
+        (self.root / "engine" / "BUILD.json").write_text(json.dumps({"version": "0.1.40.3", "archs": [89]}))
+        (self.root / "engine" / setup.EXE).write_bytes(b"upstream")
+        got, wrote = [], []
+        with mock.patch.object(setup.urllib.request, "urlopen", lambda req, timeout=None: Response()), \
+                mock.patch.object(setup, "download", self.fake_download(got, wrote)), \
+                mock.patch.object(setup, "engine_digest", self.fake_digest(wrote)):
+            eng, out = quiet(setup.get_prebuilt, setup.PREBUILT_URL, {"arch": 89}, "gpu")
+        self.assertEqual(eng, self.root / "engine")
+        self.assertIn("Replacing upstream Strata's ready-made engine", out)
+        self.assertEqual((self.root / "engine" / setup.EXE).read_bytes(), b"engine")
+        self.assertEqual(json.loads((self.root / "engine" / "BUILD.json").read_text())["fork"], FORK)
+        self.assertEqual(got, [f"{FORK}/releases/download/v0.1.40.3-nvfp4.1/" + setup.PREBUILT_ASSET])
+
+    def test_an_upstream_engine_is_never_installed(self):
+        # upstream's release zip (no fork mark, its own version) from an explicit --prebuilt is below MIN_ENGINE
+        self.assertGreater(setup.MIN_ENGINE, (0, 1, 40, 3))
+        with tempfile.TemporaryDirectory() as folder:
+            with zipfile.ZipFile(Path(folder) / setup.PREBUILT_ASSET, "w") as z:
+                z.writestr("BUILD.json", json.dumps({"version": "0.1.40.3", "archs": [89]}))
+                z.writestr(setup.EXE, b"upstream")
+            eng, out = quiet(setup.get_prebuilt, folder, {"arch": 89}, "gpu")
+        self.assertIsNone(eng)
+        self.assertIn("compiling instead", out)
+
+    def test_the_fork_publishes_no_linux_cuda12_or_amd_engine(self):
+        # nothing is asked of the network: setup says so, and compiles from this source
+        def urlopen(req, timeout=None):
+            raise AssertionError("asked the network for an asset the fork does not publish")
+
+        with mock.patch.object(setup.urllib.request, "urlopen", urlopen):
+            eng, out = quiet(setup.get_prebuilt, setup.PREBUILT_URL, {"arch": 89}, "gpu", toolkit=12)
+            self.assertIsNone(eng)
+            self.assertIn("publishes a ready-made engine for Windows (CUDA 13) only: compiling it from this source", out)
+            with mock.patch.object(setup, "PREBUILT_ASSET", "strata-linux-x64.zip"):
+                eng, out = quiet(setup.get_prebuilt, setup.PREBUILT_URL, {"arch": 89}, "gpu")
+            self.assertIsNone(eng)
+            eng, out = quiet(setup.get_prebuilt_hip, setup.PREBUILT_URL, {"arch": "gfx1100"})
+            self.assertIsNone(eng)
+            self.assertIn("publishes no ready-made AMD engine", out)
 
 
 class Requirements(unittest.TestCase):
