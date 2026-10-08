@@ -115,6 +115,32 @@ Setting it all up by hand - the engine, and converting the ModelOpt checkpoint y
   - The result is 73.8 GiB of experts instead of 63.3 GiB. Against an all-Q8_0 reference, the answers' KL is half of the ModelOpt pack's, about 2.6x less once run-to-run noise is taken out, for 12-15% of the decode speed.
   - GPTQ alone, without the 8-bit layers, is 1.7x closer at no speed cost.
   - docs/NVFP4.md, "Re-quantized from BF16", has the method and every measurement.
+- **On upstream Strata 0.1.41 (0.1.41-nvfp4.1).** Since 0.1.40.3 (and its hotfix 0.1.40.4, a Pascal decode fix)
+  upstream changed, of what runs on an NVIDIA card:
+  - the CPU share of small prompt chunks is on by default upstream too (`auto`, one GPU without batch slots), with
+    the contention gate this fork sent as #1379, and the chunked DeltaNet recurrence (#1372) is upstream's opt-in;
+    this fork keeps its additions on top: the recurrence in chunks from 128 tokens, and NVFP4 packs sharing chunks
+    up to 4,096 tokens;
+  - with the share on, the prompt path borrows expert slots for the staged chunk only (a 2K prompt 364 slots instead
+    of 795), so more experts stay in VRAM and a 2K prompt's logits move a little (KL 0.016 on the GPTQ + Q8_0-down
+    pack, 0.0017 on ModelOpt, the same top token), closer to the share-off result than before (KL 0.0067 against
+    0.0645). With `STRATA_PREFILL_CPU_SHARE=0` the bits are 0.1.40.3-nvfp4.1's; a 2K prompt with the default share
+    takes as long as before (918 against 923 ms, 5 pairs);
+  - setup warns when the card is not in the Default compute mode (#1445), the server takes several `--api-key`s
+    and refuses oversized bodies, and an engine that hangs with an idle GPU is restarted.
+
+  The rest is multi-GPU batch groups, Windows prompts from a model bigger than RAM (#1323), AMD and Intel. 71 of the
+  fork's 76 commits are carried; the gate and the chunked recurrence are upstream's now, the default `auto` and the
+  4,096-token NVFP4 limit shrink to the fork's additions on upstream's CPU share, and `qsa_select_bench`'s accuracy
+  floor gives way to upstream's own fix (#1399, closed). The 32K logits and tokens are identical to
+  0.1.40.3-nvfp4.1's; with the fork's own defaults off they equal upstream 0.1.41's byte for byte on IQ2_XS. Decode
+  is as fast as 0.1.40.3-nvfp4.1's (5 interleaved chats each: 175.9 against 174.8 tokens/s).
+
+- **Setup installs this fork (0.1.41-nvfp4.1):** `START-HERE.bat` / `setup.sh` offer the NVFP4 models ready-made
+  from Hugging Face once they are published, and always install this fork's engine, never upstream's (see
+  [Quick start](#quick-start)). The release carries that engine as `strata-windows-x64.zip`, and the bundle updates
+  itself with `update.cmd` (in `config\` and `data\` only a file still as a release shipped it is replaced).
+
 - **0.1.40.3-nvfp4.1:** a second round of agents after a profile of the prompt and of decode. Decode turned out
   bound by host RAM bandwidth, not by PCIe: the CPU pool and the PCIe share read the same DDR5. So the PCIe share's
   blobs now go into the VRAM tier instead of the tier reading them from RAM a second time (decode +9% in a chat, +10% deep in a 32K document).
@@ -123,7 +149,7 @@ Setting it all up by hand - the engine, and converting the ModelOpt checkpoint y
   copies (this fork's default) the CPU could compute an expert it had just evicted from a stale activation.
   docs/NVFP4.md, "A second round of kernels", has every measurement.
 
-- **On upstream Strata 0.1.40.3.** Since 0.1.40.2 upstream changed, of what runs on an NVIDIA card:
+- **0.1.40.3-nvfp4.1, on upstream 0.1.40.3:** since 0.1.40.2 upstream changed, of what runs on an NVIDIA card:
   - the MTP drafter calls the native top-10 router only for the 512-expert, top-10 router it was written for, as
     the main layers already did (a model with fewer experts read past each row, #1357; this model is one, so the
     same bits here);
@@ -346,7 +372,7 @@ One-shot:
 ```bat
 build\strata.exe --pack packs\orca-nvfp4 --native models\orca-nvfp4.gguf --native-dense-gguf models\orca-nvfp4.gguf ^
   --ple-gguf models\ple-fp8.gguf --embd-gguf models\token-embd-bf16.gguf ^
-  --mtp mtp-orca\rt --spec 4 --spec-min-p 0.5 --prefill auto ^
+  --mtp mtp-orca\rt --spec 6 --spec-min-p 0.7 --prefill auto ^
   --expert-profile data\expert-profile.bin --expert-cache auto ^
   --max-context 262144 --kv int8 --tokens-file prompt.txt --max-new 256
 ```
