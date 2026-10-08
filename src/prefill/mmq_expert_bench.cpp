@@ -83,6 +83,19 @@ double run_case(const Case& c, int R, std::mt19937& rng, float* ms_out) {
     p.w = dw; p.type = c.t; p.w_rows = c.rows; p.w_cols = c.cols; p.expert_bytes = per; p.n = E;
     p.xq = dq; p.bounds = db; p.ids = dids; p.total_rows = T; p.max_rows = R; p.dst = dd; p.ld_dst = c.rows;
     p.y_scale = mmq::fp4_activations(c.t) ? dys : nullptr;
+    // STRATA_BENCH_IN_PLACE=1: the experts through a pointer each (Product::w_ptrs), as the prompt path reads them;
+    // =2 also gate/up's activation rows through a row table (Product::y_rows, a fixed permutation of the rows)
+    static const int in_place_mode = [] { const char* v = std::getenv("STRATA_BENCH_IN_PLACE"); return v ? std::atoi(v) : 0; }();
+    const bool in_place = in_place_mode >= 1;
+    std::vector<int32_t> perm(T);
+    for (int i = 0; i < T; ++i) perm[i] = (int32_t) (((int64_t) i * 7919 + 17) % T);
+    int32_t* dperm = nullptr;
+    ck(cudaMalloc(&dperm, (size_t) T * 4), "perm");
+    ck(cudaMemcpy(dperm, perm.data(), (size_t) T * 4, cudaMemcpyHostToDevice), "perm");
+    std::vector<const void*> wp(E);
+    for (int e = 0; e < E; ++e) wp[e] = dw + (size_t) e * per;
+    if (in_place && mmq::direct_ok(c.t)) p.w_ptrs = wp.data();
+    if (in_place_mode == 2 && p.w_ptrs && mmq::token_rows_ok(c.t, c.cols)) { p.y_rows = dperm; p.y_count = T; }
     cudaEvent_t e0, e1;
     cudaEventCreate(&e0); cudaEventCreate(&e1);
     std::vector<float> ts;
@@ -97,6 +110,7 @@ double run_case(const Case& c, int R, std::mt19937& rng, float* ms_out) {
     std::sort(ts.begin(), ts.end());
     const float ms = ts[ts.size() / 2];
     if (ms_out) *ms_out = ms;
+    cudaFree(dperm);
     cudaFree(dw); cudaFree(dx); cudaFree(dq); cudaFree(dys); cudaFree(dd); cudaFree(dids); cudaFree(db);
     cudaEventDestroy(e0); cudaEventDestroy(e1);
     return 2.0 * T * (double) c.rows * c.cols / (ms * 1e9);

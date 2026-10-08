@@ -123,6 +123,56 @@ __global__ void swiglu_scaled_kernel(const float* __restrict__ gu, float* __rest
     const float g = row[k] * tails[4 * q], u = row[n_ff + k] * tails[4 * q + 1];
     h[i] = g / (1.0f + __expf(-g)) * u;
 }
+// swiglu_scaled_kernel, quantize_mmq_q8_1<D4>'s rows of its output and down_row_scales_kernel in one pass: a block per
+// row (128 threads, 4 values each, blockIdx.y the row's 512-value half), H never stored.  Each value is
+// swiglu_scaled's expression and each 32-value block quantize_mmq_q8_1's (the same unit and flags: the same bits).
+// sd (null: none) gets the row's s_down.
+struct TailPtrs {
+    const float* p[kGatherGroupMax];   // expert q's {s_gate, s_up, s_down, 0}
+};
+__global__ void __launch_bounds__(128) swiglu_quant_kernel(const float* __restrict__ gu, block_q8_1_mmq* __restrict__ y,
+                                                           int64_t rows, const int32_t* __restrict__ bounds, int n,
+                                                           const TailPtrs tp, int64_t row0, float* __restrict__ sd) {
+    constexpr int64_t n_ff = 640, ne0 = 1024;   // the padded row: pad512(640)
+    const int64_t i0 = ((int64_t) blockDim.x * blockIdx.y + threadIdx.x) * 4;
+    if (i0 >= ne0) return;
+    const int64_t r = blockIdx.x, ra = row0 + r;
+    int q = 0;
+    while (q + 1 < n && ra >= bounds[q + 1]) ++q;
+    const float* tails = tp.p[0];   // tp.p[q] by selects: a parameter array indexed per thread is copied to the stack
+#pragma unroll
+    for (int i = 1; i < kGatherGroupMax; ++i)
+        if (i == q) tails = tp.p[i];
+    float4 xi = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    if (i0 < n_ff) {
+        const float* row = gu + r * 2 * n_ff;
+        const float4 g4 = *reinterpret_cast<const float4*>(row + i0), u4 = *reinterpret_cast<const float4*>(row + n_ff + i0);
+        const float sg = tails[0], su = tails[1];
+        float g, u;
+        g = g4.x * sg; u = u4.x * su; xi.x = g / (1.0f + __expf(-g)) * u;
+        g = g4.y * sg; u = u4.y * su; xi.y = g / (1.0f + __expf(-g)) * u;
+        g = g4.z * sg; u = u4.z * su; xi.z = g / (1.0f + __expf(-g)) * u;
+        g = g4.w * sg; u = u4.w * su; xi.w = g / (1.0f + __expf(-g)) * u;
+    }
+    if (sd != nullptr && i0 == 0) sd[r] = tails[2];
+    float amax = fabsf(xi.x);
+    amax = fmaxf(amax, fabsf(xi.y));
+    amax = fmaxf(amax, fabsf(xi.z));
+    amax = fmaxf(amax, fabsf(xi.w));
+#pragma unroll
+    for (int offset = 32 / 8; offset > 0; offset >>= 1) amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, offset, WARP_SIZE));
+    const float d_inv = 127.0f / amax;
+    char4 c;
+    c.x = roundf(xi.x * d_inv);
+    c.y = roundf(xi.y * d_inv);
+    c.z = roundf(xi.z * d_inv);
+    c.w = roundf(xi.w * d_inv);
+    const float d = 1.0f / d_inv;
+    const int64_t k_block = i0 / QK8_1_MMQ, iqs = i0 % QK8_1_MMQ;
+    block_q8_1_mmq* yb = y + k_block * rows + r;
+    reinterpret_cast<char4*>(yb->qs)[iqs / 4] = c;
+    if (iqs % 32 == 0) yb->d4[iqs / 32] = d;
+}
 __global__ void down_row_scales_kernel(float* __restrict__ sd, const int32_t* __restrict__ bounds, int n,
                                        const float* __restrict__ tails, int64_t nrows) {
     const int64_t r = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
@@ -155,7 +205,11 @@ unsigned blocks(int64_t n) { return (unsigned) ((n + 255) / 256); }
 }  // namespace
 
 // mmq_nvfp4_w4a8.cu: mmq.cuh's int8 NVFP4 path, compiled for this GPU with Blackwell's FP4 MMA hidden
-void run_nvfp4_w4a8(ggml_backend_cuda_context& ctx, const mmq_args& a, cudaStream_t s);
+// (w: n pointers, each expert's weights where they lie - null: a.x + z x its stride, as gathered)
+void run_nvfp4_w4a8(ggml_backend_cuda_context& ctx, const mmq_args& a, cudaStream_t s, const void* const* w = nullptr,
+                    int n = 0);
+// mmq_q8_0_xp.cu: Q8_0 with the experts where they lie (w non-null)
+void run_q8_0_xp(ggml_backend_cuda_context& ctx, const mmq_args& a, cudaStream_t s, const void* const* w, int n);
 // mmq_nvfp4_w4a4.cu (the one unit built for 12xa): FP4 x FP4 and its activation quantizer, if this card runs it
 bool w4a4_available();
 void run_nvfp4_w4a4(ggml_backend_cuda_context& ctx, const mmq_args& a, cudaStream_t s);
@@ -163,7 +217,8 @@ void quantize_nvfp4_w4a4(const float* x, const int32_t* ids, void* xq, float* ys
                          int64_t ld, int64_t rows, int64_t padded, cudaStream_t s);
 // mmq_nvfp4_a44.cu (12xa too): two FP4 activation terms through the FP4 MMA, and their quantizer
 bool a44_available();
-void run_nvfp4_a44(ggml_backend_cuda_context& ctx, const mmq_args& a, cudaStream_t s);
+void run_nvfp4_a44(ggml_backend_cuda_context& ctx, const mmq_args& a, cudaStream_t s, const void* const* w = nullptr,
+                   int n = 0, const int32_t* y_rows = nullptr);
 void quantize_nvfp4_x2(const float* x, const int32_t* ids, void* xq, float* yscale, int64_t cols, int64_t ld,
                        int64_t rows, int64_t padded, cudaStream_t s);
 void quantize_nvfp4_x2_scatter(const float* x, const int32_t* slot, void* xq, float* yscale, int64_t cols, int64_t ld,
@@ -373,6 +428,31 @@ void Context::run(const Product& p, void* stream) {
                         p.max_rows, p.max_rows};
     auto& ctx = *(ggml_backend_cuda_context*) ctx_;
     const cudaStream_t s = (cudaStream_t) stream;
+    if (p.y_rows != nullptr && !(p.w_ptrs != nullptr && t == GGML_TYPE_NVFP4 && x2_mode() && p.w_cols >= kX2MinK)) {
+        std::fprintf(stderr, "prefill mmq: a row table needs an in-place w4a4x2 product\n");
+        std::exit(1);
+    }
+    if (p.w_ptrs != nullptr) {   // each expert where it lies (direct_ok decided the type and mode)
+        if (p.n > kGatherGroupMax || !direct_ok(p.type)) {
+            std::fprintf(stderr, "prefill mmq: type %d over %d experts cannot be read in place\n", p.type, p.n);
+            std::exit(1);
+        }
+#if !defined(GGML_USE_HIP)
+        if (t == GGML_TYPE_Q8_0) {
+            run_q8_0_xp(ctx, a, s, p.w_ptrs, p.n);
+        } else if (x2_mode() && p.w_cols >= kX2MinK) {
+            mmq_args ay = a;
+            if (p.y_rows != nullptr) ay.ncols_y = p.y_count;   // the activation buffer's rows (the layout's stride)
+            run_nvfp4_a44(ctx, ay, s, p.w_ptrs, p.n, p.y_rows);
+        } else {
+            mmq_args a8 = a;
+            if (x2_mode()) a8.y_scale = nullptr;   // q8_1 rows below kX2MinK, as below
+            run_nvfp4_w4a8(ctx, a8, s, p.w_ptrs, p.n);
+        }
+#endif
+        ck(cudaGetLastError(), "mul_mat_q");
+        return;
+    }
     switch (t) {
 #ifdef STRATA_ORCA_Q4KS_MMQ
         case GGML_TYPE_Q5_0: mul_mat_q_case<GGML_TYPE_Q5_0>(ctx, a, s); break;
@@ -473,6 +553,39 @@ void swiglu_scaled(const float* gu, float* h, int64_t rows, int64_t n_ff, const 
     if (rows <= 0) return;
     swiglu_scaled_kernel<<<blocks(rows * n_ff), 256, 0, (cudaStream_t) stream>>>(gu, h, rows, n_ff, bounds, n, tails, row0);
     ck(cudaGetLastError(), "swiglu_scaled");
+}
+bool direct_ok(int t) {
+#if defined(GGML_USE_HIP)
+    (void) t;
+    return false;
+#else
+    // Q8_0, and NVFP4 in w4a4x2 or w4a8 (not w4a4: its unit has no pointer table)
+    if (t == GGML_TYPE_Q8_0) return true;
+    return t == GGML_TYPE_NVFP4 && (x2_mode() || !fp4_activations(t));
+#endif
+}
+bool token_rows_ok(int t, int64_t w_cols) {
+#if defined(GGML_USE_HIP)
+    (void) t; (void) w_cols;
+    return false;
+#else
+    return t == GGML_TYPE_NVFP4 && x2_mode() && w_cols >= kX2MinK;
+#endif
+}
+bool swiglu_quant_ok(int t) {
+    // the q8_1 D4 rows quantize() writes for a down product's H (K 640): Q8_0, and NVFP4 unless w4a4 takes FP4 rows
+    if (t == GGML_TYPE_NVFP4) return fp4_activations(t) ? x2_mode() : true;
+    return mmq_get_q8_1_ds_layout((ggml_type) t) == MMQ_Q8_1_DS_LAYOUT_D4;
+}
+void swiglu_quant(const float* gu, void* hq, int64_t rows, const int32_t* bounds, int n, const float* const* tails,
+                  int64_t row0, float* sd, void* stream) {
+    if (rows <= 0 || n <= 0) return;
+    if (n > kGatherGroupMax) { std::fprintf(stderr, "prefill mmq: swiglu_quant over %d experts\n", n); std::exit(1); }
+    TailPtrs tp{};
+    for (int q = 0; q < n; ++q) tp.p[q] = tails[q];
+    swiglu_quant_kernel<<<dim3((unsigned) rows, 2), 128, 0, (cudaStream_t) stream>>>(gu, (block_q8_1_mmq*) hq, rows, bounds,
+                                                                                      n, tp, row0, sd);
+    ck(cudaGetLastError(), "swiglu_quant");
 }
 void down_row_scales(float* sd, const int32_t* bounds, int n, const float* tails, int64_t nrows, void* stream) {
     if (nrows <= 0 || n <= 0) return;

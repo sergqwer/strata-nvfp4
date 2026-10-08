@@ -783,6 +783,12 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     add_executable(gr_upmix_parity src/prefill/gr_upmix_parity.cu)
     target_link_libraries(gr_upmix_parity PRIVATE strata_prefill )
     add_test(NAME gr_upmix_parity COMMAND gr_upmix_parity)
+    # the MoE combine fused with the hyper-connection write (moe_combine_write_norm_rs) against the two kernels, bit
+    # for bit (GPU, synthetic, no model)
+    add_executable(prefill_combine_write_test tests/cuda/prefill_combine_write_test.cpp)
+    target_link_libraries(prefill_combine_write_test PRIVATE strata_prefill )
+    add_test(NAME prefill_combine_write_test COMMAND prefill_combine_write_test)
+    set_tests_properties(prefill_combine_write_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
   endif()
   # native_expert_grouped's group stride and fused SwiGLU + q8_1, bitwise vs the launches before them (GPU, synthetic,
   # no model; --bench adds v1/new timings of a window's 48 calls in a graph)
@@ -1285,7 +1291,7 @@ if(STRATA_NATIVE_EXPERTS)
     # #136: the Q2_0 pack's prompt experts on Strata's own int8 kernels (moe_fused.cu, opt-in STRATA_PF_FUSED=1; CUDA
     # only: the HIP branch below keeps MMQ, and an sm_75 device or an sm_75-only build reports them unavailable)
     add_library(strata_mmq STATIC src/prefill/moe_mmq.cu src/prefill/moe_fused.cu src/prefill/moe_fused_iq.cu
-                src/prefill/mmq_nvfp4_w4a8.cu
+                src/prefill/mmq_nvfp4_w4a8.cu src/prefill/mmq_q8_0_xp.cu
                 src/prefill/ggml_cuda_host.cu ${_strata_mmq}/quantize.cu)
     # q8_0: the drafter's matrices (E-9); STRATA_ORCA_Q4KS_MMQ adds q5_0 (#296, in _strata_mmq_types), and
     # STRATA_MMQ_KQUANTS q4_k q5_k q5_1, the experts of Unsloth's UD-Q4_K_XL (docs/UNSLOTH_Q4.md; the dispatch
@@ -1340,6 +1346,16 @@ if(STRATA_NATIVE_EXPERTS)
       target_link_libraries(prefill_fused_iq_test PRIVATE strata_mmq ggml-base ${_strata_gpu_runtime_target})
       add_test(NAME prefill_fused_iq_test COMMAND prefill_fused_iq_test)
       set_tests_properties(prefill_fused_iq_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
+      # the fused NVFP4 expert steps against the kernels they replace, byte for byte (swiglu_quant)
+      add_executable(prefill_moe_chain_test tests/cuda/prefill_moe_chain_test.cpp)
+      target_link_libraries(prefill_moe_chain_test PRIVATE strata_mmq ggml-base ${_strata_gpu_runtime_target})
+      add_test(NAME prefill_moe_chain_test COMMAND prefill_moe_chain_test)
+      set_tests_properties(prefill_moe_chain_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120)
+      # the dense Q8_0 weights' FP16 dequantization against the exact value per element
+      add_executable(dequant_q8_0_f16_test tests/cuda/dequant_q8_0_f16_test.cpp)
+      target_link_libraries(dequant_q8_0_f16_test PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+      add_test(NAME dequant_q8_0_f16_test COMMAND dequant_q8_0_f16_test)
+      set_tests_properties(dequant_q8_0_f16_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
     endif()
     if(STRATA_BUILD_TESTS AND STRATA_MMQ_KQUANTS)
       # the UD-Q4_K_XL expert formats through MMQ against ggml's dequantized weights (synthetic, a few seconds)
