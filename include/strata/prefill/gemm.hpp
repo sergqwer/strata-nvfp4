@@ -89,8 +89,11 @@ bool prompt_f16();
 
 
 
-/// #285: creates a cuBLAS handle on a thread (the first one initialises cuBLAS and cuBLASLt); the next Gemm::init
-/// / init_external takes it. Call once the device is current, early in the load.
-void gemm_prewarm();
+/// #285: creates a cuBLAS handle on a thread (the first one initialises cuBLAS and cuBLASLt) and, with `warm_kernels`
+/// (the engine has a batched prompt path), loads cuBLASLt's FP16 / BF16 GEMM kernels with one tiny product each; the
+/// next Gemm::init / init_external takes it. Call once the device is current, early in the load.
+void gemm_prewarm(bool warm_kernels = true);
+/// Waits until gemm_prewarm's thread is done (a no-op without one), so the VRAM it took is counted.
+void gemm_prewarm_wait();
 
 }  // namespace strata::prefill
