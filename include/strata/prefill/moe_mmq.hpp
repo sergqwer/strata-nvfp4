@@ -70,7 +70,19 @@ struct Product {
     float* dst = nullptr;
     int64_t ld_dst = 0;
     const float* y_scale = nullptr;     ///< NVFP4 w4a4: the per-row activation scales (fp4_activations)
+    /// n device pointers (host array, n <= kGatherGroupMax): expert e's [w_rows, w_cols] matrix where it lies, instead of
+    /// w + e * expert_bytes.  Only where direct_ok.  The K blocks past a row's end are not read (the same sums).
+    const void* const* w_ptrs = nullptr;
+    /// With w_ptrs, a w4a4x2 product (gate/up) only: xq holds y_count activation rows (each token once, quantize
+    /// without ids) and MMQ row r reads row y_rows[r] (device; the prompt path's row -> token table) - the same bytes
+    /// as the rows a scattering quantize writes, without writing each token k_used times.
+    const int32_t* y_rows = nullptr;
+    int64_t y_count = 0;
 };
+/// A Product of this type can take w_ptrs (read its experts in place): Q8_0, NVFP4 in w4a4x2 or w4a8.
+bool direct_ok(int ggml_type);
+/// ...and y_rows, at this K: NVFP4 in w4a4x2 with K >= 2048 (gate/up).
+bool token_rows_ok(int ggml_type, int64_t w_cols);
 
 /// The launch context (llama.cpp's MMQ keeps a small scratch pool for its stream-k fixup).  One per prompt path.
 class Context {
@@ -117,6 +129,12 @@ void swiglu_scaled(const float* gu, float* h, int64_t rows, int64_t n_ff, const 
                    const float* tails, int64_t row0, void* stream);
 /// sd[r] = the s_down of row r's expert (group-local bounds): the combine applies it as it reads the row.
 void down_row_scales(float* sd, const int32_t* bounds, int n, const float* tails, int64_t nrows, void* stream);
+/// swiglu_scaled (n_ff 640), then quantize() of its rows for a down product of `ggml_type`, then down_row_scales into
+/// sd (null: none) - in one pass, H never stored; the same bytes in hq and sd.  Only where swiglu_quant_ok.  tails:
+/// n device pointers (host array, n <= kGatherGroupMax), expert q's {s_gate, s_up, s_down, 0}.
+bool swiglu_quant_ok(int ggml_type);
+void swiglu_quant(const float* gu, void* hq, int64_t rows, const int32_t* bounds, int n, const float* const* tails,
+                  int64_t row0, float* sd, void* stream);
 
 /// dst[i] = i for i < n (the identity row map MMQ's MoE mode writes through).
 void iota(int32_t* dst, int64_t n, void* stream);
