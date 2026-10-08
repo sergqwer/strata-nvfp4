@@ -372,7 +372,93 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
-### A second round of kernels (2026-10-08) - TODO
+### A second round of kernels (2026-10-08, release 0.1.40.3-nvfp4.1)
+
+A profile of the tray engine (0.1.40.2-nvfp4.1) first, then seven agents, each reviewed, tested and merged on its own.
+codex reviewed the two biggest (the tier, the prompt kernels) and found nine issues, all fixed before the merge.
+
+**Where the time went:**
+- A 2K prompt spent ~half of its time streaming experts over PCIe. The first request after a load also lost
+  ~150-290 ms loading cuBLAS's kernels and pinned buffers. A 32K prompt waited 223 ms for its PLE rows before layer 1.
+- A decode round (17.7 ms, 2.5 tokens) spent:
+  - 3.3 ms reading misses over PCIe;
+  - 1.8 ms waiting for the CPU pool (2.7 ms at 96K of context);
+  - 3.8 ms in the dense GEMVs;
+  - 2.3 ms on the cached experts;
+  - 2.0 ms in the hyper-connections.
+- The engine's own PCIe model priced a PCIe expert at 123 us, i.e. ~25 GB/s against the link's 57.9.
+
+**What the agents found and changed:**
+- **Decode is bound by host RAM, not by PCIe.**
+  - The mapped-copy kernels (fetch_blobs and the small row copies) now read whole 128 B lines with 4 loads in flight
+    a thread: 46 -> 53 GB/s alone, and the engine's PCIe model measures an expert 20% cheaper. The same bytes.
+  - Decode did not move. Beside the CPU pool both read the same DDR5-5600 (dual channel): ~84 of ~90 GB/s.
+- **The PCIe share's blobs go into the VRAM tier** (`STRATA_ADAPT_FETCH=2`, the default).
+  - The tier's swaps read RAM too: ~24% of decode's RAM traffic at 96K.
+  - The PCIe share's blobs cross into VRAM anyway. Now the share takes the layer's most-routed misses, and one routed
+    enough is written into the slot of the layer's least-routed resident expert that the window does not route: a
+    swap without a RAM read of its own.
+  - tools/sim_tier.py replays `--dump-routing` traces through the tier's model (within 0.5% of the engine's misses
+    and swaps). It found no setting of the existing tier worth more than -8% of RAM bytes, against -25% for
+    admission.
+  - RAM bytes a round -17% (chat) / -27% (32K explain); decode decode +9% in a chat, +10% deep in a 32K document.
+  - Other bits than before, because the GPU and the CPU round an expert differently. Quality is below.
+- **A fix: the tier's evictions reach the device before the next window.**
+  - With the tier not waiting for its copies (this fork's default), `adapt()` marked an evicted expert non-resident
+    on the host at once, but the device's table followed a window later.
+  - The window then did not publish that layer's activation, and the CPU computed the expert from a stale one: 3-8
+    layer-windows in a 600-token answer.
+  - A pre-launch hook now patches the device's table from a list of the changed entries (a small kernel on the
+    verifier's stream). `STRATA_ADAPT_FETCH_CHECKRES=1` checks it: 0 mismatches.
+  - Sent upstream as #1517, where only `STRATA_ADAPT_NOWAIT=1` / `STRATA_ADAPT_LAG=2` hit it.
+- **The prompt reads its experts in place** (the same bits).
+  - The MMQ kernels take a pointer per expert and read the blob in its ring or cache slot (no gather copy).
+  - Gate/up read each token's activation once through a row -> token table.
+  - swiglu + quantize + the down row scale are one kernel, and the combine writes straight into the hyper-connection
+    state.
+  - The Q8_0 -> FP16 dequant is 13x faster.
+  - The activation tiles are double-buffered with cp.async on sm_80+.
+  - A 32K prompt -6.2% (-218 ms), 2K -4.3%, 8K and 600 tokens even.
+- **The PLE rows through 8 reader threads**, each with its own handle and completion port (the same rows).
+  - The SSD was not the limit; one thread reaping every completion was.
+  - A 32K prompt -4% (PLE 238 -> 77 ms); 8K even (it already hid behind layer 0). Sent upstream as #1516.
+- **cuBLASLt's GEMM kernels load at start**, with one tiny product of each type on the prewarm thread.
+  - The first request after a load: 2K -150 ms (1110 -> 955 ms in serve), now the same as a second request's.
+  - Load time even.
+- **Speculation:** `STRATA_SPEC_STATS=1` prints the round cost and the acceptance by draft probability.
+  - A window costs ~2-4.5 ms more per position.
+  - Drafts at p >= 0.9 are accepted 93-98% of the time; at p 0.5-0.9, 40-65%.
+  - Setup and the tray now use `--spec 6 --spec-min-p 0.7` instead of 4 / 0.5 (lossless: greedy and seeded sampled text identical): writing code +3.5% on this release (2 pairs; +5.3% in 5 pairs on the previous build, +4.8% deep in a 32K context), a 32K explain +3.8%, a short chat -2.4% (not significant).
+
+**Quality**, 8 prompts (250 tokens to 32K) against a high-precision reference (FP16 experts, the FP32 prompt attention,
+the sequential recurrence, no admission, no CPU share). First-token KL and the 32 greedy tokens:
+
+| prompt | 0.1.40.2-nvfp4.1 | 0.1.40.3-nvfp4.1 |
+|---|---|---|
+| 250 | 0.000044 | 0.000103 |
+| 600 | 0.0032 | 0.0027 |
+| 900 | 0.0019 | 0.0014 |
+| 1,300 | 0.00009 | 0.00011 |
+| 1,700 | 0.192 | 0.225 |
+| 2K | 0.0095 | 0.028 |
+| 8K | 0.0007 | 0.0007 |
+| 32K | 0.0055 | 0.0042 |
+
+- Median 0.0021 against 0.0026, and the same top token on all 8.
+- The greedy tokens match the reference on 6 of 8, against 7. Only admission changes bits, through which experts the
+  GPU or the CPU computes; the same noise moved round 1's count the other way.
+
+**Measured, not taken:**
+- The tier's own settings (every / swaps / decay, hysteresis, per-layer budgets): at most -8% of RAM bytes in the
+  replay.
+- A faster CPU pool: it is bound by the same RAM.
+- Overlapping the recurrence's prep and scan with PDL: the recurrence got slower.
+- An L2 prefetch of the expert weights: +13 ms.
+- A window grown by the drafts' cumulative probability, or chosen by expected tokens a millisecond: within 1% of a
+  plain `--spec` / `--spec-min-p` pair.
+- `--spec-split`: -12 to -18%.
+- The QSA selection widened to 4096 cells (a Reddit claim): NLL on long text worse on IQ2_XS, no accuracy gain.
+
 
 ### Upstream 0.1.40.3 (2026-10-08, release 0.1.40.3-nvfp4.1)
 
