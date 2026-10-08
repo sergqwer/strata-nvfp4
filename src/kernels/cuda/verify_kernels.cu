@@ -504,14 +504,14 @@ __global__ void copy_indexed_kernel(float* __restrict__ dst, const float* __rest
 // 8 CPU threads streaming DRAM (a cudaMemcpyAsync of the same blob: 49 / 39).
 constexpr int kFetchU = 4;
 __global__ void fetch_blobs_kernel(const unsigned long long* __restrict__ src, const int32_t* __restrict__ n,
-                                   uint4* __restrict__ dst, long long per) {
+                                   uint4* __restrict__ dst, long long per, const unsigned long long* __restrict__ dst2) {
     const long long ce = (long long) blockDim.x * kFetchU;
     const long long cpb = (per + ce - 1) / ce;
     const long long total = (long long) *n * cpb;
     for (long long c = blockIdx.x; c < total; c += gridDim.x) {
         const long long k = c / cpb, ci = c - k * cpb;
         const uint4* s = (const uint4*) src[k];
-        uint4* d = dst + k * per;
+        uint4* d = dst2 != nullptr && dst2[k] != 0 ? (uint4*) dst2[k] : dst + k * per;
         const int h = (int) ((8 - (((unsigned long long) s >> 4) & 7)) & 7);   // uint4 before the first 128 B line
         if (ci == 0 && (long long) threadIdx.x < h && (long long) threadIdx.x < per) d[threadIdx.x] = s[threadIdx.x];
         const long long o0 = ci * ce + h + threadIdx.x;
@@ -529,9 +529,14 @@ __global__ void fetch_blobs_kernel(const unsigned long long* __restrict__ src, c
     }
 }
 
-__global__ void rebase_ptrs_kernel(unsigned long long* ptr, const int32_t* n, unsigned long long base, long long bytes) {
+__global__ void res_patch_kernel(int32_t* __restrict__ table, const volatile int32_t* pairs, int n) {
+    for (int k = blockIdx.x * blockDim.x + threadIdx.x; k < n; k += gridDim.x * blockDim.x) table[pairs[2 * k]] = pairs[2 * k + 1];
+}
+
+__global__ void rebase_ptrs_kernel(unsigned long long* ptr, const int32_t* n, unsigned long long base, long long bytes,
+                                   const unsigned long long* dst2) {
     const int k = threadIdx.x;
-    if (k < *n) ptr[k] = base + (unsigned long long) k * (unsigned long long) bytes;
+    if (k < *n) ptr[k] = dst2 != nullptr && dst2[k] != 0 ? dst2[k] : base + (unsigned long long) k * (unsigned long long) bytes;
 }
 
 __global__ void add_streams_broadcast_kernel(const float* __restrict__ h, const float* __restrict__ e,
@@ -617,15 +622,24 @@ __global__ void force_token_kernel(int32_t* tok, const int32_t* force, int j) {
 
 }  // namespace
 
-void fetch_blobs(const unsigned long long* src, const int32_t* n, uint8_t* dst, int64_t blob_bytes, int cap, void* stream) {
+void fetch_blobs(const unsigned long long* src, const int32_t* n, uint8_t* dst, int64_t blob_bytes, int cap, void* stream,
+                 const unsigned long long* dst2) {
     if (cap <= 0) return;
     if (blob_bytes % 16 != 0) { std::fprintf(stderr, "fetch_blobs: blob size must be a multiple of 16\n"); std::exit(1); }
-    fetch_blobs_kernel<<<48 * 8, 256, 0, (cudaStream_t) stream>>>(src, n, (uint4*) dst, (long long) (blob_bytes / 16));
+    fetch_blobs_kernel<<<48 * 8, 256, 0, (cudaStream_t) stream>>>(src, n, (uint4*) dst, (long long) (blob_bytes / 16), dst2);
     check("fetch_blobs");
 }
 
-void rebase_ptrs(unsigned long long* ptr, const int32_t* n, uint8_t* base, int64_t blob_bytes, void* stream) {
-    rebase_ptrs_kernel<<<1, 128, 0, (cudaStream_t) stream>>>(ptr, n, (unsigned long long) base, (long long) blob_bytes);
+void res_patch(int32_t* table, const int32_t* pairs, int n, void* stream) {
+    if (n <= 0) return;
+    res_patch_kernel<<<(n + 255) / 256 < 64 ? (n + 255) / 256 : 64, 256, 0, (cudaStream_t) stream>>>(table, pairs, n);
+    check("res_patch");
+}
+
+void rebase_ptrs(unsigned long long* ptr, const int32_t* n, uint8_t* base, int64_t blob_bytes, void* stream,
+                 const unsigned long long* dst2) {
+    rebase_ptrs_kernel<<<1, 128, 0, (cudaStream_t) stream>>>(ptr, n, (unsigned long long) base, (long long) blob_bytes,
+                                                             dst2);
     check("rebase_ptrs");
 }
 
