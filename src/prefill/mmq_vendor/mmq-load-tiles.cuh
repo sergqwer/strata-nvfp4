@@ -499,6 +499,20 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
             i = min(i, i_max);
         }
 
+#if defined(STRATA_MMQ_XPTR) && (defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE))
+        // Strata: K blocks past the row's end (K 640 in 256-value iterations) load as 0 and are not read: they met
+        // zero activations (the same sums), and past an expert's last row lies whatever follows its blob
+        {
+            const int kb_row = kbx0 % stride;   // this iteration's first block in the row (tiles start at whole rows)
+            const block_q8_0 * brow = (const block_q8_0 *) x + (kbx0 - kb_row) + i*stride;
+            const bool in0 = kb_row + kbx < stride, in1 = kb_row + kbx + MMQ_TILE_NE_K/QI8_0 < stride;
+            const block_q8_0 * b0 = brow + (in0 ? kb_row + kbx : 0);
+            const block_q8_0 * b1 = brow + (in1 ? kb_row + kbx + MMQ_TILE_NE_K/QI8_0 : 0);
+            const int q0 = get_int_b2(b0->qs, kqsx), q1 = get_int_b2(b1->qs, kqsx);
+            x_qs[i*sram_stride + 0             + txi] = in0 ? q0 : 0;
+            x_qs[i*sram_stride + MMQ_TILE_NE_K + txi] = in1 ? q1 : 0;
+        }
+#else
         const block_q8_0 * bxi = (const block_q8_0 *) x + kbx0 + i*stride + kbx;
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
@@ -508,6 +522,7 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
         x_qs[i*(2*MMQ_TILE_NE_K + 1) + 0             + txi] = get_int_b2(bxi[0].qs,                   kqsx);
         x_qs[i*(2*MMQ_TILE_NE_K + 1) + MMQ_TILE_NE_K + txi] = get_int_b2(bxi[MMQ_TILE_NE_K/QI8_0].qs, kqsx);
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+#endif // STRATA_MMQ_XPTR && MMA
     }
 
     constexpr int blocks_per_tile_x_row = 2*MMQ_TILE_NE_K / QI8_0;
@@ -522,6 +537,15 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
             i = min(i, i_max);
         }
 
+#if defined(STRATA_MMQ_XPTR) && (defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE))
+        {
+            const int kb_row = kbx0 % stride;
+            const bool in = kb_row + kbxd < stride;
+            const block_q8_0 * bxi = (const block_q8_0 *) x + (kbx0 - kb_row) + i*stride + (in ? kb_row + kbxd : 0);
+            const float d = bxi->d;
+            x_df[i*sram_stride                           + kbxd] = in ? d : 0.0f;
+        }
+#else
         const block_q8_0 * bxi = (const block_q8_0 *) x + kbx0 + i*stride + kbxd;
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
@@ -529,6 +553,7 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
 #else
         x_df[i*(2*MMQ_TILE_NE_K/QI8_0) + i/(QI8_0/2) + kbxd] = bxi->d;
 #endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+#endif // STRATA_MMQ_XPTR && MMA
     }
 }
 
@@ -1699,22 +1724,35 @@ template <ggml_type type, int J, bool fallback> static __device__ __forceinline_
             i = min(i, i_max);
         }
 
+#ifdef STRATA_MMQ_XPTR
+        // Strata: a block past the row's end loads as 0 from the row's first block (see load_tiles_q8_0)
+        const int kb_row = kb0 % stride;
+        const bool in = kb_row + kbx < stride;
+        const block_nvfp4 * bxi = (const block_nvfp4 *) x + (kb0 - kb_row) + i * stride + (in ? kb_row + kbx : 0);
+#else
+        constexpr bool in = true;
         const block_nvfp4 * bxi = (const block_nvfp4 *) x + kb0 + i * stride + kbx;
+#endif // STRATA_MMQ_XPTR
         const uint32_t * __restrict__ src_qs = reinterpret_cast<const uint32_t *>(bxi->qs);
         const int kqs = 16 * kbx;
         const int ksc = 4 * kbx;
 
 #pragma unroll
         for (int sub = 0; sub < QK_NVFP4 / QK_NVFP4_SUB; ++sub) {
-            const int2 q0 = get_int_from_table_16(src_qs[2 * sub + 0], kvalues_mxfp4);
-            const int2 q1 = get_int_from_table_16(src_qs[2 * sub + 1], kvalues_mxfp4);
+            int2 q0 = get_int_from_table_16(src_qs[2 * sub + 0], kvalues_mxfp4);
+            int2 q1 = get_int_from_table_16(src_qs[2 * sub + 1], kvalues_mxfp4);
+            if (!in) {
+                q0 = make_int2(0, 0);
+                q1 = make_int2(0, 0);
+            }
 
 #if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
             x_qs[i*sram_stride + kqs + 4 * sub + 0] = q0.x;
             x_qs[i*sram_stride + kqs + 4 * sub + 1] = q1.x;
             x_qs[i*sram_stride + kqs + 4 * sub + 2] = q0.y;
             x_qs[i*sram_stride + kqs + 4 * sub + 3] = q1.y;
-            x_df[i*sram_stride + ksc + sub] = ggml_cuda_ue4m3_to_fp32(bxi->d[sub]);
+            const float dsc = ggml_cuda_ue4m3_to_fp32(bxi->d[sub]);
+            x_df[i*sram_stride + ksc + sub] = in ? dsc : 0.0f;
 #else
             x_qs[i * (2 * MMQ_TILE_NE_K + 1) + kqs + 4 * sub + 0] = q0.x;
             x_qs[i * (2 * MMQ_TILE_NE_K + 1) + kqs + 4 * sub + 1] = q1.x;

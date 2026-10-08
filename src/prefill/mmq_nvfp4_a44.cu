@@ -14,6 +14,9 @@
 #include <cuda_fp4.h>
 
 #define STRATA_MMQ_Y2 1
+#define STRATA_MMQ_XPTR 1
+#define STRATA_MMQ_YPIPE 1
+#define STRATA_MMQ_YROWS 1
 #define mul_mat_q_switch_J strata_a44_mul_mat_q_switch_J
 #define mul_mat_q_case strata_a44_mul_mat_q_case
 #include "mmq_vendor/mmq.cuh"
@@ -198,8 +201,14 @@ bool a44_available() {
     cudaFree(d);
     return ran && h == 1;
 }
-void run_nvfp4_a44(ggml_backend_cuda_context& ctx, const mmq_args& a, cudaStream_t s) {
+void run_nvfp4_a44(ggml_backend_cuda_context& ctx, const mmq_args& a, cudaStream_t s, const void* const* w, int n,
+                   const int32_t* y_rows) {
+    strata_mmq_xptr xp{};   // w: each expert's weights where they lie (null: a + z x stride, as gathered)
+    for (int i = 0; w != nullptr && i < n; ++i) xp.p[i] = (const char*) w[i];
+    xp.yrows = y_rows;      // MMQ row -> activation row (null: the same row)
+    strata_mmq_xp_host = xp;
     strata_a44_mul_mat_q_case<GGML_TYPE_NVFP4>(ctx, a, s);
+    strata_mmq_xp_host = strata_mmq_xptr{};
 }
 void quantize_nvfp4_x2(const float* x, const int32_t* ids, void* xq, float* yscale, int64_t cols, int64_t ld,
                        int64_t rows, int64_t padded, cudaStream_t s) {

@@ -2,7 +2,13 @@
 
 #include "common.cuh"
 // Strata (src/prefill/mmq_vendor): llama.cpp's mmq.cuh at 3cf0325, unchanged except under STRATA_MMQ_Y2 - the
-// activations as two FP4 terms (x ~ q1 + q2, q2 the residual), both multiplied with each weight tile in one kernel.
+// activations as two FP4 terms (x ~ q1 + q2, q2 the residual), both multiplied with each weight tile in one kernel -
+// and (agent G, round 2) three more, each the same sums as upstream:
+//  - STRATA_MMQ_XPTR: each expert's weights read where they lie (a pointer per expert); in mmq-load-tiles.cuh the K
+//    blocks past a row's end (K 640 in 256-value iterations) load as zeros instead of being read, and a 128-value
+//    half that starts past the row's end is skipped;
+//  - STRATA_MMQ_YPIPE: the activation tile's halves double-buffered through cp.async;
+//  - STRATA_MMQ_YROWS: an MoE product's activation rows through a row table (each token quantized once).
 
 #include <climits>
 #include <cstdint>
@@ -873,6 +879,37 @@ static constexpr __device__ ggml_cuda_mmq_write_back_t ggml_cuda_mmq_get_write_b
 
 // ---------------------------------------------------------------------------------------------
 
+// STRATA_MMQ_YPIPE's loop needs cp.async (sm_80+): below it (and in the host pass) the plain loop, and the host sizes
+// shared memory for one activation tile there (mmq_get_nbytes_shared)
+#if defined(STRATA_MMQ_YPIPE) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
+#define STRATA_YPIPE_ON 1
+#endif
+
+#ifdef STRATA_MMQ_YROWS
+// Strata: the activation rows through xp.yrows - the tile's rows and their row scales go to shared memory after the
+// ids (rows past the expert's end read row 0: their sums are never written)
+#define STRATA_YR_SMEM_INTS (2*J)
+// the plain loop's element l of a tile: tile row l / sz is activation row yrow[l / sz] (the w4a4x2 unit that takes a
+// row table runs the pipelined loop; this keeps the plain one correct too)
+#define STRATA_YIDX(l) (yrow ? (int64_t) yrow[(l) / sz] * sz + (l) % sz : (int64_t) (l))
+#define STRATA_YR_FILL(j, row0, row_end) \
+    if (xp.yrows) { \
+        const int yr_ = (row0) + (j) < (row_end) ? xp.yrows[(row0) + (j)] : 0; \
+        ids_dst_shared[J + (j)] = yr_; \
+        if (y_scale) ((float *) ids_dst_shared)[2*J + (j)] = y_scale[yr_]; \
+    }
+#define STRATA_YR_ROWS(v) (xp.yrows ? 0 : (v))
+#define STRATA_YR_SCALE(t) if (xp.yrows && y_scale) t = (const float *) ids_dst_shared + 2*J
+#define STRATA_YR_ARG , xp.yrows ? ids_dst_shared + J : nullptr
+#else
+#define STRATA_YR_SMEM_INTS 0
+#define STRATA_YIDX(l) (l)
+#define STRATA_YR_FILL(j, row0, row_end)
+#define STRATA_YR_ROWS(v) (v)
+#define STRATA_YR_SCALE(t)
+#define STRATA_YR_ARG
+#endif // STRATA_MMQ_YROWS
+
 template <ggml_type type, int J, bool fallback, bool fixup>
 static __device__ __forceinline__ void mul_mat_q_process_tile(
         const char * __restrict__ x, const int offset_x, const int * __restrict__ y,
@@ -880,7 +917,7 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
         const float * __restrict__ y_scale,
         const int stride_row_x, const int ncols_y, const int stride_col_dst,
         const int tile_x_max_i, const int tile_y_max_j, const int kb0_start, const int kb0_stop,
-        const int64_t y2_off = 0) {
+        const int64_t y2_off = 0, const int * __restrict__ yrow = nullptr) {
 
     constexpr int              warp_size  = ggml_cuda_get_physical_warp_size();
     constexpr int              nwarps     = ggml_cuda_mmq_get_nthreads(type, J, fallback) / warp_size;
@@ -891,8 +928,13 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
     constexpr ggml_cuda_mmq_write_back_t write_back = ggml_cuda_mmq_get_write_back<type, J, fallback>();
 
     extern __shared__ int data_mul_mat_q[];
-    int * tile_y = data_mul_mat_q + J;
+    int * tile_y = data_mul_mat_q + J + STRATA_YR_SMEM_INTS;
+#ifdef STRATA_YPIPE_ON
+    int * tile_y_b = tile_y + GGML_PAD(J*MMQ_TILE_Y_K, nwarps*warp_size);
+    int * tile_x = tile_y_b + GGML_PAD(J*MMQ_TILE_Y_K, nwarps*warp_size);
+#else
     int * tile_x = tile_y + GGML_PAD(J*MMQ_TILE_Y_K, nwarps*warp_size);
+#endif // STRATA_YPIPE_ON
 
 #if defined(BLACKWELL_MMA_AVAILABLE)
     // FP4 tile stores 8 blocks
@@ -908,6 +950,73 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
 
     constexpr int sz = sizeof(block_q8_1_mmq) / sizeof(int);
 
+#ifdef STRATA_YPIPE_ON
+    // Strata: an iteration's activation halves (two; four with STRATA_MMQ_Y2: term 1's, then term 2's) go through two
+    // tiles by cp.async, each loading while vec_dot runs on the other - the next iteration's first half during this
+    // one's last.  Only the weight tile's load (it decodes as it stores) waits.  The same vec_dot calls in the same
+    // order as the plain loop below: the same sums.
+#ifdef STRATA_MMQ_Y2
+    constexpr int nph = 4;
+#else
+    constexpr int nph = 2;
+#endif // STRATA_MMQ_Y2
+    static_assert((J*MMQ_TILE_Y_K) % 4 == 0, "16-byte copies");
+    // phase p's activation rows (term p / 2, half p % 2) of the iteration at kb0
+    auto y_src = [&](const int kb, const int p) -> const int * {
+        return y + (p >= 2 ? y2_off : 0) + ncols_y * ((kb * qk / ne_block) * sz + (p & 1) * sz);
+    };
+    static_assert(MMQ_TILE_Y_K == sz && sz % 4 == 0, "a tile row is one block_q8_1_mmq of 16-byte pieces");
+    auto y_issue = [&](int * dst, const int * src) {
+#pragma unroll
+        for (int l0 = 0; l0 < J*MMQ_TILE_Y_K; l0 += 4*nwarps*warp_size) {
+            const int l = l0 + 4*(threadIdx.y*warp_size + threadIdx.x);
+            if (l0 + 4*nwarps*warp_size <= J*MMQ_TILE_Y_K || l < J*MMQ_TILE_Y_K) {
+                const unsigned d = (unsigned) __cvta_generic_to_shared(dst + l);
+                // with a row table (STRATA_MMQ_YROWS) tile row l / sz is activation row yrow[l / sz]
+                const int * s = yrow ? src + (int64_t) yrow[l / sz] * sz + l % sz : src + l;
+                asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" :: "r"(d), "l"(s));
+            }
+        }
+        asm volatile("cp.async.commit_group;\n" ::);
+    };
+    // a phase whose 128 values start at or past the row's end adds exact zeros (load_tiles loads them as zeros): skipped
+    auto live = [&](const int kb, const int p) -> bool {
+#ifdef STRATA_MMQ_XPTR
+        return (p & 1) == 0 || kb + blocks_per_iter/2 < kb0_stop;
+#else
+        GGML_UNUSED(kb); GGML_UNUSED(p);
+        return true;
+#endif // STRATA_MMQ_XPTR
+    };
+    int * ycur = tile_y;      // the tile vec_dot reads next (two pointers swapped, no indexed array: no stack)
+    int * ynext = tile_y_b;
+    if (kb0_start < kb0_stop) y_issue(ycur, y_src(kb0_start, 0));
+    for (int kb0 = kb0_start; kb0 < kb0_stop; kb0 += blocks_per_iter) {
+        load_tiles(x, tile_x, offset_x + kb0, tile_x_max_i, stride_row_x);
+#pragma unroll
+        for (int p = 0; p < nph; ++p) {
+            if (!live(kb0, p)) continue;
+            // the next live phase: later in this iteration, else the next iteration's first
+            int nkb = kb0, np = p + 1;
+            while (np < nph && !live(nkb, np)) ++np;
+            if (np >= nph) { nkb = kb0 + blocks_per_iter; np = 0; }
+            const bool more = nkb < kb0_stop;
+            if (more) {   // its tile was last read by the previous phase, which ended at a barrier
+                y_issue(ynext, y_src(nkb, np));
+                asm volatile("cp.async.wait_group 1;\n" ::);
+            } else {
+                asm volatile("cp.async.wait_group 0;\n" ::);
+            }
+            __syncthreads();
+            vec_dot(tile_x, ycur, sum, (p & 1) * MMQ_TILE_NE_K);
+            __syncthreads();
+            int * const t = ycur;
+            ycur = ynext;
+            ynext = t;
+        }
+    }
+    GGML_UNUSED(y2_off);
+#else
     for (int kb0 = kb0_start; kb0 < kb0_stop; kb0 += blocks_per_iter) {
         load_tiles(x, tile_x, offset_x + kb0, tile_x_max_i, stride_row_x);
         {
@@ -916,7 +1025,7 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
             for (int l0 = 0; l0 < J * MMQ_TILE_Y_K; l0 += nwarps * warp_size) {
                 int l = l0 + threadIdx.y*warp_size + threadIdx.x;
 
-                tile_y[l] = by0[l];
+                tile_y[l] = by0[STRATA_YIDX(l)];
             }
         }
 
@@ -926,13 +1035,19 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
 
         __syncthreads();
 
+#ifdef STRATA_MMQ_XPTR
+        // Strata: a row that ends inside this iteration's first half (K 640 = 2.5 iterations of 256) skips the
+        // second: its weights load as zeros (load_tiles), so it would add exact zeros to every sum
+        if (kb0 + blocks_per_iter/2 < kb0_stop)
+#endif // STRATA_MMQ_XPTR
+        {
         {
             const int * by0 = y + ncols_y * ((kb0 * qk / ne_block) * sz + sz);
 #pragma unroll
             for (int l0 = 0; l0 < J * MMQ_TILE_Y_K; l0 += nwarps * warp_size) {
                 int l = l0 + threadIdx.y*warp_size + threadIdx.x;
 
-                tile_y[l] = by0[l];
+                tile_y[l] = by0[STRATA_YIDX(l)];
             }
         }
 
@@ -941,6 +1056,7 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
         vec_dot(tile_x, tile_y, sum, MMQ_TILE_NE_K);
 
         __syncthreads();
+        }
 #ifdef STRATA_MMQ_Y2
         // the second activation term (the first one's residual) against the same weight tile, into the same sums
 #pragma unroll
@@ -950,7 +1066,7 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
             for (int l0 = 0; l0 < J * MMQ_TILE_Y_K; l0 += nwarps * warp_size) {
                 int l = l0 + threadIdx.y*warp_size + threadIdx.x;
 
-                tile_y[l] = by0[l];
+                tile_y[l] = by0[STRATA_YIDX(l)];
             }
 
             __syncthreads();
@@ -961,6 +1077,7 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
         }
 #endif // STRATA_MMQ_Y2
     }
+#endif // STRATA_YPIPE_ON
 
     if (fixup) {
         write_back(sum, ids_dst, tmp_fixup + blockIdx.x*(J*I), y_scale, I, I, J);
@@ -968,6 +1085,26 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
         write_back(sum, ids_dst, dst, y_scale, stride_col_dst, tile_x_max_i, tile_y_max_j);
     }
 }
+
+
+#ifdef STRATA_MMQ_XPTR
+// Strata: each expert's weights at their own address (expert z at p[z]; p[0] null: x + z * stride_channel_x as
+// upstream).  The wrapper of one launch sets strata_mmq_xp_host (one per unit and host thread).
+struct strata_mmq_xptr {
+    const char * p[16];
+    const int * yrows;   // STRATA_MMQ_YROWS: MMQ row -> activation row (null: row r is activation row r)
+};
+static thread_local strata_mmq_xptr strata_mmq_xp_host = {};
+#define STRATA_XP_PARAM , const strata_mmq_xptr xp
+#define STRATA_XP_ARG , strata_mmq_xp_host
+#define STRATA_XP_X(zt) (xp.p[0] ? xp.p[(zt)] : x)
+#define STRATA_XP_CH(v) (xp.p[0] ? 0 : (v))
+#else
+#define STRATA_XP_PARAM
+#define STRATA_XP_ARG
+#define STRATA_XP_X(zt) x
+#define STRATA_XP_CH(v) (v)
+#endif // STRATA_MMQ_XPTR
 
 
 #ifdef STRATA_MMQ_Y2
@@ -988,7 +1125,7 @@ static __global__ void mul_mat_q(
         const uint3 blocks_per_ne00, const int nrows_x, const int ncols_dst, const int stride_row_x, const int ncols_y, const int stride_col_dst,
         const uint3 channel_ratio, const uint3 nchannels_y, const int stride_channel_x, const int stride_channel_y, const int stride_channel_dst,
         const uint3 sample_ratio, const uint3 nsamples_y, const int stride_sample_x, const int stride_sample_y, const int stride_sample_dst,
-        const uint3 ntx) {
+        const uint3 ntx STRATA_XP_PARAM) {
 
     // Skip unused template specializations for faster compilation:
     if (ggml_cuda_mmq_get_config(type, J, fallback).type == GGML_TYPE_COUNT) {
@@ -1064,28 +1201,30 @@ static __global__ void mul_mat_q(
                 }
 
                 ids_dst_shared[j] = ids_dst[col_low + jt*J + j];
+                STRATA_YR_FILL(j, col_low + jt*J, col_high);
             }
             __syncthreads();
         }
 
-        offset_y   += (col_low + jt*J)*(sizeof(block_q8_1_mmq)/sizeof(int));
+        offset_y   += STRATA_YR_ROWS((col_low + jt*J)*(sizeof(block_q8_1_mmq)/sizeof(int)));
         offset_dst += it*I;
         const float * y_scale_tile = nullptr;
         if constexpr (type == GGML_TYPE_NVFP4) {
             offset_y_scale += col_low + jt*J;
             y_scale_tile = y_scale ? y_scale + offset_y_scale : nullptr;
+            STRATA_YR_SCALE(y_scale_tile);
         }
 
         const int tile_x_max_i = nrows_x  - it*I - 1;
         const int tile_y_max_j = col_diff - jt*J - 1;
 
-        const int offset_x = fastdiv(wt, sample_ratio)*stride_sample_x + fastdiv(zt, channel_ratio)*stride_channel_x + it*I*stride_row_x;
+        const int offset_x = STRATA_XP_CH(fastdiv(wt, sample_ratio)*stride_sample_x + fastdiv(zt, channel_ratio)*stride_channel_x) + it*I*stride_row_x;
 
         constexpr bool fixup = false;
         mul_mat_q_process_tile<type, J, fallback, fixup>
-            (x, offset_x, y + offset_y, ids_dst_shared, dst + offset_dst, tmp_fixup, y_scale_tile,
+            (STRATA_XP_X(zt), offset_x, y + offset_y, ids_dst_shared, dst + offset_dst, tmp_fixup, y_scale_tile,
              stride_row_x, ncols_y, stride_col_dst,
-             tile_x_max_i, tile_y_max_j, 0, blocks_per_ne00.z, STRATA_Y2_OFF);
+             tile_x_max_i, tile_y_max_j, 0, blocks_per_ne00.z, STRATA_Y2_OFF STRATA_YR_ARG);
         return;
     }
 
@@ -1158,28 +1297,30 @@ static __global__ void mul_mat_q(
                 }
 
                 ids_dst_shared[j] = ids_dst[col_low + jt*J + j];
+                STRATA_YR_FILL(j, col_low + jt*J, col_high);
             }
             __syncthreads();
         }
 
-        offset_y += (col_low + jt * J) * (sizeof(block_q8_1_mmq) / sizeof(int));
+        offset_y += STRATA_YR_ROWS((col_low + jt * J) * (sizeof(block_q8_1_mmq) / sizeof(int)));
         offset_dst += it*I;
         const float * y_scale_tile = nullptr;
         if constexpr (type == GGML_TYPE_NVFP4) {
             offset_y_scale += col_low + jt * J;
             y_scale_tile = y_scale ? y_scale + offset_y_scale : nullptr;
+            STRATA_YR_SCALE(y_scale_tile);
         }
 
         const int tile_x_max_i = nrows_x  - it*I - 1;
         const int tile_y_max_j = col_diff - jt*J - 1;
 
-        const int offset_x = fastdiv(wt, sample_ratio)*stride_sample_x + fastdiv(zt, channel_ratio)*stride_channel_x + it*I*stride_row_x;
+        const int offset_x = STRATA_XP_CH(fastdiv(wt, sample_ratio)*stride_sample_x + fastdiv(zt, channel_ratio)*stride_channel_x) + it*I*stride_row_x;
 
         constexpr bool fixup = false; // All but (potentially) the last iterations write their data to dst rather than the fixup buffer.
         mul_mat_q_process_tile<type, J, fallback, fixup>
-            (x, offset_x, y + offset_y, ids_dst_shared, dst + offset_dst, tmp_fixup, y_scale_tile,
+            (STRATA_XP_X(zt), offset_x, y + offset_y, ids_dst_shared, dst + offset_dst, tmp_fixup, y_scale_tile,
              stride_row_x, ncols_y, stride_col_dst,
-             tile_x_max_i, tile_y_max_j, kb0_start, kb0_stop, STRATA_Y2_OFF);
+             tile_x_max_i, tile_y_max_j, kb0_start, kb0_stop, STRATA_Y2_OFF STRATA_YR_ARG);
 
         kbc += blocks_per_ne00.z;
         kbc -= fastmodulo(kbc, blocks_per_ne00);
@@ -1242,28 +1383,30 @@ static __global__ void mul_mat_q(
             }
 
             ids_dst_shared[j] = j;
+            STRATA_YR_FILL(j, col_low + jt*J, col_high);
         }
         __syncthreads();
     }
 
-    offset_y += (col_low + jt * J) * (sizeof(block_q8_1_mmq) / sizeof(int));
+    offset_y += STRATA_YR_ROWS((col_low + jt * J) * (sizeof(block_q8_1_mmq) / sizeof(int)));
     offset_dst += it*I;
     const float * y_scale_tile = nullptr;
     if constexpr (type == GGML_TYPE_NVFP4) {
         offset_y_scale += col_low + jt * J;
         y_scale_tile = y_scale ? y_scale + offset_y_scale : nullptr;
+        STRATA_YR_SCALE(y_scale_tile);
     }
 
     const int tile_x_max_i = nrows_x  - it*I - 1;
     const int tile_y_max_j = col_diff - jt*J - 1;
 
-    const int offset_x = fastdiv(wt, sample_ratio)*stride_sample_x + fastdiv(zt, channel_ratio)*stride_channel_x + it*I*stride_row_x;
+    const int offset_x = STRATA_XP_CH(fastdiv(wt, sample_ratio)*stride_sample_x + fastdiv(zt, channel_ratio)*stride_channel_x) + it*I*stride_row_x;
 
     constexpr bool fixup = true; // Last index writes its data to fixup buffer to avoid data races with other blocks.
     mul_mat_q_process_tile<type, J, fallback, fixup>
-        (x, offset_x, y + offset_y, ids_dst_shared, dst + offset_dst, tmp_fixup, y_scale_tile,
+        (STRATA_XP_X(zt), offset_x, y + offset_y, ids_dst_shared, dst + offset_dst, tmp_fixup, y_scale_tile,
          stride_row_x, ncols_y, stride_col_dst,
-         tile_x_max_i, tile_y_max_j, kb0_start, kb0_stop, STRATA_Y2_OFF);
+         tile_x_max_i, tile_y_max_j, kb0_start, kb0_stop, STRATA_Y2_OFF STRATA_YR_ARG);
 }
 
 template <ggml_type type, int J, bool fallback>
@@ -1418,7 +1561,17 @@ static size_t mmq_get_nbytes_shared(const ggml_cuda_mmq_config & config, const i
     const size_t nbs_ids = config.J*sizeof(int);
     const size_t nbs_x = ggml_cuda_mmq_get_nbytes_shared_x(config, cc);
     const size_t nbs_y = config.J * (sizeof(block_q8_1_mmq));
-    return nbs_ids + nbs_x + GGML_PAD(nbs_y, config.nthreads*sizeof(int));
+#ifdef STRATA_MMQ_YPIPE
+    // two activation tiles where the device code is the pipelined loop (STRATA_YPIPE_ON: built for sm_80+)
+    const size_t ny = ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_AMPERE ? 2 : 1;
+#else
+    const size_t ny = 1;
+#endif // STRATA_MMQ_YPIPE
+#ifdef STRATA_MMQ_YROWS
+    return 3*nbs_ids + nbs_x + ny*GGML_PAD(nbs_y, config.nthreads*sizeof(int));   // + the row table and its scales
+#else
+    return nbs_ids + nbs_x + ny*GGML_PAD(nbs_y, config.nthreads*sizeof(int));
+#endif // STRATA_MMQ_YROWS
 }
 
 template <ggml_type type, int J, bool fallback>
@@ -1461,7 +1614,7 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
              blocks_per_ne00_fd, args.nrows_x, args.ncols_dst, args.stride_row_x, args.ncols_y, args.nrows_dst,
              channel_ratio_fd, nchannels_y_fd, args.stride_channel_x, args.stride_channel_y, args.stride_channel_dst,
              sample_ratio_fd, nsamples_y_fd, args.stride_sample_x, args.stride_sample_y, args.stride_sample_dst,
-             ntx_fd);
+             ntx_fd STRATA_XP_ARG);
         return;
     }
 
@@ -1490,7 +1643,7 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
          blocks_per_ne00_fd, args.nrows_x, args.ncols_dst, args.stride_row_x, args.ncols_y, args.nrows_dst,
          channel_ratio_fd, nchannels_y_fd, args.stride_channel_x, args.stride_channel_y, args.stride_channel_dst,
          sample_ratio_fd, nsamples_y_fd, args.stride_sample_x, args.stride_sample_y, args.stride_sample_dst,
-         ntx_fd);
+         ntx_fd STRATA_XP_ARG);
 
     if (!fixup_needed) {
         return;
