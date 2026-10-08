@@ -12,6 +12,46 @@ ones outside VRAM and reads the rest from the SSD), caches the most-used ones in
 and over PCIe in parallel with the GPU, and decodes with an MTP draft head. Everything about that design is
 upstream's; the original README is kept as [README.upstream.md](README.upstream.md).
 
+## Quick start
+
+```bat
+git clone https://github.com/sergqwer/strata-nvfp4
+cd strata-nvfp4
+START-HERE.bat
+```
+
+(Linux: `./setup.sh`.) Setup checks the PC, asks which model, how much context and whether the model should read
+images, installs this fork's engine and starts the model on http://127.0.0.1:8080 (OpenAI and Anthropic APIs, a
+chat page). It offers:
+
+| `--family` | the model | license |
+| --- | --- | --- |
+| `huihui-nvfp4` (the default) | [huihui-ai's abliterated Qwen3.8-Flash-Next](https://huggingface.co/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated), every expert NVFP4 by GPTQ: [Maximilian228/Huihui-Qwen3.8-Flash-Next-abliterated-NVFP4-GPTQ-Strata](https://huggingface.co/Maximilian228/Huihui-Qwen3.8-Flash-Next-abliterated-NVFP4-GPTQ-Strata) | Qwen Community License 1.0 |
+| `orca-nvfp4` | [OrcaRouter's uncensored Flash-Next](https://huggingface.co/OrcaRouter/Qwen3.8-Flash-Next-Uncensored), the same quantization: [Maximilian228/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-NVFP4-GPTQ-Strata](https://huggingface.co/Maximilian228/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-NVFP4-GPTQ-Strata) | Qwen Community License 1.0 (the LICENSE OrcaRouter ships; its card says Apache 2.0) |
+| `qwen`, `swift`, `coder`, `unsloth` | upstream Strata's GGUF models: ISTA-DASLab's GSQ-RCO quants of Qwen3.8-Flash-Next, Swift 1.5, the Coder, Unsloth's ~4-bit files | as upstream lists them |
+
+- **The NVFP4 models come ready-made:** the experts pack, the dense GGUF, the FP8 n-gram table, the BF16 embedding
+  and the fine-tune's MTP draft head are downloaded from Hugging Face at a pinned revision and checked against their
+  SHA-256; nothing is converted on your PC. They need an RTX 20 card or newer with 12 GB of VRAM, 64 GB of RAM and
+  ~130 GB of disk (see [Requirements](#requirements)). Images go through ISTA-DASLab's image encoder, on the CPU.
+- **Until their files are published,** setup lists both as "not offered: not published yet" and its default stays the
+  GGUF models. A PC below their requirements gets a GGUF model as the default too; `--family huihui-nvfp4 --yes`
+  installs one anyway.
+- **The engine is always this fork's:** the ready-made one from this repository's releases (Windows), else compiled
+  from this source. Upstream's ready-made engine has no NVFP4 path, so setup never installs it, and replaces one an
+  older setup installed (one that cannot be replaced - no release engine for this card or OS yet - is kept for the
+  GGUF models, and setup says so once).
+- **AMD cards need an engine you build:** this fork publishes no AMD engine and setup does not fall back to
+  upstream's. On Linux setup compiles it, as upstream's does; on Windows build it first - `tools\hip\build_windows.bat`
+  makes `strata-windows-x64-hip.zip`, then `START-HERE.bat --backend hip --prebuilt <its dist folder>`
+  ([docs/AMD_HIP.md](docs/AMD_HIP.md)). The NVFP4 models run on NVIDIA cards only.
+- `--family orca-nvfp4` picks a model without the menu, `--dry-run` shows what setup would download, install and
+  write and changes nothing, `--check` says what fits this PC. `UPDATE.bat` (`./update.sh`) updates a clone: `git
+  pull`, then the engine of the new release. The release zip has its own `update.cmd`.
+
+Setting it all up by hand - the engine, and converting the ModelOpt checkpoint yourself - is under
+[Build it yourself](#build-it-yourself-advanced).
+
 ## How it differs from upstream Strata
 
 - **Runs an NVFP4 checkpoint** (ModelOpt, 4.5-bit experts with calibrated scales) instead of Strata's Q2/Q3 quants:
@@ -193,9 +233,12 @@ Each change was measured - first-token KL against a reference, and interleaved s
   allocations; nothing of the model is ever paged out). With Windows and the usual apps on top: **a pagefile of at
   least 32 GB with 128 GB of RAM, 64 GB with 96 GB, 48 GB with 64 GB**. Set a fixed minimum rather than relying on a
   system-managed file to grow in time. Too small, and the start fails with an allocation error.
-- **Disk:** ~200 GB for the model files: GGUF 74 GB, expert pack 70 GB, n-gram table 51 GB, image encoder 1.8 GB,
-  embedding 1.3 GB, MTP head 0.8 GB. ~340 GB while preparing them (the 135 GB checkpoint and the MTP intermediates can go afterwards).
-  Use the fastest NVMe drive you have: every start reads 63 GiB.
+- **Disk:** with setup's ready-made files ~130 GB: the expert pack ~70 GB, the n-gram table 51 GB, the dense GGUF,
+  the embedding (1.3 GB) and the MTP head (0.8 GB); setup counts the exact sizes from its file table and checks the
+  free space first. Converting the checkpoint yourself: ~200 GB for the model files (GGUF 74 GB, expert pack 70 GB,
+  n-gram table 51 GB, image encoder 1.8 GB, embedding 1.3 GB, MTP head 0.8 GB), ~340 GB while preparing them (the
+  135 GB checkpoint and the MTP intermediates can go afterwards). Use the fastest NVMe drive you have: every start
+  reads 63 GiB.
 
 ## Measured
 
@@ -228,7 +271,13 @@ tokens plus one of 32K; two runs of the same configuration differ by a median 0.
 | int8 KV without rotation (vs fp16 KV) | 0.0017 | 0.0068 | rotated: 0.0011 / 0.0038 |
 | prompt path W4A8 (vs FP16 activations) | 0.0018 | - | default; `fp16` is 24% slower |
 
-## Build (Windows)
+## Build it yourself (advanced)
+
+Setup does everything below for you ([Quick start](#quick-start)). These are the manual steps: the engine built by
+hand, and jpezzulli's ModelOpt checkpoint converted on your own PC (~340 GB of disk while preparing), for the
+ModelOpt pack or a pack of your own.
+
+### Build (Windows)
 
 Needs Visual Studio 2022 Build Tools, CUDA 13+ (sm_120 wants 13), CMake, Ninja, Python 3.11+. From an x64 Native
 Tools prompt:
@@ -244,7 +293,7 @@ cmake --build build --target strata
 Without `-DSTRATA_GGML_DIR` CMake fetches the same llama.cpp commit itself. `120` is enough: CMake builds the one
 FP4 x FP4 unit for `120a` by itself, and the rest runs on sm_121 too.
 
-## Prepare the model
+### Prepare the model
 
 ```bat
 python -m venv .venv
@@ -439,7 +488,9 @@ python release\publish.py --title "Strata NVFP4 v... - what changed" --notes not
 ```
 
 `publish.py` names this repository in every `gh` call (a clone's gh default can point at upstream) and refuses a
-zip whose `engine\BUILD.json` is not the pushed HEAD, this version and a clean tree.
+zip whose `engine\BUILD.json` is not the pushed HEAD, this version and a clean tree. It uploads two assets: the
+bundle and `strata-windows-x64.zip`, the same engine folder in the layout setup.py installs (a clone's
+`START-HERE.bat` / `UPDATE.bat` takes the engine from there, checked against GitHub's SHA-256).
 
 ## License
 
