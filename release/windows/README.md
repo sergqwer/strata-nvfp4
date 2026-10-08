@@ -58,6 +58,16 @@ Source, measurements and how it works: https://github.com/sergqwer/strata-nvfp4
 
 First start after a reboot is slower while Windows reads the files; later starts take ~8-15 s.
 
+## Updating
+
+**`update.cmd`** downloads the newest release of this fork, checks it against the SHA-256 GitHub publishes for it,
+and replaces the engine, the server and the tools. `config\`, `data\`, `models\` and the `.venv-*` folders stay;
+the replaced program is kept in `.previous\`. Close the server first. `update.cmd --check` only says whether a newer
+release is out. When a release changes a file of `config\` or `data\`, one you did not change is replaced; one you
+changed stays, and the release's goes beside it as `<name>.new`. The program is swapped by renames, each one noted
+first: if a file in use stops it half way, the old program is put back - by the next `update.cmd` if it cannot be
+right away.
+
 ## Measured (RTX 5090, Ryzen 9 9950X3D, 128 GB DDR5-5600, 262K context)
 
 | | |
