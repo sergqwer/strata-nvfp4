@@ -43,7 +43,7 @@ class FakeEngine:
         self.last = {"generated": max_new, "decode_ms": max_new / rate * 1000.0}
 
 
-BASE = ["--pack", "p", "--spec", "4", "--spec-min-p", "0.5", "--max-context", "8192"]
+BASE = ["--pack", "p", "--spec", "6", "--spec-min-p", "0.7", "--max-context", "8192"]   # the fork's defaults (3c64fb6b)
 
 
 class Calibrate(unittest.TestCase):
@@ -76,7 +76,7 @@ class Calibrate(unittest.TestCase):
         self.assertEqual(res["settings"].get("--pool-workers"), "3")
         # one start per worker count and per expert-tier candidate, plus the sweep
         self.assertEqual(len(starts), 1 + len(CAL.worker_candidates(6)) + len(CAL.ADAPT_CANDIDATES))
-        self.assertEqual(CAL.arg_value(starts[0], "--spec-min-p"), "0.5")   # measured against the product default
+        self.assertEqual(CAL.arg_value(starts[0], "--spec-min-p"), "0.7")   # measured against the product default
 
     def test_a_failed_restart_keeps_the_measurements_1337(self):
         # the top PCIe share wins by far; every later restart (the worker counts, the expert tier) fails to start
@@ -120,17 +120,17 @@ class Calibrate(unittest.TestCase):
 
     def test_old_calibration_is_the_baseline_reset(self):
         # a config tuned earlier: the measurement starts from the product defaults, not from those values
-        base = CAL.apply(BASE, {"--pcie-frac": "0.20", "--pool-workers": "3", "--spec-min-p": "0.70"})
+        base = CAL.apply(BASE, {"--pcie-frac": "0.20", "--pool-workers": "3", "--spec-min-p": "0.30"})
         _, starts = self.run_with(lambda f, p, w: 50.0, base=base)
         self.assertIsNone(CAL.arg_value(starts[0], "--pcie-frac"))
         self.assertIsNone(CAL.arg_value(starts[0], "--pool-workers"))
-        self.assertEqual(CAL.arg_value(starts[0], "--spec-min-p"), "0.5")
+        self.assertEqual(CAL.arg_value(starts[0], "--spec-min-p"), "0.7")
 
     def test_apply(self):
         a = CAL.apply(BASE, {"--pcie-frac": "0.35", "--pool-workers": "4"})
         self.assertEqual(CAL.arg_value(a, "--pcie-frac"), "0.35")
         self.assertEqual(CAL.arg_value(a, "--pool-workers"), "4")
-        self.assertEqual(CAL.arg_value(a, "--spec-min-p"), "0.5")
+        self.assertEqual(CAL.arg_value(a, "--spec-min-p"), "0.7")
         b = CAL.apply(a, {})                                # back to the defaults
         self.assertIsNone(CAL.arg_value(b, "--pcie-frac"))
         self.assertIsNone(CAL.arg_value(b, "--pool-workers"))

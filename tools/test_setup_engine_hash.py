@@ -29,8 +29,8 @@ import setup  # noqa: E402
 
 ASSET = "strata-windows-x64.zip"
 HIP_ASSET = "strata-windows-x64-hip.zip"
-TAG_BASE = "https://github.com/Niko1221/Strata/releases/download/v0.1.40/"
-LATEST_BASE = "https://github.com/Niko1221/Strata/releases/latest/download/"
+TAG_BASE = "https://github.com/sergqwer/strata-nvfp4/releases/download/v0.1.40.3-nvfp4.1/"   # this fork's releases
+LATEST_BASE = "https://github.com/sergqwer/strata-nvfp4/releases/latest/download/"
 FORK_BASE = "https://github.com/someone/Strata/releases/download/v1.0/"
 LOCAL_BASE = r"C:\my\mirror"
 
@@ -53,11 +53,12 @@ class WhereTheHashComesFrom(unittest.TestCase):
 
     def test_a_tag_url_names_its_tag(self):
         self.assertEqual(setup.release_of(TAG_BASE),
-                         ("https://api.github.com/repos/Niko1221/Strata/releases", "0.1.40"))
+                         ("https://api.github.com/repos/sergqwer/strata-nvfp4/releases", "0.1.40.3-nvfp4.1"))
 
     def test_the_latest_url_names_no_tag(self):
         self.assertEqual(setup.release_of(LATEST_BASE),
-                         ("https://api.github.com/repos/Niko1221/Strata/releases", None))
+                         ("https://api.github.com/repos/sergqwer/strata-nvfp4/releases", None))
+        self.assertEqual(LATEST_BASE, setup.PREBUILT_URL)          # setup's default: the fork's releases
 
     def test_a_fork_names_the_fork_not_this_repository(self):
         # The repository used to be hardcoded, so a fork's own tag was looked up under Niko1221/Strata,
@@ -128,15 +129,15 @@ class DigestLookup(unittest.TestCase):
         # The URL already names the release, so the API call must ask for THAT release and not "latest":
         # the tag URL is tried first (#214) so a checkout normally gets its own version's engine.
         seen = self.asked(self.release_json(
-            "v0.1.40", [{"name": ASSET, "size": 42, "digest": "sha256:" + "a" * 64}]))
+            "v0.1.40.3-nvfp4.1", [{"name": ASSET, "size": 42, "digest": "sha256:" + "a" * 64}]))
         self.assertEqual(setup.engine_digest(ASSET, TAG_BASE), (42, "a" * 64))
-        self.assertEqual(seen, ["https://api.github.com/repos/Niko1221/Strata/releases/tags/v0.1.40"])
+        self.assertEqual(seen, ["https://api.github.com/repos/sergqwer/strata-nvfp4/releases/tags/v0.1.40.3-nvfp4.1"])
 
     def test_latest_when_the_url_says_latest(self):
         seen = self.asked(self.release_json(
-            "v0.1.40.1", [{"name": ASSET, "size": 7, "digest": "sha256:" + "b" * 64}]))
+            "v0.1.40.3-nvfp4.1", [{"name": ASSET, "size": 7, "digest": "sha256:" + "b" * 64}]))
         setup.engine_digest(ASSET, LATEST_BASE)
-        self.assertEqual(seen, ["https://api.github.com/repos/Niko1221/Strata/releases/latest"])
+        self.assertEqual(seen, ["https://api.github.com/repos/sergqwer/strata-nvfp4/releases/latest"])
 
     def test_asks_the_fork_for_a_fork_url(self):
         seen = self.asked(self.release_json(
@@ -295,6 +296,11 @@ class WhatARefusalDoesToTheCaller(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         (Path(self.tmp.name) / "engine").mkdir(parents=True, exist_ok=True)
+        # the engine folder in the temp dir, and the release's HEAD answered here: no network, nothing in the checkout
+        for p in (mock.patch.object(setup, "ROOT", Path(self.tmp.name)),
+                  mock.patch.object(setup.urllib.request, "urlopen", lambda req, timeout=None: io.BytesIO())):
+            p.start()
+            self.addCleanup(p.stop)
 
     def fake_download(self, url, dst, what=None):
         with zipfile.ZipFile(dst, "w") as z:

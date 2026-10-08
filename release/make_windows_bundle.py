@@ -9,8 +9,13 @@
    ninja dry runs that both are current - a bundle once shipped the previous release's engine.
 3. Assembles dist/strata-nvfp4: that engine, cuBLAS from %CUDA_PATH%, the part of llama.cpp the converter imports,
    and the bundle's own files (README, scripts, config) from release/windows/.
+   release-manifest.json lists every file's SHA-256 and, for config/ and data/, every version git has of their
+   source: update.cmd (tools/bundle_update.py) replaces a file still as a release shipped it, never one the user changed.
 4. Zips it to dist/strata-nvfp4-v<VERSION>-windows-x64.zip and writes its SHA-256 beside it.
-Publish with release/publish.py.
+5. Writes setup.py's asset from the same engine folder: dist/strata-windows-x64.zip, its files at the top level
+   (strata.exe, strata-vision.exe, the cuBLAS DLLs, BUILD.json with "cuda_libs": "bundled"), the layout get_prebuilt
+   unpacks into engine/ - so a clone's START-HERE / UPDATE.bat installs this fork's engine, never upstream's.
+Publish both with release/publish.py.
 """
 import hashlib
 import json
@@ -26,8 +31,9 @@ OUT = REPO / "dist" / "strata-nvfp4"
 CUDA = pathlib.Path(os.environ["CUDA_PATH"])
 CUDA_BIN = CUDA / "bin" / "x64" if (CUDA / "bin" / "x64" / "cublas64_13.dll").exists() else CUDA / "bin"
 LLAMA = REPO / "third_party" / "llama.cpp"
-VERSION = "0.1.40.3-nvfp4.1"
+VERSION = "0.1.41-nvfp4.1"
 ZIP = REPO / "dist" / ("strata-nvfp4-v%s-windows-x64.zip" % VERSION)
+SETUP_ZIP = REPO / "dist" / "strata-windows-x64.zip"   # setup.py's PREBUILT_ASSET
 ENGINE = REPO / "build-release" / "strata.exe"
 VISION = REPO / "build-vision-cpu" / "bin" / "strata-vision.exe"
 allow_dirty = "--allow-dirty" in sys.argv[1:]
@@ -74,7 +80,7 @@ for dll in ("cublas64_13.dll", "cublasLt64_13.dll"):
     "version": VERSION, "source": "release", "archs": [75, 86, 89, 120], "ptx": False, "cuda": CUDA.name.lstrip("v"),
     "vision": "cpu", "portable": True, "fork": "https://github.com/sergqwer/strata-nvfp4",
     "commit": git("rev-parse", "--short", "HEAD"), "dirty": bool(dirty),
-    "engine_sha256": hashlib.sha256(ENGINE.read_bytes()).hexdigest()}, indent=1) + "\n")
+    "engine_sha256": hashlib.sha256(ENGINE.read_bytes()).hexdigest(), "cuda_libs": "bundled"}, indent=1) + "\n")
 
 # the server (with its chat page) and the tools
 shutil.copytree(REPO / "serve", OUT / "serve", ignore=skip)
@@ -104,6 +110,21 @@ for src in (REPO / "release" / "windows").rglob("*"):
         else:
             shutil.copy2(src, dst)
 
+# release-manifest.json: what update.cmd needs to tell a file of config/ or data/ the user changed from one a release
+# shipped (the earlier versions: their source's git history, so a bundle made before the manifest is covered too)
+sys.path.insert(0, str(REPO / "tools"))
+import bundle_update  # noqa: E402
+
+earlier = {}
+for f in sorted(p for d in bundle_update.MERGE for p in (OUT / d).rglob("*") if p.is_file()):
+    rel = f.relative_to(OUT).as_posix()
+    src = "release/windows/" + rel if (REPO / "release" / "windows" / rel).is_file() else rel
+    earlier[rel] = bundle_update.git_versions(REPO, src)
+    if not earlier[rel]:
+        sys.exit("make_windows_bundle: %s has no git history (%s) - commit it first" % (rel, src))
+manifest = bundle_update.build_manifest(OUT, VERSION, earlier)
+(OUT / bundle_update.MANIFEST).write_text(json.dumps(manifest, indent=1) + "\n")
+
 files = [f for f in OUT.rglob("*") if f.is_file()]
 print("assembled %s: %d files, %.1f MB" % (OUT, len(files), sum(f.stat().st_size for f in files) / 1e6))
 
@@ -123,3 +144,16 @@ with open(ZIP, "rb") as f:
         h.update(block)
 (ZIP.parent / (ZIP.name + ".sha256")).write_text(h.hexdigest() + "  " + ZIP.name + "\n")
 print("zipped %s: %.1f MB, SHA-256 %s" % (ZIP, ZIP.stat().st_size / 1e6, h.hexdigest()))
+
+# 5. setup.py's asset: the same engine folder, its files at the top level (get_prebuilt's layout)
+if SETUP_ZIP.exists():
+    SETUP_ZIP.unlink()
+with zipfile.ZipFile(SETUP_ZIP, "w", zipfile.ZIP_DEFLATED, compresslevel=7) as z:
+    for f in sorted((OUT / "engine").iterdir()):
+        z.write(f, f.name)
+h = hashlib.sha256()
+with open(SETUP_ZIP, "rb") as f:
+    for block in iter(lambda: f.read(1 << 24), b""):
+        h.update(block)
+(SETUP_ZIP.parent / (SETUP_ZIP.name + ".sha256")).write_text(h.hexdigest() + "  " + SETUP_ZIP.name + "\n")
+print("zipped %s (setup.py's engine): %.1f MB, SHA-256 %s" % (SETUP_ZIP, SETUP_ZIP.stat().st_size / 1e6, h.hexdigest()))
