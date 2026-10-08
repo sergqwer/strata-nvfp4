@@ -302,8 +302,8 @@ uint64_t qsa_kv_elastic_mapped_bytes();
 uint64_t qsa_kv_elastic_full_bytes();
 int64_t qsa_kv_resident();
 /// The fewest resident cells a streamed layer may have: one verify window's selections (8 queries x 2,051 cells
-/// in whole blocks) must fit at once, with room to spare - ten budgets, 20,480 cells at the default 2,048 (and
-/// 40,960 at --qsa-top-k 4096).
+/// in whole blocks) must fit at once, with room to spare: ten selection budgets and at least 20,480 cells (20,480
+/// at the default 2,048, 40,960 at --qsa-top-k 4096).
 int64_t qsa_kv_resident_min();
 /// Pinned host bytes the streamed states hold (their host copies).
 uint64_t qsa_kv_host_bytes();

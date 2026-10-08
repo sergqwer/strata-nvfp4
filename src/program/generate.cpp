@@ -672,7 +672,7 @@ void usage() {
                  "  --kv-resident N      KV streaming: keep N cells of each QSA layer in VRAM (min 20480) and the\n"
                  "                       whole K/V in pinned RAM; the freed VRAM goes to expert slots. 0 (default):\n"
                  "                       all of it in VRAM. A context of N cells or fewer is not streamed. The\n"
-                 "                       minimum is ten --qsa-top-k budgets (20480 at the model's 2048)\n"
+                 "                       minimum grows with --qsa-top-k: ten budgets (40960 at 4096)\n"
                  "  --qsa-top-k N        the cells each full-attention (QSA) layer's query reads, picked by its\n"
                  "                       indexer: a multiple of 4 in 256..16384 (default: the model's 2048;\n"
                  "                       STRATA_QSA_TOP_K=N also). A larger budget reads more of a long context per\n"
