@@ -75,7 +75,23 @@ upstream's; the original README is kept as [README.upstream.md](README.upstream.
   - The result is 73.8 GiB of experts instead of 63.3 GiB. Against an all-Q8_0 reference, the answers' KL is half of the ModelOpt pack's, about 2.6x less once run-to-run noise is taken out, for 12-15% of the decode speed.
   - GPTQ alone, without the 8-bit layers, is 1.7x closer at no speed cost.
   - docs/NVFP4.md, "Re-quantized from BF16", has the method and every measurement.
-- **On upstream Strata 0.1.40.2.** Since 0.1.40.1 upstream added:
+- **On upstream Strata 0.1.40.3.** Since 0.1.40.2 upstream changed, of what runs on an NVIDIA card:
+  - the MTP drafter calls the native top-10 router only for the 512-expert, top-10 router it was written for, as
+    the main layers already did (a model with fewer experts read past each row, #1357; this model is one, so the
+    same bits here);
+  - the tokenizer's BPE merge loop reads its rank table once per word instead of once per symbol pair (#1385), and
+    the web page sends a turn with no answer text back in the history, so the turns keep alternating (#1392);
+  - an automatic expert cache keeps 2,560 MiB free on Windows (#1376), for AMD cards only: CUDA keeps its own
+    sizing, so the cache here is as large as before. The verify window's interleaved q8_1 copy was made opt-in and
+    then reverted, so it stays on.
+
+  The rest is AMD and Intel: setup, the bundled HIP runtime's DLLs and why one did not load (#461), the Arc
+  A-series, Docker. Every commit of the fork is carried; the card check, which the fork runs before the arena
+  thread starts, takes upstream's new HIP runtime probe. With the CPU and PCIe shares fixed, the logits and tokens
+  are identical to the fork's head before the port on both packs; with the fork's own defaults off they equal
+  upstream 0.1.40.3's byte for byte on IQ2_XS.
+
+- **0.1.40.2-nvfp4.1:** on upstream 0.1.40.2, which added:
   - this fork's CPU share of small prompt chunks (`STRATA_PREFILL_CPU_SHARE=auto`, opt-in there), with the CPU's
     thread kept off the expert source (its blobs are taken on the prompt thread);
   - routed expert uploads that overlap the shared expert (#789), and an interleaved q8_1 copy for the verify
