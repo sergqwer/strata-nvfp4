@@ -2,7 +2,7 @@
 
 **Qwen3.8-Flash-Next (125B hybrid MoE) with NVFP4 experts on one RTX 20, 30, 40 or 50 card (12 GB of VRAM or more)
 and 64 GB of RAM or more, text and pictures.** A fork of [Niko1221/Strata](https://github.com/Niko1221/Strata), on
-upstream 0.1.41. Setup installs our GPTQ NVFP4 quants of two abliterated Flash-Next fine-tunes, ready-made from
+upstream 0.1.41. Setup installs our GPTQ NVFP4 quant of OrcaRouter's abliterated Flash-Next, ready-made from
 Hugging Face; upstream's GGUF models are still offered.
 
 The design is upstream's: the routed experts live in RAM, the most-used ones are cached in VRAM, the misses are
@@ -24,22 +24,27 @@ page).
 
 | `--family` | the model | license |
 | --- | --- | --- |
-| `huihui-nvfp4` (the default) | [huihui-ai's abliterated Qwen3.8-Flash-Next](https://huggingface.co/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated), every expert NVFP4 by GPTQ: [Maximilian228/Huihui-Qwen3.8-Flash-Next-abliterated-NVFP4-GPTQ-Strata](https://huggingface.co/Maximilian228/Huihui-Qwen3.8-Flash-Next-abliterated-NVFP4-GPTQ-Strata) | Qwen Community License 1.0 |
-| `orca-nvfp4` | [OrcaRouter's uncensored Flash-Next](https://huggingface.co/OrcaRouter/Qwen3.8-Flash-Next-Uncensored), the same quantization: [Maximilian228/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-NVFP4-GPTQ-Strata](https://huggingface.co/Maximilian228/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-NVFP4-GPTQ-Strata) | Qwen Community License 1.0 (the LICENSE OrcaRouter ships; its card says Apache 2.0) |
+| `orca-nvfp4` (the default) | [OrcaRouter's uncensored Qwen3.8-Flash-Next](https://huggingface.co/OrcaRouter/Qwen3.8-Flash-Next-Uncensored), every expert NVFP4 by GPTQ: [Maximilian228/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-NVFP4-GPTQ-Strata](https://huggingface.co/Maximilian228/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-NVFP4-GPTQ-Strata) | Qwen Community License 1.0 (the LICENSE OrcaRouter ships; its card says Apache 2.0) |
 | `qwen`, `swift`, `coder`, `unsloth` | upstream Strata's GGUF models: ISTA-DASLab's GSQ-RCO quants of Qwen3.8-Flash-Next, Swift 1.5 and the Coder, Unsloth's ~4-bit files | as upstream lists them |
 
-- **The NVFP4 models come ready-made:** the expert pack, the dense GGUF, the FP8 n-gram table, the BF16 embedding
+- **The NVFP4 model comes ready-made:** the expert pack, the dense GGUF, the FP8 n-gram table, the BF16 embedding
   and the fine-tune's own MTP draft head are downloaded at a pinned revision and checked against their SHA-256;
   nothing is converted on your PC. Every routed expert is NVFP4, re-quantized from the BF16 checkpoint by GPTQ: as
   large and as fast as plain rounding to the nearest value (ModelOpt's NVFP4), with about 33% of its error
-  ([Re-quantized from BF16](docs/NVFP4.md#re-quantized-from-bf16-2026-10-02-release-0132-nvfp42), and each model
+  ([Re-quantized from BF16](docs/NVFP4.md#re-quantized-from-bf16-2026-10-02-release-0132-nvfp42), and its model
   card).
-- **`huihui-nvfp4` is the default** where the PC meets the [requirements](#requirements); a PC below them gets a GGUF
-  model as the default, and `--family huihui-nvfp4 --yes` installs it anyway.
+- **`orca-nvfp4` is the default** where the PC meets the [requirements](#requirements); a PC below them gets a GGUF
+  model as the default, and `--family orca-nvfp4 --yes` installs it anyway.
+- **`huihui-nvfp4` was withdrawn in 0.1.41-nvfp4.3: it often loops in long thinking.** A real Claude Code request
+  (a 72K-token prompt, adaptive thinking at effort xhigh), replayed greedy, looped in its thinking in 9 of 10 runs, on
+  this engine and on 0.1.40.3's, and in 2 of 5 with Qwen's sampling; `orca-nvfp4` (the GPTQ pack setup installs)
+  and our Q8_0-down orca pack looped in none of 5 each. So it is the model, not the engine. An install of
+  `huihui-nvfp4` keeps working and nothing of it is deleted; setup says so on each run and names
+  `--family orca-nvfp4` (which links the PLE table it shares instead of downloading it again).
 - **The engine is always this fork's:** on Windows the ready-made one from this repository's releases
   (`strata-windows-x64.zip`, checked against GitHub's SHA-256), on Linux compiled from this source. Upstream's engine
   has no NVFP4 path, so setup never installs it and replaces one an older setup installed.
-- **AMD cards:** the NVFP4 models run on NVIDIA cards only, and this fork publishes no AMD engine. For the GGUF models
+- **AMD cards:** the NVFP4 model runs on NVIDIA cards only, and this fork publishes no AMD engine. For the GGUF models
   setup compiles one on Linux; on Windows build it first with `tools\hip\build_windows.bat`, then run
   `START-HERE.bat --backend hip --prebuilt <its dist folder>` ([docs/AMD_HIP.md](docs/AMD_HIP.md)).
 - **Options:** `--family orca-nvfp4` picks a model without the menu, `--check` says what fits this PC, `--dry-run`
@@ -97,8 +102,9 @@ page).
 
 ## Speed
 
-RTX 5090 (32 GB, PCIe 5 x16), Ryzen 9 9950X3D, DDR5-5600, Samsung 9100 PRO, Windows 11. `huihui-nvfp4` with the
-arguments setup writes (262K context, int8 K/V, images on). The card also drives the desktop, so runs vary by a few
+RTX 5090 (32 GB, PCIe 5 x16), Ryzen 9 9950X3D, DDR5-5600, Samsung 9100 PRO, Windows 11. Measured with `huihui-nvfp4`
+(withdrawn since; `orca-nvfp4` has the same format and size) and the arguments setup writes (262K context, int8 K/V,
+images on). The card also drives the desktop, so runs vary by a few
 percent.
 
 | | 128 GB | 96 GB (emulated) | the low-RAM mode, 88 GiB free |
@@ -157,9 +163,9 @@ Each change was measured (first-token KL against a reference, interleaved speed 
 ## Run
 
 Setup writes `strata-<family>.json` (the server's config: the engine and its arguments) and `run-<family>.bat`
-(`.sh`) next to `setup.py`. `START-HERE.bat` starts the installed model again without questions; `run-huihui-nvfp4.bat`
+(`.sh`) next to `setup.py`. `START-HERE.bat` starts the installed model again without questions; `run-orca-nvfp4.bat`
 starts the server with that config without setup's checks (`serve/server.py --engine strata --config
-strata-huihui-nvfp4.json --port 8080`). A key or an `"env"` entry you add to the config stays when setup runs again;
+strata-orca-nvfp4.json --port 8080`). A key or an `"env"` entry you add to the config stays when setup runs again;
 engine flags added to its `"args"` by hand do not.
 
 **Images:** answer yes to setup's question (or `--vision yes`). The image encoder runs on the CPU while the engine
@@ -276,7 +282,7 @@ the end of those lines ([Upstream 0.1.41](docs/NVFP4.md#upstream-0141-2026-10-08
   VRAM, 64 and 96 GB of RAM and smaller CPUs were tested on that PC through their own code paths and budgets
   (`STRATA_EMULATE_CC`, `--vram-reserve-mib`, a RAM ballast, `STRATA_FORCE_AVX2=1`, `--pool-workers`), not on the
   real hardware.
-- The NVFP4 models run on one GPU: the low-RAM mode and the growing K/V are one-GPU.
+- The NVFP4 model runs on one GPU: the low-RAM mode and the growing K/V are one-GPU.
 - The low-RAM mode's unbuffered reads are Windows-only; elsewhere it reads through the page cache.
 - Decode is bound by host RAM bandwidth: the CPU pool and the PCIe share read the same DDR5 (~84 of ~90 GB/s here).
   More VRAM for the expert cache or faster RAM is what moves it
