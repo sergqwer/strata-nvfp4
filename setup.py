@@ -438,14 +438,146 @@ def ram_gb():
     return 0.0
 
 
-def page_file_gb():
-    """The page file's current size (GB) on Windows, None elsewhere.  The graphics card's memory needs room there
-    too: under Windows' driver model every allocation on the card is also charged to the commit (RAM + page file),
-    so with the page file off or tiny the engine cannot use the free VRAM (issue #60)."""
+PAGE_FILE_SHORT = None        # page_file_warning()'s summary line once the PC was checked (--check, the install)
+PAGE_FILE_WARN_MB = 60000     # the engine's kPageFileWarnMb (memory.hpp): below it in all, both warn
+PAGE_FILE_ADVISE_MB = 64000   # what both advise: "64 GB" as the Virtual memory dialog takes it (its MB are MiB)
+_MM_KEY = r"SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"
+
+
+def _mm_multi_sz(name):
+    """A REG_MULTI_SZ value of Memory Management (PagingFiles is what the Virtual memory dialog writes), None when it
+    cannot be read."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _MM_KEY) as k:
+            v, _t = winreg.QueryValueEx(k, name)
+    except (ImportError, OSError):
+        return None
+    return [x for x in v if x] if isinstance(v, list) else None
+
+
+def parse_paging_file(line: str):
+    """One PagingFiles entry ("C:\\pagefile.sys 16000 64000", "C:\\pagefile.sys 0 0", "?:\\pagefile.sys"): (drive,
+    initial MB, maximum MB), the sizes -1 when Windows manages them, '?' = every drive automatic; None for no entry.
+    The engine's parse_paging_file (memory.hpp) is the same."""
+    s = line.strip()
+    if len(s) < 2 or s[1] != ":":
+        return None
+    parts = s.split()
+    try:
+        initial, maximum = (int(parts[1]), int(parts[2])) if len(parts) >= 3 else (-1, -1)
+    except ValueError:
+        initial, maximum = -1, -1
+    if maximum <= 0:
+        initial, maximum = -1, -1
+    return s[0].upper(), initial, maximum
+
+
+def page_file_allowed_mb(initial: int, maximum: int, ram_mb: float, volume_mb: float, free_mb: float,
+                         current_mb: float) -> int:
+    """What one page file can reach (MB): a set size its maximum; a system-managed one Windows' documented maximum,
+    3 x RAM (at least 4096) but at most an eighth of its volume; either way no more than the file is now plus the
+    volume's free space.  The engine's page_file_allowed_mb (memory.hpp) is the same."""
+    if maximum > 0:
+        want = max(initial, maximum)
+    else:
+        want = max(3 * int(ram_mb), 4096)
+        if volume_mb > 0:
+            want = min(want, int(volume_mb) // 8)
+    return int(min(want, int(current_mb) + int(free_mb)))
+
+
+def _volume_mb(drive: str):
+    """(volume MB, free MB, the page file's size now in MB) of a drive, None when it cannot be read.  The page file
+    is locked: its size comes from the directory entry."""
+    root = f"{drive}:\\"
+    try:
+        du = shutil.disk_usage(root)
+    except OSError:
+        return None
+    current = 0
+    try:
+        with os.scandir(root) as it:
+            for e in it:
+                if e.name.lower() == "pagefile.sys":
+                    current = e.stat(follow_symlinks=False).st_size
+                    break
+    except OSError:
+        pass
+    return du.total / 2**20, du.free / 2**20, current / 2**20
+
+
+def page_files():
+    """(MB in all, detail) of the page files Windows is set to use (PagingFiles), each counted by
+    page_file_allowed_mb; None off Windows or when the setting cannot be read.  The engine reads the same."""
     if not WIN:
         return None
-    m = _memory_status()
-    return max(0.0, (m.ullTotalPageFile - m.ullTotalPhys) / 2**30)
+    lines = _mm_multi_sz("PagingFiles")
+    if lines is None:
+        return None
+    auto = []                                          # "?:\pagefile.sys": where Windows keeps it now, else C:
+    for s in _mm_multi_sz("ExistingPageFiles") or []:
+        i = s.find(":")
+        if i > 0:
+            auto.append(s[i - 1].upper())
+    auto = auto or [(os.environ.get("SystemDrive") or "C:")[0].upper()]
+    ram_mb = ram_gb() * 1024
+    total, parts = 0, []
+    for line in lines:
+        e = parse_paging_file(line)
+        if e is None:
+            continue
+        drive, initial, maximum = e
+        for d in (auto if drive == "?" else [drive]):
+            vol = _volume_mb(d)
+            mb = page_file_allowed_mb(initial, maximum, ram_mb, *vol) if vol else max(maximum, 0)
+            total += mb
+            if maximum > 0:
+                part = f"{d}: {maximum} MB" if initial == maximum else f"{d}: {initial}-{maximum} MB"
+                part += f" (only {mb} fit the free disk)" if mb < maximum else ""
+            else:
+                part = f"{d}: system-managed, now {int(vol[2]) if vol else 0} MB, can grow to {mb}"
+            parts.append(part)
+    return total, ", ".join(parts) or "no page file"
+
+
+def page_file_gb():
+    """The page files' size in all (GiB, as page_files counts them) on Windows, None elsewhere (strata_mcp's report)."""
+    pf = page_files()
+    return None if pf is None else pf[0] / 1024
+
+
+def page_file_warning():
+    """(the highlighted warning, its one-line summary) when Windows' page files are below PAGE_FILE_WARN_MB in all,
+    else None.  A warning only, never a stop.  Why: the commit limit is RAM + page file, and under Windows' driver
+    model the card's allocations are charged to it too (issue #60).  When it runs out the engine opens a smaller expert
+    cache (a quarter less a try) and an expert arena that cannot be committed stops the start."""
+    pf = page_files()
+    if pf is None or pf[0] >= PAGE_FILE_WARN_MB:
+        return None
+    mb, detail = pf
+    long = (f"WARNING: the page file is too small - INCREASE it to {PAGE_FILE_ADVISE_MB} MB (64 GB). Windows' page "
+            f"file is {mb} MB in all ({detail}). Windows lets all programs together commit only RAM + page file, and "
+            "the engine commits ~100 GiB with the NVFP4 models (~80 in the low-RAM mode): the experts in RAM plus "
+            "~30 GiB that WDDM charges for the VRAM it uses. With a page file below "
+            f"{PAGE_FILE_WARN_MB} MB the model can run significantly slower (the engine makes its expert cache in "
+            "VRAM smaller when the commit runs out) or, at worst, not start at all. To increase it: System Properties "
+            "(Win+R, sysdm.cpl) > Advanced > Performance: Settings > Advanced > Virtual memory: Change, untick "
+            "\"Automatically manage\", choose the drive, Custom size: initial and maximum "
+            f"{PAGE_FILE_ADVISE_MB} MB, Set, OK, then restart Windows.")
+    short = (f"WARNING: the page file is too small ({mb} MB): INCREASE it to {PAGE_FILE_ADVISE_MB} MB, or the model "
+             "can run significantly slower or not start (see above)")
+    return long, short
+
+
+def alert(msg):
+    """A warning that must not be missed: framed by lines of '!'."""
+    bar = "  " + "!" * 100
+    say()
+    say(bar)
+    for line in textwrap.wrap(msg, 100, initial_indent="  [!]  ", subsequent_indent="       "):
+        say(line)
+    say(bar)
 
 
 def cpu_cores():
@@ -4835,7 +4967,9 @@ NVFP4_DEFAULT = "huihui-nvfp4"         # this fork's recommended model, where th
 NVFP4_MIN_ARCH = 75                    # RTX 20 and newer (docs/NVFP4.md, "Other GPUs")
 NVFP4_MIN_VRAM_GB = 11.5               # a 12 GB card (nvidia-smi lists ~11.99); an 8 GB one has no room for the cache
 NVFP4_MIN_RAM_GB = 60                  # a 64 GB PC (63.7 listed), the README's floor
-NVFP4_ALL_RAM_GB = 96                  # from here every expert stays in RAM; below, the engine's own low-RAM mode
+NVFP4_ALL_RAM_GB = 92                  # the engine's rule (memory.hpp kLowRamBelowGib, the same ullTotalPhys GiB as
+                                       # ram_gb()): from here every expert stays in RAM - a 96 GB PC lists 93.4-95.6 -
+                                       # below it the engine's own low-RAM mode (a 64 GB PC)
 NVFP4_CONTEXTS = ((28, 262144), (20, 131072), (14, 65536), (0, 32768))   # VRAM -> context, the README's table
 NVFP4_VISION_TOKENS = 1024             # the tray's: the encoder runs on the CPU
 
@@ -4904,6 +5038,12 @@ def nvfp4_short(gpu, ram) -> str | None:
     return None
 
 
+def engine_low_ram(ram: float) -> bool:
+    """Does the engine start the NVFP4 models in its low-RAM mode by itself on this PC (no --low-ram flag): below
+    NVFP4_ALL_RAM_GB GiB installed, as generate.cpp decides (platform::low_ram_auto)."""
+    return 0 < ram < NVFP4_ALL_RAM_GB
+
+
 def nvfp4_verdict(family: str, gpu, hip: bool, ram: float, cuda_tk: int = 13) -> str:
     """--check's line for an NVFP4 family."""
     why = nvfp4_offer(family, gpu, hip, cuda_tk)
@@ -4913,9 +5053,9 @@ def nvfp4_verdict(family: str, gpu, hip: bool, ram: float, cuda_tk: int = 13) ->
     short = nvfp4_short(gpu, ram)
     if short:
         return f"does not fit: it {short}"
-    if ram < NVFP4_ALL_RAM_GB:
-        return (f"fits in the engine's low-RAM mode (of its {gib:.0f} GiB of experts the ones outside VRAM stay in RAM "
-                "as far as it holds them, the rest are read from the SSD)")
+    if engine_low_ram(ram):
+        return (f"fits in the engine's low-RAM mode (below {NVFP4_ALL_RAM_GB} GiB: of its {gib:.0f} GiB of experts "
+                "the ones outside VRAM stay in RAM as far as it holds them, the rest are read from the SSD)")
     return f"fits (all {gib:.0f} GiB of experts in RAM)"
 
 
@@ -5147,22 +5287,17 @@ def nvfp4_install(a, family: str, gpu: dict, multi: list, cuda_tk: int, ram: flo
              "mmap": ["--mmap-experts"]}.get(a.low_ram, [])
     if a.resident_budget_gib is not None:
         extra = [x for x in extra if x != "--low-ram"] + ["--ram-budget", f"{a.resident_budget_gib:g}"]
-    if a.low_ram == "off" or (ram >= NVFP4_ALL_RAM_GB and not extra):
-        ok(f"RAM: {ram:.0f} GB - all {gib:.0f} GiB of experts are loaded into RAM"
-           + (" (--low-ram off)" if a.low_ram == "off" else ""))
-        if a.low_ram == "off" and ram < NVFP4_ALL_RAM_GB:
+    if a.low_ram == "off" or (not engine_low_ram(ram) and not extra):
+        ok(f"RAM: {ram:.1f} GiB - all {gib:.0f} GiB of experts are loaded into RAM"
+           + (" (--low-ram off)" if a.low_ram == "off" else f" (the engine's low-RAM mode is for below "
+                                                             f"{NVFP4_ALL_RAM_GB} GiB)"))
+        if a.low_ram == "off" and engine_low_ram(ram):
             warn(f"--low-ram off with {ram:.0f} GB of RAM: every expert pinned in RAM may not fit, and the start can fail")
     else:
-        ok(f"RAM: {ram:.0f} GB - the engine's low-RAM mode" + (f" ({' '.join(extra)})" if extra else
-                                                               " (on by itself below 96 GB)")
+        ok(f"RAM: {ram:.1f} GiB - the engine's low-RAM mode" + (f" ({' '.join(extra)})" if extra else
+                                                                f" (on by itself below {NVFP4_ALL_RAM_GB} GiB)")
            + f": the experts the GPU does not hold, hottest first, stay in RAM (up to the free RAM less 6 GiB), the "
              f"rest of the {gib:.0f} GiB are read from experts.bin on the SSD when needed")
-    pf = page_file_gb()
-    want_pf = 32 if ram >= 120 else 64 if ram >= 90 else 48
-    if WIN and pf is not None and pf < want_pf:
-        warn(f"Windows' page file is {pf:.0f} GB: with {ram:.0f} GB of RAM the engine's commit needs ~{want_pf} GB of "
-             "page file or the start fails with an allocation error (nothing of the model is paged out). System > "
-             "About > Advanced system settings > Performance > Advanced > Virtual memory: a fixed initial size")
     if a.gguf_dir:
         warn("--gguf-dir is for the GGUF models: not used")
     if (a.experimental_speed_projection or "off").strip().lower() not in ("off", "no", "n", "0", ""):
@@ -5266,6 +5401,8 @@ def nvfp4_install(a, family: str, gpu: dict, multi: list, cuda_tk: int, ram: flo
                 line = []
             line.append(x)
         say("           " + " ".join(line))
+        if PAGE_FILE_SHORT:
+            say(f"  [!]  {PAGE_FILE_SHORT}")
         return 0
     if free_gb(models_dir) < need:
         fail(f"not enough free disk space in {models_dir}: need ~{need:.0f} GB", "use --models-dir on a bigger drive")
@@ -5353,6 +5490,8 @@ def nvfp4_install(a, family: str, gpu: dict, multi: list, cuda_tk: int, ram: flo
     say(f"  API (Anthropic):  http://127.0.0.1:{port}/v1/messages")
     say(f"  Next time:        just run {'START-HERE.bat' if WIN else './setup.sh'} (or {script.name}) - it starts right away")
     say("  The model is an abliterated fine-tune: it does not refuse. What it is used for is on whoever runs it.")
+    if PAGE_FILE_SHORT:                                # step 1's framed warning, repeated
+        say(f"  [!]  {PAGE_FILE_SHORT}")
     if a.no_start:
         return 0
     return start(cfg_path, port)
@@ -5721,11 +5860,11 @@ def main() -> int:
     ram_msg = (f"RAM: {ram:.0f} GB" if ram >= need - 4 else f"RAM: {ram:.0f} GB (less than the {need} GB the smallest model needs)"
                + ("; the GPU's VRAM makes up for it (the low-RAM mode)" if ram < need - 4 and low_ok else ""))
     (ok if ram >= need - 4 or low_ok else warn)(ram_msg)       # #977: a RAM below every model's floor is not [ok]
-    pf = page_file_gb()
-    if pf is not None and pf < 4:
-        warn(f"Windows' page file is {pf:.1f} GB: the graphics card's memory needs room there too (issue #60), so "
-             "the model may not start or may use less VRAM. Set it to \"System managed\": System > About > "
-             "Advanced system settings > Performance > Advanced > Virtual memory")
+    global PAGE_FILE_SHORT
+    pfw = page_file_warning()                          # issue #60, ram88: framed here, repeated in the summary
+    PAGE_FILE_SHORT = pfw[1] if pfw else None
+    if pfw:
+        alert(pfw[0])
     ok(f"CPU: {cpu} ({'AVX-512' if avx512 else 'AVX2' if avx2 else 'no AVX2'})")
     link = None if hip else pcie_link(int(gpu.get("index", 0)))
     if link is not None:
@@ -5774,8 +5913,12 @@ def main() -> int:
             # reports: --model NAME --yes still installs one anyway.
             say(f"\nThis PC cannot run Strata yet: no model size fits {ram:.0f} GB of RAM (the smallest needs about "
                 f"{need} GB). --model NAME --yes installs one anyway, slowly.")
+            if PAGE_FILE_SHORT:
+                say(f"  [!]  {PAGE_FILE_SHORT}")
             return 1
         say("\nThis PC can run Strata. Run it again without --check to install.")
+        if PAGE_FILE_SHORT:
+            say(f"  [!]  {PAGE_FILE_SHORT}")
         return 0
 
     # ---- 2. the questions
@@ -6399,6 +6542,8 @@ def main() -> int:
     if tuned is False:                                 # #447: a failed tuning is repeated here, not only above
         say("  Tuning:           FAILED (the reason is above): the default settings stay - "
             f"{'START-HERE.bat' if WIN else './setup.sh'} --calibrate tries again")
+    if PAGE_FILE_SHORT:                                # step 1's framed warning, repeated
+        say(f"  [!]  {PAGE_FILE_SHORT}")
     if a.no_start:
         return 0
     return start(cfg_path, port)
