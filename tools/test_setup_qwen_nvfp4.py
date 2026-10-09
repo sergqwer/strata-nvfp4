@@ -1,7 +1,7 @@
 """The original, censored Qwen in this fork's NVFP4 format: qwen-nvidia-nvfp4 (NVIDIA's ModelOpt NVFP4 checkpoint
-converted) and qwen-nvfp4-gptq (every expert NVFP4 by GPTQ).  NVIDIA's is uploaded and offered, the GPTQ one is a
-placeholder until its upload; with filled tables the menu lists them after the uncensored model and says which are
-censored, and an install names its config, served model, files and license.  tools/test_setup_nvfp4.py's harness (setup.main() on mocked PCs).
+converted) and qwen-nvfp4-gptq (every expert NVFP4 by GPTQ), both uploaded and offered: the menu lists them after the
+uncensored model and says which are censored, an install names its config, served model, files and license, and the
+files the two repositories share are downloaded once.  tools/test_setup_nvfp4.py's harness (setup.main() on mocked PCs).
 
     python -m unittest tools.test_setup_qwen_nvfp4
 """
@@ -38,42 +38,66 @@ class Names(unittest.TestCase):
 
 
 class AsCommitted(unittest.TestCase):
-    """NVIDIA's is uploaded (its table pinned); the GPTQ one is a placeholder until its upload."""
-    def test_nvidia_s_is_offered_the_gptq_one_not_yet(self):
-        files, why = setup.nvfp4_files("qwen-nvidia-nvfp4")
-        self.assertIsNone(why)
-        self.assertEqual({f[2] for f in files}, {"cca8f7fee5ce0af932097340a75e06df25c4e57d"})
-        self.assertEqual({f[1] for f in files}, {QNV})
-        self.assertEqual(round(setup.nvfp4_experts_gib(files), 2), 63.28)
-        files, why = setup.nvfp4_files("qwen-nvfp4-gptq")
-        self.assertEqual(files, [])
-        self.assertIn("its pack files are not on Hugging Face yet", why)
+    """Both uploaded, their tables pinned (2026-10-09)."""
+    REV = {"qwen-nvidia-nvfp4": "cca8f7fee5ce0af932097340a75e06df25c4e57d",
+           "qwen-nvfp4-gptq": "640a1db97446ddd5e89d2b70ecd0297987192c93"}
+
+    def test_both_are_offered(self):
+        for f, (repo, *_r) in QWEN.items():
+            files, why = setup.nvfp4_files(f)
+            self.assertIsNone(why)
+            self.assertEqual({x[2] for x in files}, {self.REV[f]})
+            self.assertEqual({x[1] for x in files}, {repo})
+            self.assertEqual(round(setup.nvfp4_experts_gib(files), 2), 63.28)
+
+    def test_the_shared_files_are_one_file(self):
+        """The PLE table (Qwen-FP8's), the embedding and the MTP head: the same SHA-256 in both; only the experts, the
+        dense GGUF and the pack's dense part are each repository's own."""
+        a, b = setup.NVFP4_REPOS[QNV], setup.NVFP4_REPOS[QG]
+        for comp in ("ple", "embd", "mtp"):
+            self.assertEqual(sorted(a[comp].values()), sorted(b[comp].values()), comp)
+        self.assertNotEqual(a["pack"]["pack/experts.bin"][1], b["pack"]["pack/experts.bin"][1])
+        orca = setup.NVFP4_REPOS[setup.ORCA_REPO]["ple"]["ple-fp8.gguf"][1]
+        self.assertNotEqual(a["ple"]["ple-fp8.gguf"][1], orca)          # orca's file is another FP8 rounding
 
     def test_the_menu_with_the_committed_tables(self):
         ram, found = PROFILES["128GB-1x24GB"]
         code, out, cfg, _ = run(ram, found, ["--no-start"], repos=setup.NVFP4_REPOS, answers="")
         self.assertEqual(code, 0, out[-3000:])
         lines = menu_lines(out)
-        self.assertEqual(len(lines), 2 + len(setup.FAMILIES))
+        self.assertEqual(len(lines), 3 + len(setup.FAMILIES))
         self.assertTrue(lines[0].startswith("1) OrcaRouter"), lines)
         self.assertTrue(lines[1].startswith("2) Qwen3.8-Flash-Next (NVIDIA's NVFP4)"), lines)
-        self.assertIn("(Qwen3.8-Flash-Next (NVFP4, GPTQ): not offered, not published yet", out)
+        self.assertTrue(lines[2].startswith("3) Qwen3.8-Flash-Next (NVFP4, GPTQ)"), lines)
+        self.assertNotIn("not offered", out)
         self.assertEqual(cfg["model_name"], "orcarouter-qwen3.8-flash-next-uncensored-nvfp4")   # still the default
-        code, out, cfg, _ = run(ram, found, ["--family", "qwen-nvfp4-gptq", "--no-start"], repos=setup.NVFP4_REPOS)
-        self.assertEqual(code, 1)
-        self.assertIn("is not offered: not published yet", out)
 
-    def test_nvidia_s_install_pins_its_upload(self):
+    def test_each_install_pins_its_upload_and_links_what_the_other_has(self):
         ram, found = PROFILES["128GB-1x24GB"]
-        got = []
-        code, out, cfg, _ = run(ram, found, ["--family", "qwen-nvidia-nvfp4", "--no-start"], repos=setup.NVFP4_REPOS,
-                                downloads=got)
-        self.assertEqual(code, 0, out[-3000:])
-        rev = "cca8f7fee5ce0af932097340a75e06df25c4e57d"
-        self.assertIn(f"https://huggingface.co/{QNV}/resolve/{rev}/pack/experts.bin", got)
-        self.assertIn(f"https://huggingface.co/{QNV}/resolve/{rev}/ple-fp8.gguf", got)
-        self.assertTrue(arg(cfg, "--native").endswith("/qwen-nvidia-nvfp4-dense.gguf"))
-        self.assertTrue(arg(cfg, "--mtp").replace("\\", "/").endswith(setup.repo_dir(QNV) + "/mtp"))
+        with tempfile.TemporaryDirectory() as d:
+            got = []
+
+            def install(f):
+                got.clear()
+                return run(ram, found, ["--family", f, "--no-start", "--models-dir", d], repos=setup.NVFP4_REPOS,
+                           downloads=got)
+
+            code, out, cfg, _ = install("qwen-nvidia-nvfp4")
+            self.assertEqual(code, 0, out[-3000:])
+            rev = self.REV["qwen-nvidia-nvfp4"]
+            self.assertIn(f"https://huggingface.co/{QNV}/resolve/{rev}/pack/experts.bin", got)
+            self.assertIn(f"https://huggingface.co/{QNV}/resolve/{rev}/ple-fp8.gguf", got)
+            self.assertTrue(arg(cfg, "--native").endswith("/qwen-nvidia-nvfp4-dense.gguf"))
+            code, out, cfg, _ = install("qwen-nvfp4-gptq")
+            self.assertEqual(code, 0, out[-3000:])
+            rev = self.REV["qwen-nvfp4-gptq"]
+            self.assertIn(f"https://huggingface.co/{QG}/resolve/{rev}/pack/experts.bin", got)
+            self.assertIn(f"https://huggingface.co/{QG}/resolve/{rev}/qwen-nvfp4-gptq-dense.gguf", got)
+            for big in ("ple-fp8.gguf", "token-embd-bf16.gguf", "mtp/experts.bin", "mtp/dense.bin"):
+                self.assertNotIn(f"https://huggingface.co/{QG}/resolve/{rev}/{big}", got)   # linked, not downloaded
+                self.assertIn(f"{big}: the same file as", out)
+            self.assertTrue(all(QG in u for u in got), got)
+            self.assertIn(setup.repo_dir(QG), arg(cfg, "--ple-gguf"))
 
 
 class Published(unittest.TestCase):
