@@ -1327,3 +1327,135 @@ The low-RAM mode on an emulated 64 GB PC (a large-page ballast leaves 58 GiB ava
 The smaller cards were not measured again on this release.
 
 One measuring pitfall: right after another engine process with a 63 GiB pinned arena exits, the next start's PCIe probe can read ~17 GB/s instead of 57. The probe then cuts `--pcie-frac` to 0.17, and decode drops 3-5%. Speed A/Bs here pin `--pcie-frac 0.25` and leave 15 s between runs.
+
+## By hand: build, convert, re-quantize, run
+
+Setup installs the GPTQ packs ready-made (README, "Quick start"). These are the manual steps, moved here from the
+README: the engine built by hand, jpezzulli's ModelOpt checkpoint converted on your own PC, an experts pack
+re-quantized from BF16, and the engine and the server started without setup.
+
+### Build (Windows)
+
+Needs Visual Studio 2022 Build Tools, CUDA 13+, CMake, Ninja and Python 3.11+. From an x64 Native Tools prompt:
+
+```bat
+git clone https://github.com/ggml-org/llama.cpp third_party\llama.cpp
+git -C third_party\llama.cpp checkout 3cf03257f219afbe7334045ff7c6a06ac68c627d
+cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=ON -DSTRATA_PORTABLE=ON ^
+      -DCMAKE_CUDA_ARCHITECTURES=120 -DSTRATA_GGML_DIR=%CD%\third_party\llama.cpp
+cmake --build build --target strata
+```
+
+Without `-DSTRATA_GGML_DIR` CMake fetches the same llama.cpp commit itself (the converters below still need the
+checkout for `gguf-py`). `120` is enough for an RTX 50 card: CMake builds the one FP4 x FP4 unit for `120a` by itself,
+and the rest runs on sm_121 too. `-DSTRATA_PORTABLE=ON` builds ggml-cpu for AVX2, as the release does: a native
+ggml-cpu under MSVC computed the image encoder wrong ("Images" above); Strata's own AVX-512 kernels are chosen at run
+time either way. `release\build-release.cmd` builds the release engine (sm_75, 86, 89 and 120) into `build-release\`.
+
+### Prepare the model (the ModelOpt pack)
+
+```bat
+python -m venv .venv
+.venv\Scripts\python -m pip install numpy torch safetensors transformers sentencepiece
+set PYTHONPATH=third_party\llama.cpp\gguf-py
+
+:: 1. the checkpoint (126 GiB)
+hf download jpezzulli/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-ModelOpt-NVFP4 --local-dir models\orca-nvfp4
+
+:: 2. the n-gram (PLE) table, 51.2 GB: its FP8 bytes copied as they are (read from the SSD, never loaded into RAM)
+.venv\Scripts\python tools\ple_fp8_pack.py --model models\orca-nvfp4 --out models\ple-fp8.gguf
+
+:: 3. the token embedding, 1.3 GB: BF16 as shipped (the GGUF below stores it as Q8_0)
+.venv\Scripts\python tools\embd_bf16_pack.py --model models\orca-nvfp4 --out models\token-embd-bf16.gguf
+
+:: 4. GGUF (NVFP4 experts, Q8_0/BF16 dense) and the pack (experts.bin 63 GiB, tokenizer)
+.venv\Scripts\python tools\nvfp4_convert.py --model models\orca-nvfp4 --outfile models\orca-nvfp4.gguf
+.venv\Scripts\python tools\iq_pack.py --gguf models\orca-nvfp4.gguf --out packs\orca-nvfp4
+
+:: 5. the fine-tune's own MTP draft head
+.venv\Scripts\python tools\mtp_extract.py --model models\orca-nvfp4 --out mtp-orca
+.venv\Scripts\python tools\mtp_pack.py --src mtp-orca --experts q2_0 --out mtp-orca\mtp-q2_0.gguf
+.venv\Scripts\python tools\mtp_rt.py --gguf mtp-orca\mtp-q2_0.gguf --out mtp-orca\rt
+copy data\draft_vocab.bin mtp-orca\rt\
+```
+
+Disk: ~200 GB for the model files (GGUF 74 GB, expert pack 70 GB, n-gram table 51 GB, image encoder 1.8 GB,
+embedding 1.3 GB, MTP head 0.8 GB), ~340 GB while preparing them (the 135 GB checkpoint and the MTP intermediates can
+go afterwards). Put `packs\` and the GGUF on the fastest drive you have: the start is a 63 GiB read. The release
+bundle's `prepare-model.cmd` runs the same steps, and builds the image encoder too.
+
+### Re-quantize the experts from BF16 (GPTQ)
+
+What the Hugging Face packs hold: every expert NVFP4 by GPTQ ("Re-quantized from BF16" above has the method and the
+measurements). It needs the BF16 checkpoint (360 GB) and ~2 hours on an RTX 5090. The pack from step 4 stays the
+dense, index and tokenizer source.
+
+```bat
+hf download orcarouter/Qwen3.8-Flash-Next-Uncensored --local-dir models\orca-bf16
+:: calibration: the engine's own MoE inputs of every layer for the four token files in data\requant_calib (uk, en, code, chat)
+set STRATA_DUMP_MOE_INPUT=calib\d
+set STRATA_DUMP_MOE_LAYER=all
+build\strata.exe <the arguments below> --tokens-file data\requant_calib\calib_uk.txt --max-new 1   (and en, code, chat)
+:: errors per layer and method
+.venv\Scripts\python tools\requant.py analyze --bf16 models\orca-bf16 --calib calib\d --out calib\errors.jsonl
+:: GPTQ NVFP4 in every layer, as on Hugging Face
+echo {"default": {"gu": "nvfp4", "d": "nvfp4"}} > calib\plan_nvfp4.json
+.venv\Scripts\python tools\requant.py pack --bf16 models\orca-bf16 --calib calib\d --plan calib\plan_nvfp4.json ^
+  --method gptq --base packs\orca-nvfp4 --out packs\orca-nvfp4-gptq
+:: or Q8_0 down in the layers where it removes the most error per byte, for a size budget (here 74 GiB)
+.venv\Scripts\python tools\requant_plan.py calib\errors.jsonl calib 74
+.venv\Scripts\python tools\requant.py pack --bf16 models\orca-bf16 --calib calib\d --plan calib\plan_d8_74.json ^
+  --base packs\orca-nvfp4 --out packs\orca-nvfp4-gptq-q8d
+```
+
+Then run with `--pack packs\orca-nvfp4-gptq` (or `-gptq-q8d`); the engine reads mixed expert formats.
+
+### Run by hand
+
+One-shot (`prompt.txt` holds token ids):
+
+```bat
+build\strata.exe --pack packs\orca-nvfp4 --native models\orca-nvfp4.gguf --native-dense-gguf models\orca-nvfp4.gguf ^
+  --ple-gguf models\ple-fp8.gguf --embd-gguf models\token-embd-bf16.gguf ^
+  --mtp mtp-orca\rt --spec 6 --spec-min-p 0.7 --prefill auto ^
+  --expert-profile data\expert-profile.bin --expert-cache auto ^
+  --max-context 262144 --kv int8 --tokens-file prompt.txt --max-new 256 --stop-eos
+```
+
+`--native` and `--native-dense-gguf` both point at the GGUF: `--native` alone would take the PLE file for a second
+shard of the same model. With less VRAM lower `--max-context` (README, "Requirements").
+
+OpenAI- and Anthropic-compatible server: save the same arguments as a config (`{"exe": "build/strata.exe", "args":
+[...], "tokenizer": "packs/orca-nvfp4/tokenizer", "host": "127.0.0.1"}`) and start
+`python -m serve.server --engine strata --config that.json --port 8080` (the server reads its port from `--port`,
+default 8095, not from the config). The release bundle's `config\strata-nvfp4.json` is a complete example.
+
+**Images:** the image encoder comes from the checkpoint (`convert_hf_to_gguf.py <checkpoint> --mmproj --outtype f32`,
+1.8 GB) and is built with `release\build-vision.cmd` (CPU only). The engine takes `--vision`, the config a
+`"vision": {"exe": "build-vision-cpu/bin/strata-vision.exe", "mmproj": "models/mmproj-f32.gguf", "model":
+"models/orca-nvfp4.gguf", "gpu": false, "max_tokens": 1024}` entry. The encoder uses one thread per core while it
+runs; the engine is idle then.
+
+### Switches kept for A/B runs
+
+Each gives the same bits as the default, or the measured alternative the default replaced (README, "Switches", has
+the rest).
+
+| | |
+| --- | --- |
+| `STRATA_QUANT_GATHER=1` | the prompt path quantizes a token's row once per expert again (default: once per token, scattered; the same bytes) |
+| `STRATA_PREFILL_GROUP_GATHER=0` | the prompt path gathers, waits and releases one expert at a time |
+| `STRATA_PREFILL_IN_PLACE=0` | the prompt's MMQ reads experts from a gathered group buffer again (default: in place, from their ring / cache slots; the same bits) |
+| `STRATA_PREFILL_TOKEN_ROWS=0` / `STRATA_PREFILL_SWIGLU_QUANT=0` / `STRATA_PREFILL_COMBINE_WRITE=0` | the prompt path's earlier kernels: activations quantized per expert row / swiglu and quantize apart / combine then the hyper-connection write (the same bits) |
+| `STRATA_HC_UPMIX=0\|1` | the prompt path's hyper-connection up projection with the mix fused: default on compute capability 12.x (bitwise the cuBLAS + mix pair there at chunks of 33+ tokens) / opt-in elsewhere / off |
+| `STRATA_GR_V3=0` | upstream's default hyper-connection read instead of the split V3 kernels |
+| `STRATA_GR_V4=0\|1` | the hyper-connection read: the split V3 kernels / V4 without PDL (default: V4 with programmatic dependent launch on sm_90+; the same bits as V3) |
+| `STRATA_MMVQ_V2=1` | decode: attention k+v+q and the drafter's k+v in one Q8_0 launch (the same bits; under 1%) |
+| `STRATA_COMMIT_SYNC=1` | the verify commit waits for its graph again |
+| `STRATA_GEMM_WARM=0` | cuBLASLt's GEMM kernels load on the first prompt again (default: on the prewarm thread at start) |
+| `STRATA_ADAPT_EVICT_SYNC=0` | the tier's evictions reach the device's table only when its copies land (the old behaviour: with the tier not waiting, a stale activation could be computed) |
+| `STRATA_ADAPT_FETCH_CHECKRES=1` | before each decode window, compare the device's residency table with the host's and count windows that computed a CPU expert without its activation |
+| `STRATA_UNBUFFERED_LOAD=1\|0` | force the expert reads unbuffered / through the file cache (default: unbuffered only when the cache cannot keep the files) |
+| `STRATA_DEFERRED_REGISTER=1`, `STRATA_ARENA_SYNC=1` | register the arena per layer on a thread ahead of its readers (upstream's opt-in) / load the arena after the dense weights |
+| `STRATA_PLE_READERS=N` | the prompt's PLE rows through N reader threads (default 8 on Windows; 0 = one thread reaps every read) |
+| `--ple-inflight N` | outstanding n-gram row reads (default 256) |
