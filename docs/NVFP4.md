@@ -408,7 +408,11 @@ Tried and dropped:
   `update.cmd`. Two conflicts with 0.1.41: `get_prebuilt` keeps the fork's flow (an upstream engine kept while this
   fork's cannot replace it) with #1403's `BUILD.json.prev` where the fork had deleted the file; the hotfix-tag test
   holds both sides, upstream's lines against `UPSTREAM_MIN_ENGINE` (the fork's `MIN_ENGINE` is its own release's
-  version).
+  version). `NVFP4_REPOS` pins the two uploads, `Maximilian228/Huihui-Qwen3.8-Flash-Next-abliterated-NVFP4-GPTQ-Strata`
+  at 10c65c98 and `Maximilian228/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-NVFP4-GPTQ-Strata` at 34c2fc2c (16 files,
+  128.8 GB each; `tools/nvfp4_table.py` from the Hub, the same as the upload's own listing). Every file resolves at
+  its revision with that size and SHA-256 (the Hub's LFS SHA-256, the small files downloaded and hashed). On this
+  PC `--check` says both fit, and `--dry-run --yes` plans `huihui-nvfp4`, the default.
 - **If a reply turns into "!" (a diagnostic, off by default).** The "!" of 0.1.39-nvfp4.2 (below) has not come back
   here in 7 long replays, so the next one in the field has to tell what was damaged. Give the engine
   `STRATA_BANG_AUDIT=1` (`"env": {"STRATA_BANG_AUDIT": "1"}` in `config\strata-nvfp4.json`, or `set` it before
@@ -420,7 +424,8 @@ Tried and dropped:
   engine's start to the end of those lines. `STRATA_KVG_CHECK=1` / `2` / `3` runs the same checks at every K/V growth
   and trim and at each prompt's and reply's end (2: the bytes too, seconds each; 3: the table after every window), and
   `STRATA_DBG_NAN_VERIFY=1` names the first decode window with non-finite logits.
-- **Checks** (release build, sha ae4ea8fd):
+- **Checks** (the port's release build, sha ae4ea8fd; the release's engine, c5971ca4, adds only the diagnostic above
+  and gives ae4ea8fd's tokens and logits in `det_check`: 4e70d0063a / f4fabb24f8):
   - **Against 0.1.40.3-nvfp4.1's references,** the GPTQ + Q8_0-down pack after 32K gives the same logits and 32
     tokens. After 2K the logits differ - GPTQ + Q8_0-down KL 0.016, ModelOpt 0.0017, the same top token - by the
     loan above: 0.1.40.3-nvfp4.1's own build still reproduces its references, and with `STRATA_PREFILL_CPU_SHARE=0`
