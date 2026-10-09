@@ -6430,14 +6430,16 @@ int main(int argc, char** argv) {
                              std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - end_t0).count());
         }
         // #669 / #765: a big chunk lends many cache slots to the prompt path, and each lent slot's expert is read back
-        // from the SSD whenever the RAM could not keep its copy (31 GB: auto:32768 read prompts ~3x slower than auto).
-        // Said, never capped: --prefill is the user's, and with the RAM for them it is the faster one (+21-35%).
+        // from the SSD whenever the RAM could not keep its copy (upstream, 31 GB: auto:32768 read prompts ~3x slower
+        // than its auto's 8192).  In this fork plain auto reaches 32768, and in the low-RAM mode the RAM budget keeps
+        // no copy of the lent slots (ram88, 88 GiB: a 32K prompt read 14.3 GiB from the SSD).  Said, never capped:
+        // --prefill is the user's, and with the RAM for them it is the faster one (+21-35%).
         if (resident_ok && lend_from >= 0 && o.prefill_chunk > 8192 && xcache.slots() > lend_from &&
             src.resident_lent_slots() < xcache.slots() - lend_from)
             std::fprintf(stderr, "strata generate: WARNING: a prompt chunk of %lld tokens lends %lld cache slots to the "
-                                 "prompt path, but only %lld of their experts fit in RAM: the others are read from the "
-                                 "SSD on every chunk, and prompts can read ~3x slower than with --prefill auto (#669). "
-                                 "A smaller --prefill, or auto, keeps them all in RAM\n",
+                                 "prompt path, and the RAM budget keeps a copy of %lld of their experts: a long prompt "
+                                 "reads the others from the SSD (a 32K prompt read 14.3 GiB in a low-RAM run). A smaller "
+                                 "--prefill (auto:8192) lends fewer slots\n",
                          (long long) o.prefill_chunk, (long long) (xcache.slots() - lend_from),
                          (long long) src.resident_lent_slots());
         if (resident_ok) {
