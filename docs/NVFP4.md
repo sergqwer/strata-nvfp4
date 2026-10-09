@@ -409,6 +409,17 @@ Tried and dropped:
   fork's cannot replace it) with #1403's `BUILD.json.prev` where the fork had deleted the file; the hotfix-tag test
   holds both sides, upstream's lines against `UPSTREAM_MIN_ENGINE` (the fork's `MIN_ENGINE` is its own release's
   version).
+- **If a reply turns into "!" (a diagnostic, off by default).** The "!" of 0.1.39-nvfp4.2 (below) has not come back
+  here in 7 long replays, so the next one in the field has to tell what was damaged. Give the engine
+  `STRATA_BANG_AUDIT=1` (`"env": {"STRATA_BANG_AUDIT": "1"}` in `config\strata-nvfp4.json`, or `set` it before
+  `start-server.cmd`); the log then says `STRATA_BANG_AUDIT=1: a reply that turns into token 0 audits ...`. It costs
+  nothing until a `--serve` reply gives token 0 eight times in a row. Then, once, it compares every expert in the VRAM
+  cache with its RAM copy and with the pack's `experts.bin`, and looks for memory chunks mapped twice. The
+  `strata kvg audit` lines name each bad slot, its layer and expert, how many bytes differ and from which offset, and
+  whether the RAM or the VRAM copy differs from the file. Please send us the engine log (`strata.log`) from the
+  engine's start to the end of those lines. `STRATA_KVG_CHECK=1` / `2` / `3` runs the same checks at every K/V growth
+  and trim and at each prompt's and reply's end (2: the bytes too, seconds each; 3: the table after every window), and
+  `STRATA_DBG_NAN_VERIFY=1` names the first decode window with non-finite logits.
 - **Checks** (release build, sha ae4ea8fd):
   - **Against 0.1.40.3-nvfp4.1's references,** the GPTQ + Q8_0-down pack after 32K gives the same logits and 32
     tokens. After 2K the logits differ - GPTQ + Q8_0-down KL 0.016, ModelOpt 0.0017, the same top token - by the
