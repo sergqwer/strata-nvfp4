@@ -168,6 +168,7 @@ class BrokenEarlierConfig(unittest.TestCase):
                 (Path(d) / name).write_text(text, encoding="utf-8")
                 os.utime(Path(d) / name, (1_700_000_000 + i, 1_700_000_000 + i))
             return install(self.RAM64, self.GPU32, [], extra=[
+                mock.patch.object(setup, "NVFP4_REPOS", {}),   # the GGUF default (NVFP4 not offered)
                 mock.patch.object(setup, "other_installs", lambda settings: [Path(d)]),
                 mock.patch.object(setup, "start", mock.Mock(return_value=0))])
 
