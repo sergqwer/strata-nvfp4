@@ -374,6 +374,63 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### A 96 GB PC (2026-10-09, release 0.1.41-nvfp4.2)
+
+No 96 GB PC here: the 128 GB one was made to look like one. `STRATA_EMULATE_RAM_GIB=N` (a diagnostic, kept in the
+release) makes the engine read N GiB as installed, which is what decides the low-RAM mode, and a ballast of
+locked pages leaves the engine the free RAM such a PC has (88 GiB: Windows keeps 8). A real 96 GB run was planned
+with Windows' own memory cap, which Secure Boot blocks here. The huihui-nvfp4 model, the tray's settings.
+
+- **What a 96 GB PC got (0.1.41-nvfp4.1).** Setup reads 95.6 GiB and writes the same arguments as on 128 GB; the
+  engine saw less than 96 GiB installed and started the low-RAM mode. At 88 GiB, 3 pairs against the arena:
+
+  | 88 GiB free | low-RAM mode | every expert in RAM (arena) |
+  |---|---:|---:|
+  | chat, ms a round (tokens a round) | 20.30 +- 1.25 (2.33) | 13.11 +- 0.63 (2.34) |
+  | 2K prompt / 32K prompt, ms | 1,704 / 8,443 | 812 / 3,815 |
+  | decode after the 32K prompt, ms a round | 24.98 | 17.61 |
+  | ready after start, s | 49 | 21 |
+  | RAM left free at the least, GiB | 0.5-1.0 | 21 |
+
+  The 32K prompt read 14.3 GiB from the SSD: the RAM budget keeps no copy of the cache slots a prompt borrows. The
+  low-RAM start copied the complement through the file's mapped view (a working set of 86 GiB), so Windows did not
+  keep its 8 GiB. The arena at 88 GiB ran as on 128 GB (chat 13.11 against 12.69, 32K 3,815 against 3,668 ms):
+  67.4 GiB of physical RAM at the peak for the engine, 71.1 with the image encoder and the server, 16-21 GiB free,
+  nothing paged out. The ballast left no large pages, so the arena ran on 4 KB pages: on 128 GB that costs the chat
+  0.40 +- 0.23 ms a round, a 32K prompt nothing. The ~108 GB the tray's profile commits are 100.6 GiB: the arena
+  63.3 (all 24,576 experts, ~8.3k of them also in VRAM), ~30.1 that WDDM charges for the VRAM the engine uses (not
+  RAM), the embedding 1.2, the PLE rows 0.8, the image encoder 2.0 (its F32 weights), the server 0.2, ~2 the rest.
+- **The rule:** the low-RAM mode starts by itself only below 92 GiB installed (`kLowRamBelowGib`; a 96 GB PC lists
+  93-95.6 GiB, a 64 GB one ~63.7), one start line says which mode and why, and setup's NVFP4 check uses the same 92
+  (`NVFP4_ALL_RAM_GB`). Emulated 96 GB (95.6 GiB installed, 88 GiB free), 3 pairs: the arena, a chat 13.69 +- 0.64
+  ms a round (the previous build forced into the arena: 13.47 +- 0.62), a 32K prompt 3,924 +- 158 ms, decode after
+  it 17.33 +- 1.06, ready in 25 s cold and 12.9 warm, 18.3-20.4 GiB free at the least, nothing paged out. Emulated
+  64 GB still starts the low-RAM mode.
+- **The page file:** the engine reads every drive's page file (a fixed one at its maximum, a system-managed one at
+  what Windows lets it grow to: 3 x RAM, at most an eighth of its drive, within the free space). Below 60000 MB in
+  all it prints a `WARNING` with the steps to 64000 MB, and setup frames the same advice in `--check`, the dry run
+  and the install. Short of commit the expert cache opens a quarter smaller a try; forced that way
+  (`STRATA_TEST_CACHE_FAIL`), 6,256 slots made a chat's round 17% slower and 4,692 38% (13.21 -> 15.47 -> 18.19 ms),
+  each step 5.4 GiB less commit. This PC has 128000 MB (C: and D: 64000 each): no warning.
+- **The low-RAM start, unbuffered:** the VRAM cache's fill and the RAM copy of the experts read `experts.bin`
+  unbuffered (requests up to 32 MiB) with the mapped view, its section and handle closed meanwhile; afterwards the
+  view is opened again and the file tier chosen as before. At 88 GiB, a chat, 3 runs: ready 53.0 -> 17.5 s, the
+  working set's peak 85.1 -> 46.9 GiB, RAM free at the least 0.9 -> 39.6 GiB, pages written out 1,736 -> 0, decode
+  18.98 -> 18.32 ms a round, a 2K prompt 1,634 -> 1,529 ms; the old path's start was ended by the memory watchdog in
+  2 of 5 runs. The same bits (`det_check --low-ram`), and the VRAM cache's and the RAM copy's checksums
+  (`STRATA_VERIFY_COMPLEMENT=1`) equal the mapped path's. Open: the unbuffered open purges `experts.bin` from the
+  file cache (0.4 s), and refilling the lent slots after a 32K prompt took 0.7-1.4 s instead of 0.66 (the 32K prompt
+  ~0.5 s slower in the low-RAM mode, 2 runs, the cause not found).
+- **Texts:** the low-RAM start's warning about lent slots blamed `--prefill` against `auto` on every start, while
+  the run already used `auto` (this fork's `auto` goes up to 32768); it now says that the RAM budget keeps no copy
+  of them and what a 32K prompt read. Setup's tip to set `--prefill auto:32768` (upstream's measurement, where
+  `auto` is 8192) is gone: here it changed nothing.
+- **Checks** (release build, sha 3a219488): `det_check` gives 0.1.41-nvfp4.1's tokens and logits on the arena
+  (4e70d0063a / f4fabb24f8) and in the low-RAM mode (`STRATA_EMULATE_RAM_GIB=88`: 3e56e892a1 / ef2d51ab56, as before
+  the unbuffered start). Only the warning's text changed against the release candidate. Tests: setup's 477, with
+  the bundle's, `nvfp4_table`'s and `calibrate`'s 513 OK, the other tools' 174 OK (8 skipped), the server's 601 OK
+  (13 skipped), `platform_memory_test` OK.
+
 ### Upstream 0.1.41 (2026-10-08, release 0.1.41-nvfp4.1)
 
 - **What upstream brought that matters here** (0.1.41 with the hotfix 0.1.40.4's Pascal decode fix; its release

@@ -114,6 +114,21 @@ Setting it all up by hand - the engine, and converting the ModelOpt checkpoint y
   - The result is 73.8 GiB of experts instead of 63.3 GiB. Against an all-Q8_0 reference, the answers' KL is half of the ModelOpt pack's, about 2.6x less once run-to-run noise is taken out, for 12-15% of the decode speed.
   - GPTQ alone, without the 8-bit layers, is 1.7x closer at no speed cost.
   - docs/NVFP4.md, "Re-quantized from BF16", has the method and every measurement.
+- **0.1.41-nvfp4.2: a 96 GB PC keeps every expert in RAM.** Windows lists a 96 GB PC as 93-95.6 GiB, so the
+  low-RAM mode, on below 96 GB installed until now, started there although the 63 GiB of experts fit. It now starts
+  only below 92 GiB installed (a 64 GB PC), and setup follows the same rule. Emulated (95.6 GiB installed, 88 GiB
+  left to the engine by a RAM ballast, 3 pairs): a chat 13.7 ms a round instead of the low-RAM mode's 20.3, a 32K
+  prompt 3.9 s instead of 8.4, 18-20 GiB of RAM still free, nothing paged out.
+  - **The low-RAM mode starts faster:** it reads its VRAM cache and its RAM copy from `experts.bin` unbuffered, with
+    the file's mapped view closed meanwhile: ready in 17.5 s instead of 53 at 88 GiB, a peak working set of 47 GiB
+    instead of 85 (Windows kept 40 GiB free instead of 1), the same bits.
+  - **The page file is checked:** below 60000 MB in all, the engine prints a `WARNING` at start and setup a framed
+    warning (`--check` and the install): short of commit the expert cache opens smaller and the model can run
+    significantly slower, or not start. 64000 MB is the advice ([Requirements](#requirements)).
+  - **Two texts fixed:** the low-RAM start's warning about lent cache slots says what they cost (the RAM budget keeps
+    no copy of them; a 32K prompt read 14.3 GiB from the SSD), and setup no longer suggests `--prefill auto:32768`,
+    which this fork's `auto` already is.
+
 - **On upstream Strata 0.1.41 (0.1.41-nvfp4.1).** Since 0.1.40.3 (and its hotfix 0.1.40.4, a Pascal decode fix)
   upstream changed, of what runs on an NVIDIA card:
   - the CPU share of small prompt chunks is on by default upstream too (`auto`, one GPU without batch slots), with
@@ -260,8 +275,9 @@ Each change was measured - first-token KL against a reference, and interleaved s
   Advanced > Virtual memory > Change: Custom size, initial and maximum 64000 MB, then restart). Windows lets all
   programs together commit at most RAM + pagefile, and the engine commits ~100 GiB with all experts pinned (63 GiB
   of experts plus ~30 GiB that WDDM charges for the VRAM it uses), ~80 GiB in the low-RAM mode; nothing of the model
-  is ever paged out. Short of commit, the expert cache in VRAM opens smaller (a quarter less a try: slower) and an
-  arena that cannot be committed stops the start with an allocation error. The engine (one `WARNING` line at start)
+  is ever paged out. Short of commit, the expert cache in VRAM opens smaller (a quarter less a try), and the model
+  can run significantly slower (measured: one step made a chat's round 17% slower, two steps 38%); an arena that
+  cannot be committed stops the start with an allocation error. The engine (one `WARNING` line at start)
   and setup (`--check` and the install) warn when all pagefiles together are below 60000 MB; a system-managed one
   counts as what Windows lets it grow to (3 x RAM, at most an eighth of its drive, within the free space).
 - **Disk:** with setup's ready-made files ~130 GB: the expert pack ~70 GB, the n-gram table 51 GB, the dense GGUF,
