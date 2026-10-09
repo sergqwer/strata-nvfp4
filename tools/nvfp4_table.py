@@ -1,6 +1,6 @@
 """tools/nvfp4_table.py - one repository's entry of setup.py's NVFP4_REPOS, ready to paste.
 
-    python tools/nvfp4_table.py Maximilian228/Huihui-Qwen3.8-Flash-Next-abliterated-NVFP4-GPTQ-Strata [--revision main]
+    python tools/nvfp4_table.py Maximilian228/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-NVFP4-GPTQ-Strata [--revision main]
     python tools/nvfp4_table.py REPO --local DIR       (before the upload: the files as they are in DIR)
 
 From the Hub: the commit the revision points at, and each file's size and SHA-256 - the LFS pointer's for the big
