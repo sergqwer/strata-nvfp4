@@ -374,6 +374,30 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### The original Qwen in NVFP4 (2026-10-09, release 0.1.41-nvfp4.4)
+
+Setup offers two models of the original, censored Qwen3.8-Flash-Next beside `orca-nvfp4`, which stays the default.
+
+- **`qwen-nvidia-nvfp4`: NVIDIA's checkpoint**, [nvidia/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4)
+  (ModelOpt, plain rounding), converted for Strata as
+  [Maximilian228/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Strata)
+  (cca8f7fe). Quantized by NVIDIA; the conversion is this fork's, not made or endorsed by NVIDIA. The experts are
+  NVIDIA's bit for bit (73,728 scale tensors checked: no sign bit, no NaN); the other tensors equal Qwen's BF16
+  byte for byte, the MTP head is Qwen's, and the n-gram table is Qwen's own FP8 (orca's is another FP8 rounding of the same BF16 table:
+  2.36% of the bytes differ, 1.36% RMS; both are 2.66% RMS off BF16). Licensed by NVIDIA Corporation under the NVIDIA
+  Open Model License, with Qwen's Community License 1.0; NVIDIA's license does not allow bypassing its safety
+  guardrails, so this model is never abliterated or called uncensored. Speed as orca's (13.37 / 13.60 / 15.79 against
+  13.53 / 13.53 / 14.32 ms a round), and the captured Claude Code request (0.1.41-nvfp4.3) looped in none of 5 runs.
+- **`qwen-nvfp4-gptq`: our GPTQ** of Qwen's BF16, orca's recipe, as
+  [Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata)
+  (640a1db9), under the Qwen Community License 1.0. The experts' error, weighted by energy, is 33.3% of plain
+  rounding's (RTN), 44.8% of NVIDIA's ModelOpt error; NVIDIA's is 74.4% of RTN, and GPTQ is lower in 48 of 48 layers.
+  Against NVIDIA's pack it decodes 179.3 against 175.5 tokens/s (more MTP drafts accepted: 2.40-2.46 against
+  2.30-2.32 tokens a round); the captured request looped in none of 5 runs.
+- **Setup:** the two repositories share the n-gram table, the embedding and the MTP head (the same files): installing
+  the second links them from the first instead of downloading 53 GB again. The setup and table tests: 497 OK. The
+  engine is 0.1.41-nvfp4.3's (1217e500), unchanged.
+
 ### huihui-nvfp4 withdrawn, the page file counted for sure (2026-10-09, release 0.1.41-nvfp4.3)
 
 - **huihui-nvfp4 loops in long thinking.** A real Claude Code request (a 72K-token prompt, adaptive thinking at
