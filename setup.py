@@ -4710,7 +4710,8 @@ def parallel_note(asked: int | None, vram_gbs, arena_gb: float, ctx: int, kv: st
     return lines
 
 
-PREFILL_BIG_RAM_GB = 96        # bench #433 #440 #834 #669: --prefill auto:32768 +21-35% at 96 GB, ~3x slower at 32 GB
+PREFILL_BIG_RAM_GB = 92        # bench #433 #440 #834 #669: --prefill auto:32768 +21-35% at 96 GB, ~3x slower at 32 GB.
+                               # 92: a 96 GB PC lists 93.4-95.6 GiB (ram_gb); ram88: a 32K chunk at 88 GiB left 20 GiB free
 PREFILL_RISK_RAM_GB = 64       # below this an explicit auto:32768 is warned about
 HEADROOM_RAM_GB = 48           # bench #834: STRATA_RESIDENT_HEADROOM_GIB=6 on a PC with this much RAM or less
 AGENT_CACHE_FREE_GB = 24       # bench #882 #440: RAM left beside the model for the conversation cache
