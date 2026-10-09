@@ -71,10 +71,62 @@ int file_cache_keeps_cases() {
     }
     return fail;
 }
+
+// ram88: the auto low-RAM rule and the page-file check (setup.py: test_setup_nvfp4's RamRule and PageFile)
+int ram_rule_cases() {
+    using namespace strata::platform;
+    int fail = 0;
+    const struct { double gib; bool low; } ram[] = {
+        {127.18, false}, {95.6, false}, {93.4, false}, {92.0, false}, {91.9, true}, {63.7, true}, {31.9, true}, {0, false}};
+    for (const auto& c : ram) {
+        const bool got = low_ram_auto((uint64_t) (c.gib * 1073741824.0));
+        std::printf("low_ram_auto %7.2f GiB -> %s%s\n", c.gib, got ? "low-RAM" : "arena", got == c.low ? "" : "   <-- WRONG");
+        fail |= got != c.low;
+    }
+    const struct { const char* line; bool ok; char drive; int64_t initial, max; } lines[] = {
+        {"c:\\pagefile.sys 64000 64000", true, 'C', 64000, 64000},
+        {"D:\\pagefile.sys 16000 64000", true, 'D', 16000, 64000},
+        {"C:\\pagefile.sys 0 0", true, 'C', -1, -1},
+        {"C:\\pagefile.sys", true, 'C', -1, -1},
+        {"?:\\pagefile.sys", true, '?', -1, -1},
+        {"", false, 0, 0, 0},
+    };
+    for (const auto& c : lines) {
+        char d = 0;
+        int64_t i = 0, m = 0;
+        const bool ok = parse_paging_file(c.line, d, i, m);
+        const bool right = ok == c.ok && (!ok || (d == c.drive && i == c.initial && m == c.max));
+        std::printf("parse_paging_file \"%s\" -> %d %c %lld %lld%s\n", c.line, (int) ok, d ? d : '-', (long long) i,
+                    (long long) m, right ? "" : "   <-- WRONG");
+        fail |= !right;
+    }
+    // MB as the dialog counts them; a 96 GB PC is 97894 MB
+    const struct { const char* what; int64_t initial, max; uint64_t ram, vol, free, cur, want; } pf[] = {
+        {"set 64000, on the disk", 64000, 64000, 130231, 1907726, 900000, 64000, 64000},
+        {"set 16000", 16000, 16000, 97894, 1907726, 900000, 16000, 16000},
+        {"16000-64000, room to grow", 16000, 64000, 97894, 1907726, 900000, 16000, 64000},
+        {"16000-64000, 20000 free", 16000, 64000, 97894, 1907726, 20000, 16000, 36000},
+        {"system, 96 GB, 2 TB drive: 3 x RAM", -1, -1, 97894, 1907726, 900000, 6000, 238465},
+        {"system, 96 GB, 1 TB drive: an eighth", -1, -1, 97894, 953869, 500000, 6000, 119233},
+        {"system, 96 GB, 500 GB drive: an eighth", -1, -1, 97894, 476940, 200000, 6000, 59617},
+        {"system, 96 GB, 2 TB drive, 30000 free", -1, -1, 97894, 1907726, 30000, 6000, 36000},
+        {"system, 8 GB: at least 4096", -1, -1, 1000, 1907726, 900000, 1000, 4096},
+    };
+    for (const auto& c : pf) {
+        const uint64_t got = page_file_allowed_mb(c.initial, c.max, c.ram, c.vol, c.free, c.cur);
+        std::printf("page_file_allowed_mb %-40s -> %llu%s\n", c.what, (unsigned long long) got,
+                    got == c.want ? "" : "   <-- WRONG");
+        fail |= got != c.want;
+    }
+    const PageFiles here = page_files();
+    std::printf("page_files here: known=%d total %llu MB (%s)%s\n", (int) here.known, (unsigned long long) here.total_mb,
+                here.detail.c_str(), here.known && here.total_mb < kPageFileWarnMb ? " - the engine warns" : "");
+    return fail;
+}
 }  // namespace
 
 int main() {
-    int fail_keeps = file_cache_keeps_cases();
+    int fail_keeps = file_cache_keeps_cases() | ram_rule_cases();
     const uint64_t bytes = 256ull << 20;
     void* p = std::malloc(bytes);
     if (p == nullptr) return 2;
