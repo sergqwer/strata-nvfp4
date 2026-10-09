@@ -7,6 +7,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstdio>
 #include <string>
 
 namespace strata::platform {
@@ -31,6 +32,61 @@ bool gpu_shared_memory_budget(const void* luid, uint64_t& budget, uint64_t& usag
 
 /// The machine's physical RAM in bytes (0 when unknown).
 uint64_t total_physical_memory();
+
+/// The fork's auto low-RAM rule (generate.cpp; setup.py's NVFP4_ALL_RAM_GB is the same number): on below 92 GiB
+/// installed (total_physical_memory), so a 96 GB PC (93.4-95.6 GiB listed) keeps every expert in RAM and a 64 GB one
+/// does not.  Measured with 88 GiB left to the engine (ram88): the arena 13.1 ms a round, 21 GiB free; low-RAM 20.3.
+constexpr uint64_t kLowRamBelowGib = 92;
+inline bool low_ram_auto(uint64_t installed) { return installed > 0 && installed < (kLowRamBelowGib << 30); }
+
+/// Windows' page files.  The commit limit is RAM + page files, and under WDDM the GPU's allocations are charged to it
+/// too (~30 GiB on a 32 GB card): the NVFP4 models commit ~100 GiB.  Sizes in Windows' dialog units ("MB" = MiB), so
+/// a file typed as 64000 counts 64000.  Below kPageFileWarnMb in all, the engine and setup warn; kPageFileAdviseMb is
+/// what they advise.
+constexpr uint64_t kPageFileWarnMb = 60000, kPageFileAdviseMb = 64000;
+
+/// One PagingFiles entry ("C:\pagefile.sys 16000 64000", "C:\pagefile.sys 0 0" or "?:\pagefile.sys"): the drive
+/// ('?' = every drive automatic) and its sizes, -1 when Windows manages the size.  False for an empty line.
+inline bool parse_paging_file(const std::string& line, char& drive, int64_t& initial_mb, int64_t& max_mb) {
+    size_t a = line.find_first_not_of(' ');
+    if (a == std::string::npos || line.size() < a + 2 || line[a + 1] != ':') return false;
+    drive = line[a] >= 'a' && line[a] <= 'z' ? (char) (line[a] - 'a' + 'A') : line[a];
+    initial_mb = max_mb = -1;
+    const size_t sp = line.find(' ', a);
+    if (sp != std::string::npos) {
+        long long i = -1, m = -1;
+        if (std::sscanf(line.c_str() + sp, "%lld %lld", &i, &m) == 2 && m > 0) {
+            initial_mb = i;
+            max_mb = m;
+        }
+    }
+    return true;
+}
+
+/// What one page file can reach (MB): a set size its maximum; a system-managed one Windows' documented maximum,
+/// 3 x RAM (at least 4096) but at most an eighth of its volume.  Either way no more than the file is now plus the
+/// volume's free space (a file grows only into free space).  `volume_mb` 0 = unknown (no volume cap).
+inline uint64_t page_file_allowed_mb(int64_t initial_mb, int64_t max_mb, uint64_t ram_mb, uint64_t volume_mb,
+                                     uint64_t free_mb, uint64_t current_mb) {
+    uint64_t want;
+    if (max_mb > 0) {
+        want = (uint64_t) (initial_mb > max_mb ? initial_mb : max_mb);
+    } else {
+        want = 3 * ram_mb > 4096 ? 3 * ram_mb : 4096;
+        if (volume_mb > 0 && want > volume_mb / 8) want = volume_mb / 8;
+    }
+    const uint64_t room = current_mb + free_mb;
+    return want < room ? want : room;
+}
+
+/// The configured page files (HKLM\...\Memory Management\PagingFiles, what the Virtual memory dialog writes), each
+/// counted by page_file_allowed_mb.  `known` false off Windows or when the setting cannot be read.
+struct PageFiles {
+    bool known = false;
+    uint64_t total_mb = 0;
+    std::string detail;   ///< "C: 64000 MB (set), D: 64000 MB (set)", for the log
+};
+PageFiles page_files();
 
 /// #357/#577: whether the OS file cache could keep the `read_bytes` the expert files are read for, beside
 /// `arena_bytes` of RAM held by the engine's own copy of the experts and `margin` for everything else, with `avail`
