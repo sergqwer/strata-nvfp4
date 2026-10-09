@@ -34,9 +34,8 @@ chat page). It offers:
   and the fine-tune's MTP draft head are downloaded from Hugging Face at a pinned revision and checked against their
   SHA-256; nothing is converted on your PC. They need an RTX 20 card or newer with 12 GB of VRAM, 64 GB of RAM and
   ~130 GB of disk (see [Requirements](#requirements)). Images go through ISTA-DASLab's image encoder, on the CPU.
-- **Until their files are published,** setup lists both as "not offered: not published yet" and its default stays the
-  GGUF models. A PC below their requirements gets a GGUF model as the default too; `--family huihui-nvfp4 --yes`
-  installs one anyway.
+- **`huihui-nvfp4` is the default** where the PC meets their requirements; a PC below them gets a GGUF model as the
+  default, and `--family huihui-nvfp4 --yes` installs one anyway.
 - **The engine is always this fork's:** the ready-made one from this repository's releases (Windows), else compiled
   from this source. Upstream's ready-made engine has no NVFP4 path, so setup never installs it, and replaces one an
   older setup installed (one that cannot be replaced - no release engine for this card or OS yet - is kept for the
@@ -136,10 +135,11 @@ Setting it all up by hand - the engine, and converting the ModelOpt checkpoint y
   0.1.40.3-nvfp4.1's; with the fork's own defaults off they equal upstream 0.1.41's byte for byte on IQ2_XS. Decode
   is as fast as 0.1.40.3-nvfp4.1's (5 interleaved chats each: 175.9 against 174.8 tokens/s).
 
-- **Setup installs this fork (0.1.41-nvfp4.1):** `START-HERE.bat` / `setup.sh` offer the NVFP4 models ready-made
-  from Hugging Face once they are published, and always install this fork's engine, never upstream's (see
-  [Quick start](#quick-start)). The release carries that engine as `strata-windows-x64.zip`, and the bundle updates
-  itself with `update.cmd` (in `config\` and `data\` only a file still as a release shipped it is replaced).
+- **Setup installs this fork (0.1.41-nvfp4.1):** `START-HERE.bat` / `setup.sh` install this fork's NVFP4 GPTQ quants
+  of huihui-ai's abliterated Flash-Next (the default) and of OrcaRouter's, ready-made from Hugging Face, and always
+  this fork's engine, never upstream's (see [Quick start](#quick-start)). The release carries that engine as
+  `strata-windows-x64.zip`, and the bundle updates itself with `update.cmd` (in `config\` and `data\` only a
+  file still as a release shipped it is replaced).
 
 - **0.1.40.3-nvfp4.1:** a second round of agents after a profile of the prompt and of decode. Decode turned out
   bound by host RAM bandwidth, not by PCIe: the CPU pool and the PCIe share read the same DDR5. So the PCIe share's
