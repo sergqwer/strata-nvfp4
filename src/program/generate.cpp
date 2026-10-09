@@ -6525,6 +6525,8 @@ int main(int argc, char** argv) {
                      (double) strata::core::qsa_kv_elastic_full_bytes() / 1073741824.0, (long long) xcache.slots(),
                      (long long) top);
     };
+    // debug (STRATA_KVG_CHECK, STRATA_BANG_AUDIT): the serve loop's audit of the residency and the cache's bytes
+    std::function<void(const char*, bool)> kvg_audit;
     // Room for `cells` cells (rounded up to a step).  `quiesce` must leave nothing running on the device and land
     // the adaptive tier's swaps (a swap in flight could still be writing a slot given up here).
     auto kvg_ensure = [&](int64_t cells, const std::function<void()>& quiesce) -> bool {
@@ -6584,6 +6586,10 @@ int main(int argc, char** argv) {
                         host_res[(size_t) oi] = vs;
                         host_res[(size_t) vi] = strata::core::kNotResident;
                         ++moved;
+                        if (static const bool log_moves = std::getenv("STRATA_KVG_CHECK") != nullptr; log_moves)   // debug
+                            std::fprintf(stderr, "strata kvg move: L%lld E%lld slot %lld -> %d (L%lld E%lld given up)\n",
+                                         (long long) layer, (long long) (oi % g.n_expert), (long long) kvg.lo, vs,
+                                         (long long) (vi / g.n_expert), (long long) (vi % g.n_expert));
                     }
                 }
                 if (vi < 0) host_res[(size_t) oi] = strata::core::kNotResident;
@@ -6627,6 +6633,7 @@ int main(int argc, char** argv) {
         if (!ok)
             std::fprintf(stderr, "strata: the K/V could not grow to %lld cells (%s)\n", (long long) target,
                          cudaGetErrorString(cudaGetLastError()));
+        if (kvg_audit) kvg_audit("grow", true);
         return ok;
     };
     // A request that needs far fewer cells than the K/V holds gives the rest back: the slots refill with the
@@ -6697,6 +6704,7 @@ int main(int argc, char** argv) {
         ++kvg.trims;
         std::fprintf(stderr, "strata: K/V trimmed to %lld cells; %lld slots back to the expert cache, refilled from "
                              "the profile\n", (long long) kvg.cells, (long long) (kvg.lo - lo0));
+        if (kvg_audit) kvg_audit("trim", true);
         return true;
     };
     // ---- the resident RAM mode (--resident-experts / --resident-cpu-experts): the experts the GPU cache does not
@@ -8494,6 +8502,142 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "strata serve: the adaptive tier's evictions reach the device's table before the next "
                                      "window (STRATA_ADAPT_EVICT_SYNC=0: when its copies land)\n");
         }
+        // debug: STRATA_KVG_CHECK=1 the residency table's invariants and d_res; 2 also each resident slot's bytes
+        // against its RAM blob (at growths, trims, prompt ends and request ends); 3 the table after every window.
+        // Each slot remembers when its owner last changed (the audit's count and the event), so a bad slot says
+        // whether it was just filled.
+        static const int kvg_check = [] { const char* v = std::getenv("STRATA_KVG_CHECK"); return v ? std::atoi(v) : 0; }();
+        std::vector<uint8_t> audit_buf;
+        int64_t audit_n = 0;
+        std::vector<int32_t> audit_prev;               // host_res at the last audit
+        std::vector<int64_t> slot_since;               // per slot: the audit at which its owner last changed
+        std::vector<char> slot_how;                    // ... and the event (g grow, t trim, p prompt, e end, w window)
+        struct AuditOff { std::function<void(const char*, bool)>& f; ~AuditOff() { f = nullptr; } } audit_off{kvg_audit};
+        // STRATA_BANG_AUDIT=1 (the "!" replies): nothing until a reply turns into token 0, then once the whole cache
+        // against RAM and the pack's experts.bin, and the chunks mapped twice - cheap enough to leave on in the tray
+        static const bool bang_audit = [] { const char* v = std::getenv("STRATA_BANG_AUDIT"); return v && v[0] == '1'; }();
+        if ((kvg_check > 0 || bang_audit) && d_res != nullptr && !host_res.empty())
+            kvg_audit = [&](const char* why, bool content) {
+                if (kvg_check <= 0 && std::strcmp(why, "tok0") != 0) return;
+                cudaDeviceSynchronize();
+                const int64_t S = xcache.slots();
+                if (slot_since.empty()) { slot_since.assign((size_t) S, -1); slot_how.assign((size_t) S, 'i'); }
+                std::vector<int32_t> seen((size_t) S, -1);
+                int64_t resident = 0, oor = 0, in_gap = 0, dup = 0, dmis = 0, cbad = 0, checked = 0, nosrc = 0;
+                for (size_t i = 0; i < host_res.size(); ++i) {
+                    const int32_t s = host_res[i];
+                    if (s < 0) continue;
+                    ++resident;
+                    if (s >= S) {
+                        if (oor++ < 4) std::fprintf(stderr, "strata kvg audit [%s]: entry %zu slot %d >= %lld\n", why, i, s, (long long) S);
+                        continue;
+                    }
+                    if (!audit_prev.empty() && audit_prev[i] != s) {
+                        slot_since[(size_t) s] = audit_n;
+                        slot_how[(size_t) s] = why[0];
+                    }
+                    if (kvg.on && s >= kvg.lo && s < kvg.top && in_gap++ < 4)
+                        std::fprintf(stderr, "strata kvg audit [%s]: entry %zu (L%zu E%zu) in the K/V's slots [%lld,%lld): %d\n",
+                                     why, i, i / (size_t) g.n_expert, i % (size_t) g.n_expert, (long long) kvg.lo,
+                                     (long long) kvg.top, s);
+                    if (seen[(size_t) s] >= 0) {
+                        if (dup++ < 4) std::fprintf(stderr, "strata kvg audit [%s]: slot %d held by entries %d and %zu\n",
+                                                    why, s, seen[(size_t) s], i);
+                    } else seen[(size_t) s] = (int32_t) i;
+                }
+                audit_prev = host_res;
+                std::vector<int32_t> back(host_res.size());
+                cudaMemcpy(back.data(), d_res, back.size() * sizeof(int32_t), cudaMemcpyDeviceToHost);
+                std::vector<uint8_t> dirty(host_res.size(), 0);   // the next launch's hook patches these
+                if (drive.d.res_dirty)
+                    for (const int32_t k : drive.d.res_dirty_idx)
+                        if (k >= 0 && (size_t) k < dirty.size()) dirty[(size_t) k] = 1;
+                for (size_t i = 0; i < back.size(); ++i)
+                    if (back[i] != host_res[i] && !dirty[i] && dmis++ < 4)
+                        std::fprintf(stderr, "strata kvg audit [%s]: d_res[%zu] = %d, host %d\n", why, i, back[i], host_res[i]);
+                const auto& lay = strata::kernels::cpu::expert_layout();
+                const uint64_t G = strata::core::vmm_granularity();
+                auto check_slot = [&](int32_t s) -> bool {   // false: the read failed
+                    const int32_t i = seen[(size_t) s];
+                    if (i < 0) return true;
+                    const int64_t l = (int64_t) i / g.n_expert, e = (int64_t) i % g.n_expert;
+                    const uint8_t* b = srcp->blob_stable(l, e);
+                    if (b == nullptr) { ++nosrc; return true; }
+                    const size_t nb = (size_t) lay.blob_bytes(l);
+                    audit_buf.resize(nb);
+                    if (cudaMemcpy(audit_buf.data(), xcache.device_slot(s), nb, cudaMemcpyDeviceToHost) != cudaSuccess) {
+                        std::fprintf(stderr, "strata kvg audit [%s]: reading slot %d failed: %s\n", why, s,
+                                     cudaGetErrorString(cudaGetLastError()));
+                        return false;
+                    }
+                    ++checked;
+                    if (std::memcmp(audit_buf.data(), b, nb) == 0) return true;
+                    size_t nd = 0, at = 0, last = 0;
+                    for (size_t k = 0; k < nb; ++k)
+                        if (audit_buf[k] != b[k]) { if (nd++ == 0) at = k; last = k; }
+                    if (cbad++ < 8) {
+                        const uint64_t off = (uint64_t) xcache.slot_offset(s) + at;
+                        std::fprintf(stderr, "strata kvg audit [%s]: L%lld E%lld slot %d: %zu of %zu bytes differ from the RAM "
+                                             "blob in [%zu, %zu]; cache offset %llu = chunk %llu + %llu; owner since audit "
+                                             "#%lld (%c), now #%lld\n", why, (long long) l, (long long) e, s, nd, nb, at, last,
+                                     (unsigned long long) off, (unsigned long long) (G ? off / G : 0),
+                                     (unsigned long long) (G ? off % G : 0), (long long) slot_since[(size_t) s],
+                                     slot_how[(size_t) s], (long long) audit_n);
+                        {   // which side changed: the pack file is the reference
+                            std::vector<uint8_t> fb(nb);
+                            std::ifstream f(o.pack + "/experts.bin", std::ios::binary);
+                            const bool fok = f.seekg((std::streamoff) lay.blob_offset(l, e)) &&
+                                             f.read((char*) fb.data(), (std::streamsize) nb);
+                            if (fok)
+                                std::fprintf(stderr, "  file: RAM %s, VRAM %s\n",
+                                             std::memcmp(fb.data(), b, nb) == 0 ? "same" : "DIFFERS",
+                                             std::memcmp(fb.data(), audit_buf.data(), nb) == 0 ? "same" : "DIFFERS");
+                            else
+                                std::fprintf(stderr, "  file: could not read %s/experts.bin\n", o.pack.c_str());
+                        }
+                        const size_t a0 = at & ~(size_t) 15, a1 = std::min(nb, (last | 15) + 1);
+                        for (size_t r = a0; r < a1 && r < a0 + 96; r += 16) {
+                            std::fprintf(stderr, "  +%zu got ", r);
+                            for (size_t k = r; k < r + 16 && k < nb; ++k) std::fprintf(stderr, "%02x", audit_buf[k]);
+                            std::fprintf(stderr, " want ");
+                            for (size_t k = r; k < r + 16 && k < nb; ++k) std::fprintf(stderr, "%02x", b[k]);
+                            std::fprintf(stderr, "\n");
+                        }
+                    }
+                    return true;
+                };
+                if (content && (kvg_check >= 2 || bang_audit)) {
+                    for (int32_t s = 0; s < (int32_t) S; ++s)
+                        if (!check_slot(s)) break;
+                    // the same physical chunk mapped twice (the cache and a K/V pool, or two pools)
+                    std::vector<std::pair<strata::core::VmmChunk, int64_t>> hs = strata::core::qsa_kv_elastic_handles();
+                    if (strata::core::VmmRange* vr = xcache.vmm_range())
+                        for (int64_t c = 0; c < vr->chunks(); ++c)
+                            if (const strata::core::VmmChunk h = vr->handle(c)) hs.emplace_back(h, ((int64_t) 0xffff << 32) | c);
+                    std::sort(hs.begin(), hs.end());
+                    int64_t alias = 0;
+                    for (size_t k = 1; k < hs.size(); ++k)
+                        if (hs[k].first == hs[k - 1].first && alias++ < 4)
+                            std::fprintf(stderr, "strata kvg audit [%s]: chunk handle %llx mapped twice: range %lld chunk %lld "
+                                                 "and range %lld chunk %lld (65535 = the expert cache)\n", why,
+                                         (unsigned long long) hs[k].first, (long long) (hs[k - 1].second >> 32),
+                                         (long long) (hs[k - 1].second & 0xffffffff), (long long) (hs[k].second >> 32),
+                                         (long long) (hs[k].second & 0xffffffff));
+                    if (alias > 0) std::fprintf(stderr, "strata kvg audit [%s]: %lld aliased chunks\n", why, (long long) alias);
+                }
+                ++audit_n;
+                if (oor + in_gap + dup + dmis + cbad > 0 || content || (audit_n & 1023) == 0)
+                    std::fprintf(stderr, "strata kvg audit [%s] #%lld: cells %lld lo %lld top %lld slots %lld: %lld resident; "
+                                         "%lld out of range, %lld in the K/V's slots, %lld duplicate, %lld d_res mismatches; "
+                                         "content %lld bad of %lld (%lld without a RAM blob)\n",
+                                 why, (long long) audit_n, (long long) kvg.cells, (long long) kvg.lo, (long long) kvg.top,
+                                 (long long) S, (long long) resident, (long long) oor, (long long) in_gap, (long long) dup,
+                                 (long long) dmis, (long long) cbad, (long long) checked, (long long) nosrc);
+                std::fflush(stderr);
+            };
+        if (bang_audit)
+            std::fprintf(stderr, "strata serve: STRATA_BANG_AUDIT=1: %s\n", kvg_audit ? "a reply that turns into token 0 "
+                         "audits the expert cache against RAM and experts.bin once" : "no expert cache to audit");
         // --pipeline-windows: set while the tier adapts beside windows in flight (see its use in adapt)
         std::function<void()> adapt_fence;
         // the VRAM tier follows the conversation (the same rule as the speculative loop below)
@@ -11168,6 +11312,7 @@ int main(int argc, char** argv) {
                 return 1;
             }
             tr("prompt done (slots refilled)");
+            if (kvg_audit) kvg_audit("prompt", true);
             if (il_parts > 0)
                 std::fprintf(stderr, "strata batch: the prompt was read in %lld parts, the slots decoding %.0f ms between "
                                      "them\n", (long long) il_parts + 1, il_ms);
@@ -12040,6 +12185,17 @@ int main(int argc, char** argv) {
                     }
                 }
                 if (adapt_thr.joinable()) adapt_thr.join();
+                if (kvg_audit && kvg_check >= 3) kvg_audit("win", false);   // after the tier's thread (it edits host_res)
+                if (kvg_audit) {   // debug: the first run of token 0 (NaN logits) - is the cache intact then?
+                    static int64_t zrun = 0;
+                    static bool zdone = false;
+                    for (int i = 0; i <= a; ++i) zrun = outv[(size_t) i] == 0 ? zrun + 1 : 0;
+                    if (zrun >= 8 && !zdone) {
+                        zdone = true;
+                        std::fprintf(stderr, "strata kvg audit: token 0 x%lld at position %lld\n", (long long) zrun, (long long) p);
+                        kvg_audit("tok0", true);
+                    }
+                }
                 if (!adapt_ok) {
                     std::printf("ERR an adaptive refill failed\n");
                     return 1;
@@ -12231,6 +12387,7 @@ int main(int argc, char** argv) {
             if (o.lookup_chain > 0)
                 std::snprintf(chain_txt, sizeof(chain_txt), " %lld %lld %lld %lld %lld", (long long) chain_ok,
                               (long long) chain_drafts, (long long) sfx_ok, (long long) sfx_drafts, (long long) dec_windows);
+            if (kvg_audit) kvg_audit("end", true);
             if (yielded_at >= 0) std::printf("YIELDED %d %lld\n", yielded_slot, (long long) yielded_at);
             std::printf("DONE %lld %lld %.1f %.1f %s %lld %lld %lld %lld %lld %lld %lld %.1f %lld %lld%s\n",
                         (long long) produced_n,
