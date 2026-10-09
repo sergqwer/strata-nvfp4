@@ -6,6 +6,14 @@ upstream 0.1.41. Setup installs, ready-made from Hugging Face, our GPTQ NVFP4 qu
 Flash-Next and the original, censored Qwen in NVFP4 (NVIDIA's checkpoint converted, or our GPTQ); upstream's GGUF
 models are still offered.
 
+**The models on Hugging Face** (setup downloads them; each card has the measurements and how to run the files by hand):
+- [Maximilian228/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-NVFP4-GPTQ-Strata](https://huggingface.co/Maximilian228/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-NVFP4-GPTQ-Strata):
+  uncensored, our GPTQ (`--family orca-nvfp4`, the default)
+- [Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata):
+  the original Qwen, censored, our GPTQ (`--family qwen-nvfp4-gptq`)
+- [Maximilian228/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Strata):
+  the original Qwen, censored, NVIDIA's NVFP4 converted (`--family qwen-nvidia-nvfp4`)
+
 The design is upstream's: the routed experts live in RAM, the most-used ones are cached in VRAM, the misses are
 computed on the CPU and fetched over PCIe in parallel with the GPU, and an MTP draft head speculates. Upstream's README
 is kept as [README.upstream.md](README.upstream.md). [docs/NVFP4.md](docs/NVFP4.md) has every measurement behind this
