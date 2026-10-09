@@ -4764,11 +4764,56 @@ ORCA_REPO = "Maximilian228/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-NVFP4-GPTQ-S
 # profile: the expert profile (optional; without it data/expert-profile.bin)
 NVFP4_COMPONENTS = ("pack", "dense", "ple", "embd", "mtp", "profile")
 NVFP4_REPOS = {
-    # PLACEHOLDERS until the upload.  "revision": the commit ("sha" of https://huggingface.co/api/models/<repo>); each
-    # component {path: (bytes, "sha256")}, e.g. "pack": {"pack/index.txt": (117515, "<sha256>"), "pack/experts.bin":
-    # (67948118016, "<sha256>"), ...}.  tools/nvfp4_table.py prints them from the Hub.
-    HUIHUI_REPO: {"revision": "", "pack": {}, "dense": {}, "ple": {}, "embd": {}, "mtp": {}, "profile": {}},
-    ORCA_REPO: {"revision": "", "pack": {}, "dense": {}, "ple": {}, "embd": {}, "mtp": {}, "profile": {}},
+    # tools/nvfp4_table.py <repo> --revision <commit> (2026-10-09, the uploads' commits): "revision" pins every
+    # download, each component {path: (bytes, "sha256")}.
+    HUIHUI_REPO: {
+        "revision": "10c65c98b3494ec099144d706f75fdaa1ad683f9",
+        "pack": {
+            "pack/dense.bin": (1538035200, "974df6dcefcae85e3fd2c19fcc12eeaacaadde8261ab732d5af5af6ce2e25a7a"),
+            "pack/experts.bin": (67948118016, "835d070d705c9346cdb9e3c9cf20eeaf4f192f56f1c31c248057d5efe851e932"),
+            "pack/index.txt": (93691, "075533ae81d693aef618d8b6d1ec0c19c35763d497f5b93fbc6b522554ae454e"),
+            "pack/native_experts.txt": (1599, "615f655fb28bf60b243664860b135710bf4177b111c6be89073e780a35de1018"),
+            "pack/tokenizer/chat_template.jinja": (8952, "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"),
+            "pack/tokenizer/merges.txt": (3600844, "080cf95432173729d160346b7882bd2a644b07f7a3813a3eb73f4e66787bfde9"),
+            "pack/tokenizer/token_type.json": (744960, "5088c8c298fc06af8382ddb3b76c888703ac2634e82263b97eedcc2ad202738b"),
+            "pack/tokenizer/tokenizer.json": (554, "87be2ac47d8bc7393b7435df6ccd276740019a393941a2585d5edce59f450c54"),
+            "pack/tokenizer/vocab.json": (5737005, "4ba64f0332abcfb0b600b7df1537d1e836e68009d5fb7cdb77339738dc6365c4"),
+        },
+        "dense": {"huihui-nvfp4-dense.gguf": (5991569792, "4a61a287a832429aa2faf0022e15da6359a90492b6248fb83e716b2e053581a0")},
+        "ple": {"ple-fp8.gguf": (51200246144, "40f95a6242e08e9aea2e525cd3b21c3239163d1040682facf5cf2484192d42ce")},
+        "embd": {"token-embd-bf16.gguf": (1271398656, "2533a5c442a0609ba08fef6d7c52f9944c688fdbcc1c2ee5adc760a15b28f359")},
+        "mtp": {
+            "mtp/dense.bin": (116099072, "c724dc0b0822ada5d2977bf5bde821605feabaa64ea2e0045b67ca656329070a"),
+            "mtp/dense.txt": (1880, "8773c81ebb0986e37fe94a8a9933e87be48b1fabc6889a0106bcdab179d1c2ac"),
+            "mtp/draft_vocab.bin": (235852, "25d7fd1670a2e0ec885868d1718d410a3baab03bceeacf0a156cf93ffe4e1ef4"),
+            "mtp/experts.bin": (707788800, "09398406be61f1f54c93861f449e48b8df0bfccbc9ec9b2b7636775a6ea9244f"),
+        },
+        "profile": {},
+    },
+    ORCA_REPO: {
+        "revision": "34c2fc2cd547c5278800c67c3ab9f0e3405f6942",
+        "pack": {
+            "pack/dense.bin": (1538625024, "0c83c1629ffdb6b13ee2a504f37aa7837ba62c4ecbaebf40eb0beb82b2075bca"),
+            "pack/experts.bin": (67948118016, "11285bd6f1c5d8d9338905f5b16a89c3910651da7835a259c26b6a1a1eb91e71"),
+            "pack/index.txt": (117515, "53440aa4730542ae0042e18e63e6d47af72ed869e6c85963dad84d2cf3ed01d4"),
+            "pack/native_experts.txt": (1599, "615f655fb28bf60b243664860b135710bf4177b111c6be89073e780a35de1018"),
+            "pack/tokenizer/chat_template.jinja": (8952, "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"),
+            "pack/tokenizer/merges.txt": (3600844, "080cf95432173729d160346b7882bd2a644b07f7a3813a3eb73f4e66787bfde9"),
+            "pack/tokenizer/token_type.json": (744960, "5088c8c298fc06af8382ddb3b76c888703ac2634e82263b97eedcc2ad202738b"),
+            "pack/tokenizer/tokenizer.json": (554, "87be2ac47d8bc7393b7435df6ccd276740019a393941a2585d5edce59f450c54"),
+            "pack/tokenizer/vocab.json": (5737005, "4ba64f0332abcfb0b600b7df1537d1e836e68009d5fb7cdb77339738dc6365c4"),
+        },
+        "dense": {"orca-nvfp4-dense.gguf": (5992177344, "6efd902e5fdb9dd58ce32608b645296721d11d0fc60a9677d4f322452a927ffe")},
+        "ple": {"ple-fp8.gguf": (51200246144, "40f95a6242e08e9aea2e525cd3b21c3239163d1040682facf5cf2484192d42ce")},
+        "embd": {"token-embd-bf16.gguf": (1271398688, "62cb3bbd00013a04e76b831acafd9b87ed1376b59a50e85b0e91278f72e3a8c8")},
+        "mtp": {
+            "mtp/dense.bin": (116099072, "85f313ccb60e934e61b31001a42349f0503e97586d9cc2529cb227cfab14e3ac"),
+            "mtp/dense.txt": (1880, "8773c81ebb0986e37fe94a8a9933e87be48b1fabc6889a0106bcdab179d1c2ac"),
+            "mtp/draft_vocab.bin": (235852, "25d7fd1670a2e0ec885868d1718d410a3baab03bceeacf0a156cf93ffe4e1ef4"),
+            "mtp/experts.bin": (707788800, "96bdec41a96658aa7c3f28fdd388b2ccf4bffa253de85bee94b20231fdfa8bf3"),
+        },
+        "profile": {},
+    },
 }
 NVFP4_FAMILIES = {
     "huihui-nvfp4": {"title": "Huihui Qwen3.8-Flash-Next abliterated (NVFP4)",
