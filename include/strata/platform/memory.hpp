@@ -41,8 +41,10 @@ inline bool low_ram_auto(uint64_t installed) { return installed > 0 && installed
 
 /// Windows' page files.  The commit limit is RAM + page files, and under WDDM the GPU's allocations are charged to it
 /// too (~30 GiB on a 32 GB card): the NVFP4 models commit ~100 GiB.  Sizes in Windows' dialog units ("MB" = MiB), so
-/// a file typed as 64000 counts 64000.  Below kPageFileWarnMb in all, the engine and setup warn; kPageFileAdviseMb is
-/// what they advise.
+/// a file typed as 64000 counts 64000.  Only what is there for sure counts: a page file Windows grows on demand
+/// (system-managed, or an initial size below the maximum) may not grow in time while WDDM charges the VRAM (upstream
+/// issue #60: "System managed" and 4096-32768 MB still failed, a fixed 64 GB worked).  Below kPageFileWarnMb in all,
+/// the engine and setup warn; kPageFileAdviseMb is what they advise, as a fixed size (initial = maximum).
 constexpr uint64_t kPageFileWarnMb = 60000, kPageFileAdviseMb = 64000;
 
 /// One PagingFiles entry ("C:\pagefile.sys 16000 64000", "C:\pagefile.sys 0 0" or "?:\pagefile.sys"): the drive
@@ -63,28 +65,25 @@ inline bool parse_paging_file(const std::string& line, char& drive, int64_t& ini
     return true;
 }
 
-/// What one page file can reach (MB): a set size its maximum; a system-managed one Windows' documented maximum,
-/// 3 x RAM (at least 4096) but at most an eighth of its volume.  Either way no more than the file is now plus the
-/// volume's free space (a file grows only into free space).  `volume_mb` 0 = unknown (no volume cap).
-inline uint64_t page_file_allowed_mb(int64_t initial_mb, int64_t max_mb, uint64_t ram_mb, uint64_t volume_mb,
-                                     uint64_t free_mb, uint64_t current_mb) {
-    uint64_t want;
-    if (max_mb > 0) {
-        want = (uint64_t) (initial_mb > max_mb ? initial_mb : max_mb);
-    } else {
-        want = 3 * ram_mb > 4096 ? 3 * ram_mb : 4096;
-        if (volume_mb > 0 && want > volume_mb / 8) want = volume_mb / 8;
-    }
-    const uint64_t room = current_mb + free_mb;
-    return want < room ? want : room;
+/// What one page file has for sure (MB): its size now, or its configured initial size when that is larger (a size
+/// raised in the dialog), the initial size no more than the file is now plus the volume's free space.  Never the
+/// maximum, nor what a system-managed file (`initial_mb` -1) may grow to.
+inline uint64_t page_file_guaranteed_mb(int64_t initial_mb, uint64_t free_mb, uint64_t current_mb) {
+    uint64_t want = initial_mb > 0 ? (uint64_t) initial_mb : 0;
+    if (want > current_mb + free_mb) want = current_mb + free_mb;
+    return want > current_mb ? want : current_mb;
 }
 
+/// Whether Windows grows a page file on demand: system-managed (`max_mb` -1), or an initial size below the maximum.
+inline bool page_file_grows(int64_t initial_mb, int64_t max_mb) { return max_mb <= 0 || initial_mb < max_mb; }
+
 /// The configured page files (HKLM\...\Memory Management\PagingFiles, what the Virtual memory dialog writes), each
-/// counted by page_file_allowed_mb.  `known` false off Windows or when the setting cannot be read.
+/// counted by page_file_guaranteed_mb.  `known` false off Windows or when the setting cannot be read.
 struct PageFiles {
     bool known = false;
-    uint64_t total_mb = 0;
-    std::string detail;   ///< "C: 64000 MB (set), D: 64000 MB (set)", for the log
+    uint64_t total_mb = 0;   ///< what they have for sure, every drive summed
+    bool grows = false;      ///< one of them is set to grow on demand (page_file_grows)
+    std::string detail;      ///< "C: 64000 MB, D: system-managed, now 6000 MB", for the log
 };
 PageFiles page_files();
 

@@ -82,13 +82,16 @@ page).
     up to the free RAM less 6 GiB, and the rest are read from `experts.bin` when needed. `--low-ram` forces it,
     `--no-low-ram` turns it off, `--ram-budget GIB` caps it
     ([64 GB of RAM](docs/NVFP4.md#64-gb-of-ram-2026-09-30), [A 96 GB PC](docs/NVFP4.md#a-96-gb-pc-2026-10-09-release-0141-nvfp42)).
-- **Page file: set 64000 MB.** Windows lets all programs together commit at most RAM + page file, and the engine
-  commits ~100 GiB with every expert in RAM (~80 GiB in the low-RAM mode): the experts plus ~30 GiB that WDDM charges
-  for the VRAM it uses. Nothing of the model is paged out, but short of commit the expert cache in VRAM is made
-  smaller, and the model can run significantly slower (a chat's round 17% and 38% slower, measured) or not start.
-  Below 60000 MB of page file in all, the engine prints a `WARNING` at start and setup a framed warning (`--check`
-  and the install). To set it: Win+R `sysdm.cpl` > Advanced > Performance Settings > Advanced > Virtual memory >
-  Change: Custom size, initial and maximum 64000 MB, then restart Windows.
+- **Page file: set a fixed 64000 MB** (initial = maximum). Windows lets all programs together commit at most RAM +
+  page file, and the engine commits ~100 GiB with every expert in RAM (~80 GiB in the low-RAM mode): the experts
+  plus ~30 GiB that WDDM charges for the VRAM it uses. Nothing of the model is paged out, but short of commit the
+  expert cache in VRAM is made smaller, and the model can run significantly slower (a chat's round 17% and 38%
+  slower, measured) or not start. Below 60000 MB of page file in all for sure, the engine prints a `WARNING` at
+  start and setup a framed warning (`--check` and the install). Only what is there for sure counts: a
+  system-managed or growing file (initial below maximum) counts at its size now, since it may not grow in time
+  while WDDM charges the VRAM (upstream #60), and the warning then says to make it fixed. To set it: Win+R
+  `sysdm.cpl` > Advanced > Performance Settings > Advanced > Virtual memory > Change: Custom size, initial and
+  maximum 64000 MB, then restart Windows.
 - **Disk:** ~130 GB for an NVFP4 model (128.8 GB of files; the expert pack and the 51 GB n-gram table are most of
   it). Setup checks the free space first. Use the fastest NVMe drive you have: every start reads 63 GiB of experts.
 
