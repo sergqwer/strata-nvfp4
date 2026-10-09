@@ -374,6 +374,31 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### huihui-nvfp4 withdrawn, the page file counted for sure (2026-10-09, release 0.1.41-nvfp4.3)
+
+- **huihui-nvfp4 loops in long thinking.** A real Claude Code request (a 72K-token prompt, adaptive thinking at
+  effort xhigh) was captured and replayed against the server, greedy. huihui-nvfp4 looped in its thinking in 9 of
+  10 runs, on 0.1.41's engine and on 0.1.40.3-nvfp4.1's, and in 2 of 5 with Qwen's recommended sampling. Our two orca
+  packs, the all-NVFP4 GPTQ one setup installs and the Q8_0-down one, looped in none of 5 each on the same request.
+  The model loops, not the engine, so setup no longer offers it:
+  - `orca-nvfp4` is the one NVFP4 family and the default where the PC meets the requirements;
+  - `--family huihui-nvfp4` stops with why and `--family orca-nvfp4`;
+  - an install of huihui keeps working: START-HERE starts it, `UPDATE.bat` updates its engine, nothing of it is
+    deleted, and each run prints one note with the reason and the replacement (`NVFP4_WITHDRAWN`). A new copy of
+    Strata is not set up like it: it says so and installs anew;
+  - switching links the PLE table, the same file in both repositories (`ple-fp8.gguf`, 51.2 GB), from the huihui
+    install instead of downloading it again.
+- **The page file, counted for sure** (c6dd7bcc). 0.1.41-nvfp4.2 counted a system-managed page file at what Windows
+  lets it grow to and a custom one at its maximum. In upstream issue #60, "System managed" and 4096-32768 MB still ran
+  out of commit and a fixed 64 GB worked: a file may not grow in time while WDDM charges the VRAM. The engine and setup
+  now count a file's size now, or its configured initial size when that is larger, never a maximum or a
+  system-managed file's growth. Below 60000 MB in all the `WARNING` says to make it a fixed 64000 MB (initial =
+  maximum), and why when a file grows on demand. This PC: C: and D: fixed at 64000 MB, 128000 MB for sure, no warning.
+- **Checks** (release build, sha 1217e500): `det_check` gives 0.1.41-nvfp4.2's tokens and logits with every expert in
+  RAM (4e70d0063a / f4fabb24f8) and in the low-RAM mode (`STRATA_EMULATE_RAM_GIB=88`: 3e56e892a1 / ef2d51ab56). Tests:
+  setup's 486 (with the bundle's, `nvfp4_table`'s and `calibrate`'s 522) OK, the other tools' 174 OK (8 skipped),
+  the server's 601 OK (13 skipped), `platform_memory_test` OK.
+
 ### A 96 GB PC (2026-10-09, release 0.1.41-nvfp4.2)
 
 No 96 GB PC here: the 128 GB one was made to look like one. `STRATA_EMULATE_RAM_GIB=N` (a diagnostic, kept in the
