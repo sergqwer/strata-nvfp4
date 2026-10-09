@@ -100,27 +100,28 @@ int ram_rule_cases() {
                     (long long) m, right ? "" : "   <-- WRONG");
         fail |= !right;
     }
-    // MB as the dialog counts them; a 96 GB PC is 97894 MB
-    const struct { const char* what; int64_t initial, max; uint64_t ram, vol, free, cur, want; } pf[] = {
-        {"set 64000, on the disk", 64000, 64000, 130231, 1907726, 900000, 64000, 64000},
-        {"set 16000", 16000, 16000, 97894, 1907726, 900000, 16000, 16000},
-        {"16000-64000, room to grow", 16000, 64000, 97894, 1907726, 900000, 16000, 64000},
-        {"16000-64000, 20000 free", 16000, 64000, 97894, 1907726, 20000, 16000, 36000},
-        {"system, 96 GB, 2 TB drive: 3 x RAM", -1, -1, 97894, 1907726, 900000, 6000, 238465},
-        {"system, 96 GB, 1 TB drive: an eighth", -1, -1, 97894, 953869, 500000, 6000, 119233},
-        {"system, 96 GB, 500 GB drive: an eighth", -1, -1, 97894, 476940, 200000, 6000, 59617},
-        {"system, 96 GB, 2 TB drive, 30000 free", -1, -1, 97894, 1907726, 30000, 6000, 36000},
-        {"system, 8 GB: at least 4096", -1, -1, 1000, 1907726, 900000, 1000, 4096},
+    // MB as the dialog counts them.  Only what is there for sure: the size now, or a larger initial size (#60)
+    const struct { const char* what; int64_t initial, max; uint64_t free, cur, want; bool grows; } pf[] = {
+        {"set 64000, on the disk", 64000, 64000, 900000, 64000, 64000, false},
+        {"set 16000", 16000, 16000, 900000, 16000, 16000, false},
+        {"16000-64000: its initial size", 16000, 64000, 900000, 16000, 16000, true},
+        {"16000-64000, grown to 30000 now", 16000, 64000, 900000, 30000, 30000, true},
+        {"system-managed, now 6000", -1, -1, 900000, 6000, 6000, true},
+        {"set 64000, the file still 16000", 64000, 64000, 900000, 16000, 64000, false},
+        {"set 64000, the file 16000, 20000 free", 64000, 64000, 20000, 16000, 36000, false},
+        {"none on the drive", -1, -1, 900000, 0, 0, true},
     };
     for (const auto& c : pf) {
-        const uint64_t got = page_file_allowed_mb(c.initial, c.max, c.ram, c.vol, c.free, c.cur);
-        std::printf("page_file_allowed_mb %-40s -> %llu%s\n", c.what, (unsigned long long) got,
-                    got == c.want ? "" : "   <-- WRONG");
-        fail |= got != c.want;
+        const uint64_t got = page_file_guaranteed_mb(c.initial, c.free, c.cur);
+        const bool grows = page_file_grows(c.initial, c.max);
+        std::printf("page_file_guaranteed_mb %-40s -> %llu%s%s\n", c.what, (unsigned long long) got,
+                    grows ? " (grows on demand)" : "", got == c.want && grows == c.grows ? "" : "   <-- WRONG");
+        fail |= got != c.want || grows != c.grows;
     }
     const PageFiles here = page_files();
-    std::printf("page_files here: known=%d total %llu MB (%s)%s\n", (int) here.known, (unsigned long long) here.total_mb,
-                here.detail.c_str(), here.known && here.total_mb < kPageFileWarnMb ? " - the engine warns" : "");
+    std::printf("page_files here: known=%d total %llu MB for sure, grows=%d (%s)%s\n", (int) here.known,
+                (unsigned long long) here.total_mb, (int) here.grows, here.detail.c_str(),
+                here.known && here.total_mb < kPageFileWarnMb ? " - the engine warns" : "");
     return fail;
 }
 }  // namespace

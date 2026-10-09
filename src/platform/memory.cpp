@@ -146,7 +146,6 @@ PageFiles page_files() {
     std::vector<std::string> set;
     if (!mm_multi_sz(L"PagingFiles", set)) return r;   // no value at all: Windows has no page file setting to read
     r.known = true;
-    const uint64_t ram_mb = total_physical_memory() >> 20;
     // "?:\pagefile.sys": automatic on every drive - Windows keeps it where ExistingPageFiles says, else the system drive
     std::vector<char> auto_drives;
     {
@@ -178,20 +177,21 @@ PageFiles page_files() {
                 current_mb = ((((uint64_t) fd.nFileSizeHigh) << 32) | fd.nFileSizeLow) >> 20;  // file itself is locked
                 FindClose(h);
             }
-            const uint64_t mb = vol ? page_file_allowed_mb(initial, max, ram_mb, total_b.QuadPart >> 20,
-                                                           free_b.QuadPart >> 20, current_mb)
-                                    : (max > 0 ? (uint64_t) max : current_mb);
+            // what is there for sure: a file Windows grows on demand may not grow in time for WDDM's charge (#60)
+            const uint64_t mb = vol ? page_file_guaranteed_mb(initial, free_b.QuadPart >> 20, current_mb) : current_mb;
             r.total_mb += mb;
+            r.grows = r.grows || page_file_grows(initial, max);
             char b[160];
             if (max > 0 && initial == max)
                 std::snprintf(b, sizeof b, "%c: %lld MB", d, (long long) max);
             else if (max > 0)
-                std::snprintf(b, sizeof b, "%c: %lld-%lld MB", d, (long long) initial, (long long) max);
+                std::snprintf(b, sizeof b, "%c: %lld-%lld MB, grows on demand, now %llu MB", d, (long long) initial,
+                              (long long) max, (unsigned long long) current_mb);
             else
-                std::snprintf(b, sizeof b, "%c: system-managed, now %llu MB, can grow to %llu", d,
-                              (unsigned long long) current_mb, (unsigned long long) mb);
+                std::snprintf(b, sizeof b, "%c: system-managed, grows on demand, now %llu MB", d,
+                              (unsigned long long) current_mb);
             std::string part = b;
-            if (max > 0 && mb < (uint64_t) max)
+            if (initial > 0 && mb < (uint64_t) initial)
                 part += " (only " + std::to_string((unsigned long long) mb) + " fit the free disk)";
             r.detail += (r.detail.empty() ? "" : ", ") + part;
         }

@@ -278,8 +278,9 @@ Each change was measured - first-token KL against a reference, and interleaved s
   is ever paged out. Short of commit, the expert cache in VRAM opens smaller (a quarter less a try), and the model
   can run significantly slower (measured: one step made a chat's round 17% slower, two steps 38%); an arena that
   cannot be committed stops the start with an allocation error. The engine (one `WARNING` line at start)
-  and setup (`--check` and the install) warn when all pagefiles together are below 60000 MB; a system-managed one
-  counts as what Windows lets it grow to (3 x RAM, at most an eighth of its drive, within the free space).
+  and setup (`--check` and the install) warn when all pagefiles together have below 60000 MB for sure: a
+  system-managed or growing one (initial below maximum) counts at its size now, since it may not grow in time while
+  WDDM charges the VRAM (upstream #60), and the warning then says to make it a fixed 64000 MB.
 - **Disk:** with setup's ready-made files ~130 GB: the expert pack ~70 GB, the n-gram table 51 GB, the dense GGUF,
   the embedding (1.3 GB) and the MTP head (0.8 GB); setup counts the exact sizes from its file table and checks the
   free space first. Converting the checkpoint yourself: ~200 GB for the model files (GGUF 74 GB, expert pack 70 GB,

@@ -2182,17 +2182,22 @@ int main(int argc, char** argv) {
     }
 #if defined(_WIN32)
     // Windows' commit limit is RAM + page files, and WDDM charges the GPU's allocations to it too: short of it the auto
-    // expert cache opens smaller (a quarter less a try, issue #60) and an arena that cannot be committed stops the start
+    // expert cache opens smaller (a quarter less a try, issue #60) and an arena that cannot be committed stops the start.
+    // Only what the page files have for sure counts: a file Windows grows on demand may not grow in time (#60)
     if (const auto pf = strata::platform::page_files(); pf.known && pf.total_mb < strata::platform::kPageFileWarnMb)
-        std::fprintf(stderr, "strata generate: WARNING: the page file is too small: %llu MB in all (%s). INCREASE it to "
-                             "%llu MB (64 GB). Windows lets all programs together commit only RAM + page file, and the "
-                             "engine commits ~100 GiB with the NVFP4 models (~80 in the low-RAM mode): the experts in "
-                             "RAM plus ~30 GiB that WDDM charges for the VRAM it uses. Short of that the expert cache in "
-                             "VRAM is made smaller, so the model can run significantly slower, or the start fails with "
-                             "an allocation error. System Properties (Win+R, sysdm.cpl) > Advanced > Performance "
-                             "Settings > Advanced > Virtual memory > Change: Custom size, initial and maximum %llu MB, "
-                             "Set, then restart Windows\n",
+        std::fprintf(stderr, "strata generate: WARNING: the page file is too small: %llu MB in all for sure (%s). %s"
+                             "INCREASE it to %llu MB (64 GB), a fixed size. Windows lets all programs together commit "
+                             "only RAM + page file, and the engine commits ~100 GiB with the NVFP4 models (~80 in the "
+                             "low-RAM mode): the experts in RAM plus ~30 GiB that WDDM charges for the VRAM it uses. Short "
+                             "of that the expert cache in VRAM is made smaller, so the model can run significantly "
+                             "slower, or the start fails with an allocation error. System Properties (Win+R, sysdm.cpl) > "
+                             "Advanced > Performance Settings > Advanced > Virtual memory > Change: untick \"Automatically "
+                             "manage\", Custom size, initial and maximum both %llu MB, Set, then restart Windows\n",
                      (unsigned long long) pf.total_mb, pf.detail.c_str(),
+                     pf.grows ? "It is set to grow on demand (system-managed, or an initial size below the maximum), and "
+                                "a growing page file may not grow in time while WDDM charges the VRAM (issue #60: "
+                                "\"System managed\" and 4096-32768 MB still failed, a fixed 64 GB worked), so only its "
+                                "size now counts. " : "",
                      (unsigned long long) strata::platform::kPageFileAdviseMb,
                      (unsigned long long) strata::platform::kPageFileAdviseMb);
 #endif
