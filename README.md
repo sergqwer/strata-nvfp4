@@ -2,8 +2,9 @@
 
 **Qwen3.8-Flash-Next (125B hybrid MoE) with NVFP4 experts on one RTX 20, 30, 40 or 50 card (12 GB of VRAM or more)
 and 64 GB of RAM or more, text and pictures.** A fork of [Niko1221/Strata](https://github.com/Niko1221/Strata), on
-upstream 0.1.41. Setup installs our GPTQ NVFP4 quant of OrcaRouter's abliterated Flash-Next, ready-made from
-Hugging Face; upstream's GGUF models are still offered.
+upstream 0.1.41. Setup installs, ready-made from Hugging Face, our GPTQ NVFP4 quant of OrcaRouter's abliterated
+Flash-Next and the original, censored Qwen in NVFP4 (NVIDIA's checkpoint converted, or our GPTQ); upstream's GGUF
+models are still offered.
 
 The design is upstream's: the routed experts live in RAM, the most-used ones are cached in VRAM, the misses are
 computed on the CPU and fetched over PCIe in parallel with the GPU, and an MTP draft head speculates. Upstream's README
@@ -25,6 +26,8 @@ page).
 | `--family` | the model | license |
 | --- | --- | --- |
 | `orca-nvfp4` (the default) | [OrcaRouter's uncensored Qwen3.8-Flash-Next](https://huggingface.co/OrcaRouter/Qwen3.8-Flash-Next-Uncensored), every expert NVFP4 by GPTQ: [Maximilian228/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-NVFP4-GPTQ-Strata](https://huggingface.co/Maximilian228/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-NVFP4-GPTQ-Strata) | Qwen Community License 1.0 (the LICENSE OrcaRouter ships; its card says Apache 2.0) |
+| `qwen-nvidia-nvfp4` | **NVIDIA's** NVFP4 of the original, censored Qwen3.8-Flash-Next ([nvidia/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4), ModelOpt), converted for Strata with its experts bit for bit: [Maximilian228/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Strata) | NVIDIA Open Model License and the Qwen Community License 1.0 |
+| `qwen-nvfp4-gptq` | the original, censored [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next), every expert NVFP4 by our GPTQ: [Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata) | Qwen Community License 1.0 |
 | `qwen`, `swift`, `coder`, `unsloth` | upstream Strata's GGUF models: ISTA-DASLab's GSQ-RCO quants of Qwen3.8-Flash-Next, Swift 1.5 and the Coder, Unsloth's ~4-bit files | as upstream lists them |
 
 - **The NVFP4 model comes ready-made:** the expert pack, the dense GGUF, the FP8 n-gram table, the BF16 embedding
@@ -35,6 +38,12 @@ page).
   card).
 - **`orca-nvfp4` is the default** where the PC meets the [requirements](#requirements); a PC below them gets a GGUF
   model as the default, and `--family orca-nvfp4 --yes` installs it anyway.
+- **The original Qwen, censored (0.1.41-nvfp4.4):** `qwen-nvidia-nvfp4` is NVIDIA's own NVFP4 checkpoint, quantized
+  by NVIDIA and only converted here; its license does not allow bypassing its safety guardrails. `qwen-nvfp4-gptq` is
+  our GPTQ of Qwen's BF16: 33.3% of plain rounding's error and 44.8% of NVIDIA's (NVIDIA's own is 74.4% of plain
+  rounding's), lower in all 48 layers, at the same size and speed (179 against 175 tokens/s). They share the n-gram table, the embedding and the
+  draft head: the second one links them instead of downloading them again
+  ([The original Qwen in NVFP4](docs/NVFP4.md#the-original-qwen-in-nvfp4-2026-10-09-release-0141-nvfp44)).
 - **`huihui-nvfp4` was withdrawn in 0.1.41-nvfp4.3: it often loops in long thinking.** A real Claude Code request
   (a 72K-token prompt, adaptive thinking at effort xhigh), replayed greedy, looped in its thinking in 9 of 10 runs, on
   this engine and on 0.1.40.3's, and in 2 of 5 with Qwen's sampling; `orca-nvfp4` (the GPTQ pack setup installs)
