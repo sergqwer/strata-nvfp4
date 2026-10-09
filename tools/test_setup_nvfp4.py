@@ -1,13 +1,14 @@
 """This fork's NVFP4 models in setup (huihui-nvfp4, the default; orca-nvfp4): chosen from the menu or by --family, the
 start script's engine arguments (the tray's working set), a family refused while its file table (NVFP4_REPOS) is
-empty, the requirements (an NVIDIA RTX 20+ card, 12 GB of VRAM, 64 GB of RAM, the engine's low-RAM mode below 96 GB,
-the disk), the engine (this fork's, never upstream's) and --dry-run.  setup.main() on mocked PCs through
+empty, the requirements (an NVIDIA RTX 20+ card, 12 GB of VRAM, 64 GB of RAM, the engine's low-RAM mode below 92 GiB,
+the disk, the page file), the engine (this fork's, never upstream's) and --dry-run.  setup.main() on mocked PCs through
 tools/test_setup_golden.py's harness: no GPU, no downloads, nothing written outside a temp folder.
 
     python -m unittest tools.test_setup_nvfp4
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import io
 import json
@@ -299,11 +300,11 @@ class Requirements(unittest.TestCase):
                 code, out, cfg, _ = run(ram, found, ["--family", "huihui-nvfp4", "--no-start"], answers="")
                 self.assertEqual(code, 1)                                    # Enter declines the risk
 
-    def test_the_low_ram_mode_below_96_gb(self):
+    def test_the_low_ram_mode_below_92_gib(self):
         ram, found = PROFILES["64GB-1x32GB"]
         code, out, cfg, _ = run(ram, found, ["--family", "huihui-nvfp4", "--no-start"])
         self.assertEqual(code, 0, out[-3000:])
-        self.assertIn("the engine's low-RAM mode (on by itself below 96 GB)", out)
+        self.assertIn("the engine's low-RAM mode (on by itself below 92 GiB)", out)
         for flag in ("--low-ram", "--no-low-ram", "--mmap-experts", "--resident-experts", "--ram-budget"):
             self.assertNotIn(flag, cfg["args"])                              # the engine decides, as the tray runs
         for argv, want in ((["--low-ram", "on"], ["--low-ram"]), (["--low-ram", "off"], ["--no-low-ram"]),
@@ -585,6 +586,126 @@ class Check(unittest.TestCase):
         self.assertIn("huihui-nvfp4 fits in the engine's low-RAM mode", out)
         code, out, _, _ = run(ram, found, ["--check"], repos=EMPTY)
         self.assertIn("huihui-nvfp4 not offered: not published yet", out)
+
+
+class RamRule(unittest.TestCase):
+    """ram88: the engine's auto low-RAM rule (generate.cpp, platform::low_ram_auto) - below 92 GiB of ullTotalPhys -
+    and setup's NVFP4_ALL_RAM_GB are one number; a 96 GB PC (93.4-95.6 GiB listed) gets every expert in RAM."""
+    def test_the_threshold(self):
+        self.assertEqual(setup.NVFP4_ALL_RAM_GB, 92)
+        for ram, low in ((127.18, False), (95.6, False), (93.4, False), (92.0, False), (91.9, True), (63.7, True),
+                         (0.0, False)):
+            with self.subTest(ram):
+                self.assertEqual(setup.engine_low_ram(ram), low)
+
+    def test_check_and_install_on_a_96_gb_pc(self):
+        found = [card(0, "NVIDIA GeForce RTX 5090", 31.8, "120")]
+        code, out, _, _ = run(95.6, found, ["--check"])
+        self.assertEqual(code, 0, out[-3000:])
+        line = next(x for x in out.splitlines() if x.strip().startswith("huihui-nvfp4"))
+        self.assertEqual(line.split(None, 1)[1], "fits (all 63 GiB of experts in RAM)")
+        code, out, cfg, _ = run(95.6, found, ["--family", "huihui-nvfp4", "--no-start"])
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertIn("RAM: 95.6 GiB - all 63 GiB of experts are loaded into RAM", out)
+        for flag in ("--low-ram", "--no-low-ram", "--mmap-experts", "--resident-experts", "--ram-budget"):
+            self.assertNotIn(flag, cfg["args"])                              # the engine decides the same way
+        code, out, _, _ = run(63.7, found, ["--check"])
+        self.assertIn("huihui-nvfp4 fits in the engine's low-RAM mode (below 92 GiB", out)
+
+
+def page_file_os(paging, existing=("\\??\\C:\\pagefile.sys",), volumes=None):
+    """The OS query page_files() makes, mocked: the registry's PagingFiles / ExistingPageFiles and each drive's
+    (volume MB, free MB, page file MB now)."""
+    vols = volumes or {}
+    return [mock.patch.object(setup, "WIN", True),
+            mock.patch.object(setup, "_mm_multi_sz", lambda name: None if paging is None else list(paging)
+                              if name == "PagingFiles" else list(existing)),
+            mock.patch.object(setup, "_volume_mb", lambda d: vols.get(d, (1907726, 900000, 0)))]
+
+
+class PageFile(unittest.TestCase):
+    """A page file below 60000 MB in all is warned about (setup and the engine, never a stop), 64000 advised; sizes in
+    the Virtual memory dialog's MB, every drive's file summed."""
+    def pf(self, *a, ram=95.6, **k):
+        with contextlib.ExitStack() as st:
+            for p in page_file_os(*a, **k):
+                st.enter_context(p)
+            st.enter_context(mock.patch.object(setup, "ram_gb", lambda: ram))
+            return setup.page_files(), setup.page_file_warning()
+
+    def test_this_pc_two_fixed_files(self):
+        got, w = self.pf(["c:\\pagefile.sys 64000 64000", "d:\\pagefile.sys 64000 64000"],
+                         volumes={"C": (1907726, 900000, 64000), "D": (3815453, 1000000, 64000)})
+        self.assertEqual(got, (128000, "C: 64000 MB, D: 64000 MB"))
+        self.assertIsNone(w)
+
+    def test_64000_typed_is_enough_and_59999_is_not(self):
+        self.assertIsNone(self.pf(["C:\\pagefile.sys 64000 64000"], volumes={"C": (1907726, 900000, 64000)})[1])
+        self.assertIsNone(self.pf(["C:\\pagefile.sys 60000 60000"], volumes={"C": (1907726, 900000, 60000)})[1])
+        got, w = self.pf(["C:\\pagefile.sys 59999 59999"], volumes={"C": (1907726, 900000, 59999)})
+        self.assertEqual(got[0], 59999)
+        self.assertIn("INCREASE it to 64000 MB (64 GB)", w[0])
+        self.assertIn("59999 MB in all (C: 59999 MB)", w[0])
+
+    def test_two_small_files_are_summed(self):
+        got, w = self.pf(["C:\\pagefile.sys 32000 32000", "D:\\pagefile.sys 32000 32000"],
+                         volumes={"C": (953869, 400000, 32000), "D": (953869, 400000, 32000)})
+        self.assertEqual(got[0], 64000)
+        self.assertIsNone(w)
+
+    def test_a_growing_file_counts_its_maximum_within_the_free_disk(self):
+        self.assertEqual(self.pf(["C:\\pagefile.sys 16000 64000"], volumes={"C": (953869, 400000, 16000)})[0][0], 64000)
+        got, w = self.pf(["C:\\pagefile.sys 16000 64000"], volumes={"C": (953869, 30000, 16000)})
+        self.assertEqual(got, (46000, "C: 16000-64000 MB (only 46000 fit the free disk)"))
+        self.assertIsNotNone(w)
+
+    def test_system_managed(self):
+        # Windows' maximum: 3 x RAM (at least 4096), at most an eighth of the volume - counted, it grows on demand
+        for paging in (["C:\\pagefile.sys 0 0"], ["?:\\pagefile.sys"], ["C:\\pagefile.sys"]):
+            with self.subTest(paging):
+                got, w = self.pf(paging, volumes={"C": (953869, 500000, 6000)})        # a 1 TB drive
+                self.assertEqual(got, (119233, "C: system-managed, now 6000 MB, can grow to 119233"))
+                self.assertIsNone(w)
+        got, w = self.pf(["?:\\pagefile.sys"], volumes={"C": (476940, 200000, 6000)})   # a 500 GB drive
+        self.assertEqual(got[0], 59617)
+        self.assertIn("system-managed", w[0])
+        got, _ = self.pf(["?:\\pagefile.sys"], existing=("\\??\\D:\\pagefile.sys",),
+                         volumes={"D": (1907726, 900000, 6000)})                       # where Windows keeps it now
+        self.assertEqual(got, (238465, "D: system-managed, now 6000 MB, can grow to 238465"))
+
+    def test_none_and_unknown(self):
+        got, w = self.pf([])
+        self.assertEqual(got, (0, "no page file"))
+        self.assertIn("0 MB in all (no page file)", w[0])
+        self.assertEqual(self.pf(None), (None, None))                                # the setting cannot be read
+        with mock.patch.object(setup, "WIN", False):
+            self.assertIsNone(setup.page_files())
+
+    def test_the_message(self):
+        _, (long, short) = self.pf(["C:\\pagefile.sys 16000 16000"], volumes={"C": (953869, 400000, 16000)})
+        for words in ("WARNING", "INCREASE it to 64000 MB", "commit only RAM + page file", "~100 GiB",
+                      "~30 GiB that WDDM charges", "significantly slower", "not start", "sysdm.cpl",
+                      "Virtual memory", "initial and maximum 64000 MB"):
+            self.assertIn(words, long)
+        self.assertIn("INCREASE it to 64000 MB", short)
+
+    def test_check_and_install_say_it_framed_and_again_at_the_end(self):
+        found = [card(0, "NVIDIA GeForce RTX 5090", 31.8, "120")]
+        small = [mock.patch.object(setup, "page_files", lambda: (16000, "C: 16000 MB"))]
+        code, out, _, _ = run(95.6, found, ["--check"], extra=small)
+        self.assertEqual(code, 0, out[-3000:])                               # a warning, never a stop
+        self.assertIn("!" * 100, out)
+        self.assertIn("[!]  WARNING: the page file is too small - INCREASE it to 64000 MB", out)
+        tail = out[out.index("This PC can run Strata"):]
+        self.assertIn("WARNING: the page file is too small (16000 MB): INCREASE it to 64000 MB", tail)
+        for argv in (["--family", "huihui-nvfp4", "--no-start"], ["--family", "huihui-nvfp4", "--dry-run"]):
+            with self.subTest(argv):
+                code, out, _, _ = run(95.6, found, argv, extra=small)
+                self.assertEqual(code, 0, out[-3000:])
+                self.assertEqual(out.count("WARNING: the page file is too small - INCREASE"), 1)
+                self.assertIn("WARNING: the page file is too small (16000 MB)", out[-1500:])
+        code, out, _, _ = run(95.6, found, ["--check"])                      # the harness: 2 x 64000 MB
+        self.assertNotIn("page file is too small", out)
 
 
 if __name__ == "__main__":

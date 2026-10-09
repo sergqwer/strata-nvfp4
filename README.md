@@ -7,10 +7,10 @@ and measured on an RTX 5090) + 64 GB of RAM or more, text and pictures.** A fork
 instead of the Q2/Q3 quants Strata ships for. NVFP4 keeps the experts at 4.5 bits with calibrated scales, which is
 why this fork exists: the 2-3 bit quants were noticeably less accurate on the same model.
 
-Strata itself keeps the routed experts in RAM (63 GiB here; with less than 96 GB of RAM this fork keeps only the
-ones outside VRAM and reads the rest from the SSD), caches the most-used ones in VRAM, computes the misses on the CPU
-and over PCIe in parallel with the GPU, and decodes with an MTP draft head. Everything about that design is
-upstream's; the original README is kept as [README.upstream.md](README.upstream.md).
+Strata itself keeps the routed experts in RAM (63 GiB here; with less than 92 GiB of RAM installed, a 64 GB PC, this
+fork keeps only the ones outside VRAM and reads the rest from the SSD), caches the most-used ones in VRAM, computes the
+misses on the CPU and over PCIe in parallel with the GPU, and decodes with an MTP draft head. Everything about that
+design is upstream's; the original README is kept as [README.upstream.md](README.upstream.md).
 
 ## Quick start
 
@@ -92,10 +92,10 @@ Setting it all up by hand - the engine, and converting the ModelOpt checkpoint y
   142 of the vocabulary's 18,580 Cyrillic tokens - an answer in Cyrillic decoded at 83 tokens/s with 1.4 tokens a round;
   with the whole Cyrillic script (`tools/draft_vocab.py --add cyrillic`), 109 and 2.1. English is unchanged.
   Upstream's CJK subset is one `--add cjk` away (`data/draft_vocab_en.bin` is the English/code one).
-- **64 GB of RAM is enough:** with less than 96 GB installed the engine runs upstream's file tier
+- **64 GB of RAM is enough:** with less than 92 GiB installed the engine runs upstream's file tier
   (`--mmap-experts --resident-budget-gib`) with a budget of the free RAM less 6 GiB: the experts outside VRAM,
   hottest first, pinned; the rest is read from `experts.bin` when needed - unbuffered, in merged requests (this
-  fork's addition, upstream since 0.1.38 as #362). The whole 63 GiB arena needs 96 GB. On an RTX 5090 + 64 GB a 32K
+  fork's addition, upstream since 0.1.38 as #362). The whole 63 GiB arena needs a 96 GB PC. On an RTX 5090 + 64 GB a 32K
   prompt waits 9.3 s instead of 5.7, and the answer after it runs at 97 tokens/s.
 - **Every RTX 20, 30, 40 and 50 card with 12 GB or more:** the NVFP4 path needed Blackwell only for the optional
   FP4 x FP4 prompt path, which falls back; the release carries code for all four generations, each one's own path
@@ -239,10 +239,12 @@ Each change was measured - first-token KL against a reference, and interleaved s
   \* On the RTX 5090 with the smaller card's VRAM budget (`--vram-reserve-mib`); a real card's own compute and PCIe
   make it slower. 12 GB at 262144 and 8 GB cards at any context stop with *no VRAM is left for the expert cache*.
 
-- **RAM:** 64 GB minimum. With 96 GB or more the engine pins all 63 GiB of experts (~69 GiB of physical RAM in
-  all, measured with 128 GB). With less, the low-RAM mode starts by itself (`--low-ram`; `--no-low-ram` turns it
-  off; `--ram-budget GIB` caps it): the experts outside VRAM, hottest first, pinned up to the free RAM minus 6 GiB;
-  the rest is read from the file when needed. With 64 GB and an RTX 5090 all 44 GiB of them fit:
+- **RAM:** 64 GB minimum. With 92 GiB installed or more (a 96 GB PC: Windows lists 93-95.6 GiB) the engine pins
+  all 63 GiB of experts (~67 GiB of physical RAM for the engine, ~71 with images and the server; with 88 GiB left
+  to it 16-21 GiB stayed free, and it ran as on 128 GB: chat 13.1 ms a round against 12.7). With less, the low-RAM
+  mode starts by itself (`--low-ram`; `--no-low-ram` turns it off; `--ram-budget GIB` caps it): the experts outside
+  VRAM, hottest first, pinned up to the free RAM minus 6 GiB; the rest is read from the file when needed. With 64 GB
+  and an RTX 5090 all 44 GiB of them fit:
 
   | 64 GB of RAM (measured*) with an RTX 5090 | |
   | --- | ---: |
@@ -254,11 +256,14 @@ Each change was measured - first-token KL against a reference, and interleaved s
   on a 64 GB PC whose Windows uses 6 GB). The smaller cards' 64 GB figures (0.1.28-nvfp4.4: 24 GB 86-90 tok/s,
   16 GB 54-56) were not measured again on this release.
 
-- **Pagefile:** Windows lets all processes together commit at most RAM + pagefile, and the engine commits ~98 GiB
-  with all experts pinned, ~70-85 GiB in the low-RAM mode (the pinned RAM plus what WDDM reserves for the GPU's
-  allocations; nothing of the model is ever paged out). With Windows and the usual apps on top: **a pagefile of at
-  least 32 GB with 128 GB of RAM, 64 GB with 96 GB, 48 GB with 64 GB**. Set a fixed minimum rather than relying on a
-  system-managed file to grow in time. Too small, and the start fails with an allocation error.
+- **Pagefile: set 64000 MB** (System Properties - Win+R, `sysdm.cpl` - > Advanced > Performance Settings >
+  Advanced > Virtual memory > Change: Custom size, initial and maximum 64000 MB, then restart). Windows lets all
+  programs together commit at most RAM + pagefile, and the engine commits ~100 GiB with all experts pinned (63 GiB
+  of experts plus ~30 GiB that WDDM charges for the VRAM it uses), ~80 GiB in the low-RAM mode; nothing of the model
+  is ever paged out. Short of commit, the expert cache in VRAM opens smaller (a quarter less a try: slower) and an
+  arena that cannot be committed stops the start with an allocation error. The engine (one `WARNING` line at start)
+  and setup (`--check` and the install) warn when all pagefiles together are below 60000 MB; a system-managed one
+  counts as what Windows lets it grow to (3 x RAM, at most an eighth of its drive, within the free space).
 - **Disk:** with setup's ready-made files ~130 GB: the expert pack ~70 GB, the n-gram table 51 GB, the dense GGUF,
   the embedding (1.3 GB) and the MTP head (0.8 GB); setup counts the exact sizes from its file table and checks the
   free space first. Converting the checkpoint yourself: ~200 GB for the model files (GGUF 74 GB, expert pack 70 GB,
@@ -472,7 +477,7 @@ either way - CUDA pins it for the GPU's copies.
 | `STRATA_QSA_WARP=1\|select\|attn` | the pre-sm_80 QSA kernels on any card, as RTX 20 runs them (A/B) |
 | `--vram-reserve-mib N` | VRAM left unused (default 700, as upstream; this fork used 1500 on Windows until 0.1.38, where 700 measured 0.8% faster with no stalls); a smaller card's budget on a bigger one |
 | `--image-max-tokens N`, `--image-min-tokens N` (`serve.server`) | image tokens a picture becomes at most / at least: a bigger picture is scaled down, a smaller one up, keeping its aspect ratio (also `"max_tokens"` / `"min_tokens"` in the config's `"vision"`; the bundle's config has 1024 and the model's minimum 8; the model reads up to 4096, and more tokens read smaller text and encode slower) |
-| `--low-ram` / `--no-low-ram` | the low-RAM mode on / off (default: on with less than 96 GB installed) |
+| `--low-ram` / `--no-low-ram` | the low-RAM mode on / off (default: on with less than 92 GiB installed) |
 | `--ram-budget GIB` | the low-RAM mode with at most GIB of pinned expert copies (upstream's `--resident-budget-gib`) |
 | `STRATA_RESIDENT_HEADROOM_GIB=6` | RAM the low-RAM mode leaves free |
 | `--no-kv-grow`, `STRATA_KV_GROW=0` | the K/V allocated for the whole context at start (before 0.1.31-nvfp4.2) |
