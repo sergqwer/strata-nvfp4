@@ -499,9 +499,12 @@ class DryRun(unittest.TestCase):
     def test_the_plan_and_nothing_else(self):
         ram, found = PROFILES["128GB-1x24GB"]
         stop = mock.Mock(side_effect=AssertionError("did something in a dry run"))
+        repos = {**FILLED, **{setup.NVFP4_FAMILIES[f]["sources"]["pack"]: table(f) for f in setup.NVFP4_FAMILIES
+                              if setup.NVFP4_FAMILIES[f]["sources"]["pack"] not in FILLED}}   # every family published
         for family in setup.NVFP4_FAMILIES:
             with self.subTest(family):
-                code, out, cfg, _ = run(ram, found, ["--family", family, "--dry-run", "--vision", "yes"], extra=[
+                code, out, cfg, _ = run(ram, found, ["--family", family, "--dry-run", "--vision", "yes"], repos=repos,
+                                        extra=[
                     mock.patch.object(setup, "data_folder", stop), mock.patch.object(setup, "pip_install", stop),
                     mock.patch.object(setup, "get_prebuilt", stop), mock.patch.object(setup, "build_engine", stop),
                     mock.patch.object(setup, "download", stop), mock.patch.object(setup, "free_gb", stop),
@@ -574,7 +577,7 @@ class DryRun(unittest.TestCase):
         ram, found = PROFILES["128GB-1x24GB"]
         code, out, _, _ = run(ram, found, ["--family", "qwen", "--dry-run"])
         self.assertEqual(code, 1)
-        self.assertIn("--dry-run shows the plan of this fork's NVFP4 model only", out)
+        self.assertIn("--dry-run shows the plan of this fork's NVFP4 models only", out)
 
 
 class Check(unittest.TestCase):

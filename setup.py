@@ -20,13 +20,14 @@ What the first run does (each step is skipped when it is already done):
   6. prepares the model for Strata and fetches the MTP draft layer (~5 GB, from the original Qwen checkpoint)
   7. writes run-<model>.bat / run-<model>.sh and starts the model
 
-This fork (sergqwer/strata-nvfp4) also offers its NVFP4 model, ready-made on Hugging Face and the default where the PC
-meets its requirements: orca-nvfp4 (OrcaRouter's uncensored Flash-Next), every expert NVFP4 by GPTQ; nothing is
-converted on the PC, and the engine is this fork's (its release's, or compiled from this source).  --dry-run shows
-what setup would do for it.  huihui-nvfp4 was withdrawn in 0.1.41-nvfp4.3 (it often loops in long thinking); an
+This fork (sergqwer/strata-nvfp4) also offers its NVFP4 models, ready-made on Hugging Face: orca-nvfp4 (OrcaRouter's
+uncensored Flash-Next, every expert NVFP4 by GPTQ; the default where the PC meets its requirements), and the original,
+censored Qwen: qwen-nvidia-nvfp4 (NVIDIA's ModelOpt NVFP4 checkpoint, converted) and qwen-nvfp4-gptq (every expert NVFP4
+by GPTQ).  Nothing is converted on the PC, and the engine is this fork's (its release's, or compiled from this
+source).  --dry-run shows what setup would do for them.  huihui-nvfp4 was withdrawn in 0.1.41-nvfp4.3 (it often loops in long thinking); an
 install of it keeps working.
 
-Options: --family orca-nvfp4|qwen|swift|coder|unsloth, --model Q2_0|IQ2_XS|IQ3_XXS|IQ3_S, --context 32768, --rope-scaling none|linear|yarn
+Options: --family orca-nvfp4|qwen-nvidia-nvfp4|qwen-nvfp4-gptq|qwen|swift|coder|unsloth, --model Q2_0|IQ2_XS|IQ3_XXS|IQ3_S, --context 32768, --rope-scaling none|linear|yarn
 (--rope-scale F; past the trained 262144 the setup adds yarn and the factor is the final context over 262144,
 at least 1 - an explicit --rope-scaling none is refused for such a context), --vision yes|no|gpu|cpu, --port
 8080, --yes (recommended
@@ -4913,14 +4914,17 @@ def bundled_cuda(eng) -> bool:
         return False
 
 
-# The NVFP4 model: OrcaRouter's abliterated Flash-Next with every expert NVFP4 by GPTQ, ready-made on Hugging Face -
-# nothing is converted on the PC (huihui-ai's, offered in 0.1.41-nvfp4.1/.2, is withdrawn: NVFP4_WITHDRAWN).
+# The NVFP4 models: OrcaRouter's abliterated Flash-Next with every expert NVFP4 by GPTQ, and the original Qwen (NVIDIA's
+# ModelOpt NVFP4 checkpoint converted, and by GPTQ), ready-made on Hugging Face - nothing is converted on the PC
+# (huihui-ai's, offered in 0.1.41-nvfp4.1/.2, is withdrawn: NVFP4_WITHDRAWN).
 # NVFP4_REPOS holds one table per repository, what its upload fixed: the commit, and per component its files (path
 # in the repository: bytes, SHA-256).  A family takes each component
 # from the repository its "sources" name - its own, or a shared one (the PLE table and the embedding, when they are
 # Qwen's own) - and is offered only once all of them are listed (nvfp4_files).
 NVFP4_MODEL = "NVFP4"                  # the one size: strata-orca-nvfp4.json, run-orca-nvfp4.bat
 ORCA_REPO = "Maximilian228/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-NVFP4-GPTQ-Strata"
+QWEN_NV_REPO = "Maximilian228/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Strata"    # nvidia/Qwen3.8-Flash-Next-NVFP4, converted
+QWEN_GPTQ_REPO = "Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata"     # Qwen/Qwen3.8-Flash-Next by GPTQ (this fork)
 # pack: the experts pack folder (index.txt, experts.bin, dense.bin, native_experts.txt, tokenizer/); dense: the GGUF
 # with the dense weights (--native and --native-dense-gguf); ple: the FP8 n-gram table (--ple-gguf); embd: the BF16
 # token embedding (--embd-gguf); mtp: the draft head's runtime folder (experts.bin, dense.bin, dense.txt; --mtp);
@@ -4953,6 +4957,9 @@ NVFP4_REPOS = {
         },
         "profile": {},
     },
+    # the original (censored) Qwen: placeholders until the uploads - tools/nvfp4_table.py fills them
+    QWEN_NV_REPO: {"revision": "", **{c: {} for c in NVFP4_COMPONENTS}},
+    QWEN_GPTQ_REPO: {"revision": "", **{c: {} for c in NVFP4_COMPONENTS}},
 }
 NVFP4_FAMILIES = {
     "orca-nvfp4": {"title": "OrcaRouter Qwen3.8-Flash-Next Uncensored (NVFP4)",
@@ -4962,6 +4969,25 @@ NVFP4_FAMILIES = {
                    "license": "Qwen Community License 1.0, Qwen3.8-Flash-Next's: the LICENSE file OrcaRouter ships "
                               "(its model card says Apache 2.0): https://huggingface.co/OrcaRouter/Qwen3.8-Flash-Next-Uncensored",
                    "sources": {c: ORCA_REPO for c in NVFP4_COMPONENTS}},
+    # the original Qwen3.8-Flash-Next, censored: it refuses what Qwen refuses.  NVIDIA's NVFP4 checkpoint (ModelOpt,
+    # plain rounding of every expert) converted, and this fork's GPTQ quantization of the same BF16 model - the same
+    # format, size and speed
+    "qwen-nvidia-nvfp4": {"title": "Qwen3.8-Flash-Next (NVIDIA's NVFP4)",
+                          "by": "the original Qwen, NVIDIA's ModelOpt NVFP4 checkpoint converted for Strata",
+                          "about": "censored (it refuses what Qwen refuses); NVIDIA's plain rounding of every expert",
+                          "tag": "qwen-nvidia-", "name": "qwen3.8-flash-next-nvidia",
+                          "license": "NVIDIA Open Model License (Licensed by NVIDIA Corporation under the NVIDIA Open "
+                                     "Model License) and Qwen3.8-Flash-Next's Qwen Community License 1.0: "
+                                     "https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4",
+                          "sources": {c: QWEN_NV_REPO for c in NVFP4_COMPONENTS}},
+    "qwen-nvfp4-gptq": {"title": "Qwen3.8-Flash-Next (NVFP4, GPTQ)",
+                        "by": "the original Qwen, every expert NVFP4 by GPTQ (this fork)",
+                        "about": "censored, as qwen-nvidia-nvfp4; GPTQ instead of NVIDIA's plain rounding, the same size "
+                                 "and speed",
+                        "tag": "qwen-gptq-", "name": "qwen3.8-flash-next-gptq",
+                        "license": "Qwen Community License 1.0, Qwen3.8-Flash-Next's: "
+                                   "https://huggingface.co/Qwen/Qwen3.8-Flash-Next",
+                        "sources": {c: QWEN_GPTQ_REPO for c in NVFP4_COMPONENTS}},
 }
 NVFP4_DEFAULT = "orca-nvfp4"           # this fork's recommended model, where the PC meets its requirements
 # Families setup no longer offers.  An install of one keeps working (its config and files are left alone) and every
@@ -5543,7 +5569,8 @@ def sycl_setup(argv) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--family", choices=[*NVFP4_FAMILIES, *NVFP4_WITHDRAWN, *FAMILIES],
-                    help="orca-nvfp4 (this fork's default) = the NVFP4 model; qwen = Qwen3.8-Flash-Next, "
+                    help="orca-nvfp4 (this fork's default) = the uncensored NVFP4 model, qwen-nvidia-nvfp4 (NVIDIA's) or "
+                         "qwen-nvfp4-gptq = the original, censored Qwen in NVFP4; qwen = Qwen3.8-Flash-Next, "
                          "swift = Swift 1.5, coder, unsloth = the GGUF models")
     ap.add_argument("--dry-run", action="store_true",
                     help="the NVFP4 models: show what setup would download, install and write, then stop (nothing is "
@@ -5978,7 +6005,8 @@ def main() -> int:
                  "choose another model: --family qwen, swift, coder or unsloth")
         return nvfp4_install(a, family, gpu, multi, cuda_tk, ram, roots, adopted, port)
     if a.dry_run:
-        fail("--dry-run shows the plan of this fork's NVFP4 model only", "--family orca-nvfp4")
+        fail("--dry-run shows the plan of this fork's NVFP4 models only",
+             "--family orca-nvfp4, qwen-nvidia-nvfp4 or qwen-nvfp4-gptq")
     fam = FAMILIES[family]
     ok(f"model: {fam['title']}")
     if fam.get("license"):
