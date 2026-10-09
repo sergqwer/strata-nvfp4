@@ -406,9 +406,11 @@ with Windows' own memory cap, which Secure Boot blocks here. The huihui-nvfp4 mo
   ms a round (the previous build forced into the arena: 13.47 +- 0.62), a 32K prompt 3,924 +- 158 ms, decode after
   it 17.33 +- 1.06, ready in 25 s cold and 12.9 warm, 18.3-20.4 GiB free at the least, nothing paged out. Emulated
   64 GB still starts the low-RAM mode.
-- **The page file:** the engine reads every drive's page file (a fixed one at its maximum, a system-managed one at
-  what Windows lets it grow to: 3 x RAM, at most an eighth of its drive, within the free space). Below 60000 MB in
-  all it prints a `WARNING` with the steps to 64000 MB, and setup frames the same advice in `--check`, the dry run
+- **The page file:** the engine reads every drive's page file and counts what it has for sure: its size now, or a
+  larger initial size. A system-managed or growing one (initial below maximum) is not counted at what it may grow
+  to: it may not grow in time while WDDM charges the VRAM (upstream #60: "System managed" and 4096-32768 MB still
+  failed, a fixed 64 GB worked). Below 60000 MB in all it prints a `WARNING` with the steps to a fixed 64000 MB
+  (and why, when the file grows), and setup frames the same advice in `--check`, the dry run
   and the install. Short of commit the expert cache opens a quarter smaller a try; forced that way
   (`STRATA_TEST_CACHE_FAIL`), 6,256 slots made a chat's round 17% slower and 4,692 38% (13.21 -> 15.47 -> 18.19 ms),
   each step 5.4 GiB less commit. This PC has 128000 MB (C: and D: 64000 each): no warning.
