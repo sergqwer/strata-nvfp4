@@ -300,6 +300,8 @@ int64_t qsa_kv_elastic_shrink(int64_t cells, const std::function<void(VmmChunk)>
 /// Physical bytes the elastic pools hold, and what all of them would at the full context.
 uint64_t qsa_kv_elastic_mapped_bytes();
 uint64_t qsa_kv_elastic_full_bytes();
+/// Every mapped chunk of the elastic pools as (handle, pool << 32 | chunk): a debug check for chunks mapped twice.
+std::vector<std::pair<VmmChunk, int64_t>> qsa_kv_elastic_handles();
 int64_t qsa_kv_resident();
 /// The fewest resident cells a streamed layer may have: one verify window's selections (8 queries x 2,051 cells
 /// in whole blocks) must fit at once, with room to spare.
