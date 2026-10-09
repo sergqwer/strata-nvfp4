@@ -20,12 +20,13 @@ What the first run does (each step is skipped when it is already done):
   6. prepares the model for Strata and fetches the MTP draft layer (~5 GB, from the original Qwen checkpoint)
   7. writes run-<model>.bat / run-<model>.sh and starts the model
 
-This fork (sergqwer/strata-nvfp4) also offers its NVFP4 models, ready-made on Hugging Face and the default where the PC
-meets their requirements: huihui-nvfp4 (huihui-ai's abliterated Flash-Next) and orca-nvfp4 (OrcaRouter's), every expert
-NVFP4 by GPTQ; nothing is converted on the PC, and the engine is this fork's (its release's, or compiled from this
-source).  --dry-run shows what setup would do for them.
+This fork (sergqwer/strata-nvfp4) also offers its NVFP4 model, ready-made on Hugging Face and the default where the PC
+meets its requirements: orca-nvfp4 (OrcaRouter's uncensored Flash-Next), every expert NVFP4 by GPTQ; nothing is
+converted on the PC, and the engine is this fork's (its release's, or compiled from this source).  --dry-run shows
+what setup would do for it.  huihui-nvfp4 was withdrawn in 0.1.41-nvfp4.3 (it often loops in long thinking); an
+install of it keeps working.
 
-Options: --family huihui-nvfp4|orca-nvfp4|qwen|swift|coder|unsloth, --model Q2_0|IQ2_XS|IQ3_XXS|IQ3_S, --context 32768, --rope-scaling none|linear|yarn
+Options: --family orca-nvfp4|qwen|swift|coder|unsloth, --model Q2_0|IQ2_XS|IQ3_XXS|IQ3_S, --context 32768, --rope-scaling none|linear|yarn
 (--rope-scale F; past the trained 262144 the setup adds yarn and the factor is the final context over 262144,
 at least 1 - an explicit --rope-scaling none is refused for such a context), --vision yes|no|gpu|cpu, --port
 8080, --yes (recommended
@@ -4158,7 +4159,8 @@ def choices_from_config(cfg_path: Path) -> dict:
     model = (tag[len(FAMILIES[family]["tag"]):] if tag.startswith(FAMILIES[family]["tag"]) else tag).upper()
     if model not in MODELS:                            # (sizes have no dash except UD-Q4_K_XL: the old rule)
         model = tag.split("-")[-1].upper()
-    nv = next((f for f, d in NVFP4_FAMILIES.items() if tag.lower() == (d["tag"] + NVFP4_MODEL).lower()), None)
+    nv = next((f for f, d in [*NVFP4_FAMILIES.items(), *NVFP4_WITHDRAWN.items()]
+               if tag.lower() == (d["tag"] + NVFP4_MODEL).lower()), None)
     if nv:                                             # this fork's NVFP4 models: one size each
         family, model = nv, NVFP4_MODEL
     a = cfg.get("args", [])
@@ -4176,6 +4178,25 @@ def choices_from_config(cfg_path: Path) -> dict:
             # #493: --vram-reserve-mib given at setup (images write the default 700 themselves)
             "vram_reserve_mib": int(val("--vram-reserve-mib")) if (val("--vram-reserve-mib") or "").isdigit() and (
                 vis is None or int(val("--vram-reserve-mib")) != VISION["gpu"]["reserve_mib"]) else None}
+
+
+def withdrawn_family(cfg_path: Path) -> str | None:
+    """The withdrawn NVFP4 family (NVFP4_WITHDRAWN) an installed config is of, or None."""
+    tag = cfg_path.stem[len("strata-"):].lower()
+    return next((f for f, d in NVFP4_WITHDRAWN.items() if tag == (d["tag"] + NVFP4_MODEL).lower()), None)
+
+
+def withdrawn_note(cfgs, elsewhere: bool = False) -> bool:
+    """One note a run for an install of a withdrawn family: why, that it keeps working (nothing is deleted) and the
+    replacement.  elsewhere: the install is another Strata folder's, which a new copy is not set up like."""
+    said = False
+    for f in dict.fromkeys(w for w in map(withdrawn_family, cfgs) if w):
+        d = NVFP4_WITHDRAWN[f]
+        warn(f"{f} was withdrawn: {d['why']}. " + ("Your install of it keeps working as it is and nothing is deleted; "
+             if not elsewhere else "Your earlier install of it keeps working there; this copy is set up anew; ")
+             + f"the replacement: {'START-HERE.bat' if WIN else './setup.sh'} --family {d['replacement']}")
+        said = True
+    return said
 
 
 def find_in(roots: list, rel: str):
@@ -5029,13 +5050,13 @@ def bundled_cuda(eng) -> bool:
         return False
 
 
-# The NVFP4 models: huihui-ai's and OrcaRouter's abliterated Flash-Next with every expert NVFP4 by GPTQ, ready-made on
-# Hugging Face - nothing is converted on the PC.  NVFP4_REPOS holds one table per repository, what its upload fixed:
-# the commit, and per component its files (path in the repository: bytes, SHA-256).  A family takes each component
+# The NVFP4 model: OrcaRouter's abliterated Flash-Next with every expert NVFP4 by GPTQ, ready-made on Hugging Face -
+# nothing is converted on the PC (huihui-ai's, offered in 0.1.41-nvfp4.1/.2, is withdrawn: NVFP4_WITHDRAWN).
+# NVFP4_REPOS holds one table per repository, what its upload fixed: the commit, and per component its files (path
+# in the repository: bytes, SHA-256).  A family takes each component
 # from the repository its "sources" name - its own, or a shared one (the PLE table and the embedding, when they are
 # Qwen's own) - and is offered only once all of them are listed (nvfp4_files).
-NVFP4_MODEL = "NVFP4"                  # the one size: strata-huihui-nvfp4.json, run-huihui-nvfp4.bat
-HUIHUI_REPO = "Maximilian228/Huihui-Qwen3.8-Flash-Next-abliterated-NVFP4-GPTQ-Strata"
+NVFP4_MODEL = "NVFP4"                  # the one size: strata-orca-nvfp4.json, run-orca-nvfp4.bat
 ORCA_REPO = "Maximilian228/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-NVFP4-GPTQ-Strata"
 # pack: the experts pack folder (index.txt, experts.bin, dense.bin, native_experts.txt, tokenizer/); dense: the GGUF
 # with the dense weights (--native and --native-dense-gguf); ple: the FP8 n-gram table (--ple-gguf); embd: the BF16
@@ -5045,30 +5066,6 @@ NVFP4_COMPONENTS = ("pack", "dense", "ple", "embd", "mtp", "profile")
 NVFP4_REPOS = {
     # tools/nvfp4_table.py <repo> --revision <commit> (2026-10-09, the uploads' commits): "revision" pins every
     # download, each component {path: (bytes, "sha256")}.
-    HUIHUI_REPO: {
-        "revision": "10c65c98b3494ec099144d706f75fdaa1ad683f9",
-        "pack": {
-            "pack/dense.bin": (1538035200, "974df6dcefcae85e3fd2c19fcc12eeaacaadde8261ab732d5af5af6ce2e25a7a"),
-            "pack/experts.bin": (67948118016, "835d070d705c9346cdb9e3c9cf20eeaf4f192f56f1c31c248057d5efe851e932"),
-            "pack/index.txt": (93691, "075533ae81d693aef618d8b6d1ec0c19c35763d497f5b93fbc6b522554ae454e"),
-            "pack/native_experts.txt": (1599, "615f655fb28bf60b243664860b135710bf4177b111c6be89073e780a35de1018"),
-            "pack/tokenizer/chat_template.jinja": (8952, "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"),
-            "pack/tokenizer/merges.txt": (3600844, "080cf95432173729d160346b7882bd2a644b07f7a3813a3eb73f4e66787bfde9"),
-            "pack/tokenizer/token_type.json": (744960, "5088c8c298fc06af8382ddb3b76c888703ac2634e82263b97eedcc2ad202738b"),
-            "pack/tokenizer/tokenizer.json": (554, "87be2ac47d8bc7393b7435df6ccd276740019a393941a2585d5edce59f450c54"),
-            "pack/tokenizer/vocab.json": (5737005, "4ba64f0332abcfb0b600b7df1537d1e836e68009d5fb7cdb77339738dc6365c4"),
-        },
-        "dense": {"huihui-nvfp4-dense.gguf": (5991569792, "4a61a287a832429aa2faf0022e15da6359a90492b6248fb83e716b2e053581a0")},
-        "ple": {"ple-fp8.gguf": (51200246144, "40f95a6242e08e9aea2e525cd3b21c3239163d1040682facf5cf2484192d42ce")},
-        "embd": {"token-embd-bf16.gguf": (1271398656, "2533a5c442a0609ba08fef6d7c52f9944c688fdbcc1c2ee5adc760a15b28f359")},
-        "mtp": {
-            "mtp/dense.bin": (116099072, "c724dc0b0822ada5d2977bf5bde821605feabaa64ea2e0045b67ca656329070a"),
-            "mtp/dense.txt": (1880, "8773c81ebb0986e37fe94a8a9933e87be48b1fabc6889a0106bcdab179d1c2ac"),
-            "mtp/draft_vocab.bin": (235852, "25d7fd1670a2e0ec885868d1718d410a3baab03bceeacf0a156cf93ffe4e1ef4"),
-            "mtp/experts.bin": (707788800, "09398406be61f1f54c93861f449e48b8df0bfccbc9ec9b2b7636775a6ea9244f"),
-        },
-        "profile": {},
-    },
     ORCA_REPO: {
         "revision": "34c2fc2cd547c5278800c67c3ab9f0e3405f6942",
         "pack": {
@@ -5095,22 +5092,28 @@ NVFP4_REPOS = {
     },
 }
 NVFP4_FAMILIES = {
-    "huihui-nvfp4": {"title": "Huihui Qwen3.8-Flash-Next abliterated (NVFP4)",
-                     "by": "huihui-ai's abliterated Flash-Next, every expert NVFP4 by GPTQ (this fork)",
-                     "about": "4.5-bit experts, closer to the full model than the 2-3-bit GGUFs; it does not refuse",
-                     "tag": "huihui-", "name": "huihui-qwen3.8-flash-next-abliterated",
-                     "license": "Qwen Community License 1.0, Qwen3.8-Flash-Next's, which huihui-ai's abliterated build "
-                                "keeps: https://huggingface.co/huihui-ai/Huihui-Qwen3.8-Flash-Next-abliterated",
-                     "sources": {c: HUIHUI_REPO for c in NVFP4_COMPONENTS}},
     "orca-nvfp4": {"title": "OrcaRouter Qwen3.8-Flash-Next Uncensored (NVFP4)",
                    "by": "OrcaRouter's uncensored Flash-Next, every expert NVFP4 by GPTQ (this fork)",
-                   "about": "the same quantization of another abliteration; it does not refuse",
+                   "about": "4.5-bit experts, closer to the full model than the 2-3-bit GGUFs; it does not refuse",
                    "tag": "orca-", "name": "orcarouter-qwen3.8-flash-next-uncensored",
                    "license": "Qwen Community License 1.0, Qwen3.8-Flash-Next's: the LICENSE file OrcaRouter ships "
                               "(its model card says Apache 2.0): https://huggingface.co/OrcaRouter/Qwen3.8-Flash-Next-Uncensored",
                    "sources": {c: ORCA_REPO for c in NVFP4_COMPONENTS}},
 }
-NVFP4_DEFAULT = "huihui-nvfp4"         # this fork's recommended model, where the PC meets its requirements
+NVFP4_DEFAULT = "orca-nvfp4"           # this fork's recommended model, where the PC meets its requirements
+# Families setup no longer offers.  An install of one keeps working (its config and files are left alone) and every
+# run says why it was withdrawn and what replaces it; "copies": its files another family can link instead of a
+# download (nvfp4_same: the PLE table is the same file in both repositories).
+NVFP4_WITHDRAWN = {
+    "huihui-nvfp4": {"title": "Huihui Qwen3.8-Flash-Next abliterated (NVFP4)", "tag": "huihui-",
+                     "replacement": "orca-nvfp4",
+                     # 0.1.41-nvfp4.3, loopcap: a captured 72K-token Claude Code request (adaptive thinking, effort xhigh)
+                     # replayed greedy looped in its thinking 9 of 10 times (the old 0.1.40.3 engine too), 2 of 5 with
+                     # Qwen's sampling; orca-nvfp4 0 of 5
+                     "why": "it often loops in long thinking (9 of 10 runs of a long Claude Code request; orca-nvfp4 none of 5)",
+                     "copies": {"Maximilian228/Huihui-Qwen3.8-Flash-Next-abliterated-NVFP4-GPTQ-Strata": {
+                         "ple-fp8.gguf": "40f95a6242e08e9aea2e525cd3b21c3239163d1040682facf5cf2484192d42ce"}}},
+}
 NVFP4_MIN_ARCH = 75                    # RTX 20 and newer (docs/NVFP4.md, "Other GPUs")
 NVFP4_MIN_VRAM_GB = 11.5               # a 12 GB card (nvidia-smi lists ~11.99); an 8 GB one has no room for the cache
 NVFP4_MIN_RAM_GB = 60                  # a 64 GB PC (63.7 listed), the README's floor
@@ -5246,15 +5249,18 @@ def nvfp4_paths(files, where: dict) -> dict:
 
 
 def nvfp4_same(sha: str, cands: list) -> Path | None:
-    """The same file (by SHA-256) already downloaded and checked for another NVFP4 model, to link instead of fetching."""
-    for repo, table in NVFP4_REPOS.items():
-        for comp in NVFP4_COMPONENTS:
-            for path, (_size, s) in (table.get(comp) or {}).items():
-                if s == sha:
-                    for c in cands:
-                        p = Path(c) / repo_dir(repo) / path
-                        if nvfp4_verified(p, sha):
-                            return p
+    """The same file (by SHA-256) already downloaded and checked for another NVFP4 model, to link instead of fetching;
+    a withdrawn family's files too (NVFP4_WITHDRAWN "copies")."""
+    known = [(repo, path, s) for repo, table in NVFP4_REPOS.items() for comp in NVFP4_COMPONENTS
+             for path, (_size, s) in (table.get(comp) or {}).items()]
+    known += [(repo, path, s) for d in NVFP4_WITHDRAWN.values() for repo, files in d.get("copies", {}).items()
+              for path, s in files.items()]
+    for repo, path, s in known:
+        if s == sha:
+            for c in cands:
+                p = Path(c) / repo_dir(repo) / path
+                if nvfp4_verified(p, sha):
+                    return p
     return None
 
 
@@ -5673,8 +5679,8 @@ def sycl_setup(argv) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--family", choices=[*NVFP4_FAMILIES, *FAMILIES],
-                    help="huihui-nvfp4 (this fork's default) or orca-nvfp4 = the NVFP4 models; qwen = Qwen3.8-Flash-Next, "
+    ap.add_argument("--family", choices=[*NVFP4_FAMILIES, *NVFP4_WITHDRAWN, *FAMILIES],
+                    help="orca-nvfp4 (this fork's default) = the NVFP4 model; qwen = Qwen3.8-Flash-Next, "
                          "swift = Swift 1.5, coder, unsloth = the GGUF models")
     ap.add_argument("--dry-run", action="store_true",
                     help="the NVFP4 models: show what setup would download, install and write, then stop (nothing is "
@@ -5784,6 +5790,10 @@ def main() -> int:
     if a.dry_run and (a.update or a.rollback_engine or a.calibrate):
         ap.error("--dry-run shows a new install's plan; it cannot be combined with --update, --rollback-engine or "
                  "--calibrate (they act on the installed engine and models)")
+    if a.family in NVFP4_WITHDRAWN:                    # 0.1.41-nvfp4.3: not installed any more
+        d = NVFP4_WITHDRAWN[a.family]
+        fail(f"{a.family} was withdrawn: {d['why']}. An install of it keeps working (START-HERE starts it)",
+             f"--family {d['replacement']} installs the replacement")
     asked_no_start = a.no_start
     a.no_start = a.no_start or a.dry_run               # a plan only: never starts an installed model
     if a.source:
@@ -5817,6 +5827,7 @@ def main() -> int:
 
     # ---- 0. already installed: just start it
     have = installed_configs()
+    withdrawn_note(have)                               # an install of a withdrawn model: why, and its replacement
     if a.update:                                       # #475: UPDATE.bat / update.sh - never starts the model
         return update_install(have, a)
     explicit = a.setup or a.model or a.family or a.check or asked_no_start   # --dry-run: planned as the run would go
@@ -5825,7 +5836,9 @@ def main() -> int:
         prev = previous_config(elsewhere, load_settings())   # up like the last one, from the files already here
         if prev is not None:
             ch = choices_from_config(prev)
-            if ch["model"]:
+            if ch["family"] in NVFP4_WITHDRAWN:      # its files are not installed again: this copy starts anew
+                withdrawn_note([prev], elsewhere=True)
+            elif ch["model"]:
                 say(f"  Found your earlier install in {prev.parent} ({prev.stem[len('strata-'):]}): setting up this "
                     "copy the same way - the model files are reused, nothing big is downloaded.")
                 a.family, a.model, a.context = ch["family"], ch["model"], a.context or ch["context"]
@@ -6109,7 +6122,7 @@ def main() -> int:
                  "choose another model: --family qwen, swift, coder or unsloth")
         return nvfp4_install(a, family, gpu, multi, cuda_tk, ram, roots, adopted, port)
     if a.dry_run:
-        fail("--dry-run shows the plan of this fork's NVFP4 models only", "--family huihui-nvfp4 or orca-nvfp4")
+        fail("--dry-run shows the plan of this fork's NVFP4 model only", "--family orca-nvfp4")
     fam = FAMILIES[family]
     ok(f"model: {fam['title']}")
     if fam.get("license"):
