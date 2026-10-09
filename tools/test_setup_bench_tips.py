@@ -35,6 +35,11 @@ class BenchTips(unittest.TestCase):
     def test_prefill_auto_32768_follows_the_ram(self):
         self.assertTrue(any("auto:32768" in t and t.startswith("tip") for t in tips(ram=128)))
         self.assertEqual([t for t in tips(ram=64) if "auto:32768" in t], [])
+        # a 96 GB PC lists 93.4-95.6 GiB: the tip from 92, the engine's low-RAM rule (ram88: the 32K chunk fit at 88 GiB)
+        self.assertEqual(setup.PREFILL_BIG_RAM_GB, setup.NVFP4_ALL_RAM_GB)
+        for ram, tip in ((95.6, True), (93.4, True), (92.0, True), (91.9, False)):
+            with self.subTest(ram):
+                self.assertEqual(any("auto:32768" in t and t.startswith("tip") for t in tips(ram=ram)), tip)
         big = ["--prefill", "auto:32768"]
         self.assertTrue(any(t.startswith("warning") and "auto:32768" in t for t in tips(big, ram=32)))
         self.assertEqual([t for t in tips(big, ram=96) if "auto:32768" in t], [])
