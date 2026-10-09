@@ -6,6 +6,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <dxgi1_4.h>
+#include <cstdlib>
 #include <cstring>
 #else
 #include <algorithm>
@@ -109,6 +110,9 @@ bool gpu_shared_memory_budget(const void* luid, uint64_t& budget, uint64_t& usag
 }
 
 uint64_t total_physical_memory() {
+    // diag (ram88): STRATA_EMULATE_RAM_GIB=N reports N GiB, for testing the RAM rules beside a RAM ballast
+    if (const char* e = std::getenv("STRATA_EMULATE_RAM_GIB"); e != nullptr && std::atof(e) > 0.0)
+        return (uint64_t) (std::atof(e) * 1073741824.0);
     MEMORYSTATUSEX ms{};
     ms.dwLength = sizeof ms;
     return GlobalMemoryStatusEx(&ms) ? (uint64_t) ms.ullTotalPhys : 0;
