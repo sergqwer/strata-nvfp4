@@ -6,8 +6,12 @@
 #define NOMINMAX
 #include <windows.h>
 #include <dxgi1_4.h>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
+#include <vector>
+#pragma comment(lib, "advapi32.lib")
 #else
 #include <algorithm>
 #include <cstdio>
@@ -118,6 +122,84 @@ uint64_t total_physical_memory() {
     return GlobalMemoryStatusEx(&ms) ? (uint64_t) ms.ullTotalPhys : 0;
 }
 
+namespace {
+// a REG_MULTI_SZ value of Memory Management as narrow strings (drive letters and digits only matter here)
+bool mm_multi_sz(const wchar_t* name, std::vector<std::string>& out) {
+    const wchar_t* key = L"SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory Management";
+    DWORD bytes = 0;
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, key, name, RRF_RT_REG_MULTI_SZ, nullptr, nullptr, &bytes) != ERROR_SUCCESS)
+        return false;
+    std::vector<wchar_t> buf(bytes / sizeof(wchar_t) + 2, 0);
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, key, name, RRF_RT_REG_MULTI_SZ, nullptr, buf.data(), &bytes) != ERROR_SUCCESS)
+        return false;
+    for (const wchar_t* p = buf.data(); *p != 0; p += std::wcslen(p) + 1) {
+        std::string s;
+        for (const wchar_t* c = p; *c != 0; ++c) s += *c < 128 ? (char) *c : '_';
+        out.push_back(s);
+    }
+    return true;
+}
+}  // namespace
+
+PageFiles page_files() {
+    PageFiles r;
+    std::vector<std::string> set;
+    if (!mm_multi_sz(L"PagingFiles", set)) return r;   // no value at all: Windows has no page file setting to read
+    r.known = true;
+    const uint64_t ram_mb = total_physical_memory() >> 20;
+    // "?:\pagefile.sys": automatic on every drive - Windows keeps it where ExistingPageFiles says, else the system drive
+    std::vector<char> auto_drives;
+    {
+        std::vector<std::string> now;
+        mm_multi_sz(L"ExistingPageFiles", now);
+        for (const std::string& s : now) {
+            const size_t c = s.find(':');
+            if (c != std::string::npos && c > 0) auto_drives.push_back((char) std::toupper((unsigned char) s[c - 1]));
+        }
+        if (auto_drives.empty()) {
+            wchar_t win[MAX_PATH] = {};
+            auto_drives.push_back(GetSystemWindowsDirectoryW(win, MAX_PATH) > 0 ? (char) std::toupper((int) win[0]) : 'C');
+        }
+    }
+    for (const std::string& line : set) {
+        char drive = 0;
+        int64_t initial = -1, max = -1;
+        if (!parse_paging_file(line, drive, initial, max)) continue;
+        std::vector<char> drives = drive == '?' ? auto_drives : std::vector<char>{drive};
+        for (const char d : drives) {
+            const wchar_t root[] = {(wchar_t) d, L':', L'\\', 0};
+            ULARGE_INTEGER free_b{}, total_b{};
+            const bool vol = GetDiskFreeSpaceExW(root, &free_b, &total_b, nullptr) != 0;
+            uint64_t current_mb = 0;
+            const wchar_t file[] = {(wchar_t) d, L':', L'\\', L'p', L'a', L'g', L'e', L'f', L'i', L'l', L'e', L'.',
+                                    L's', L'y', L's', 0};
+            WIN32_FIND_DATAW fd{};
+            if (HANDLE h = FindFirstFileW(file, &fd); h != INVALID_HANDLE_VALUE) {   // the directory entry: the
+                current_mb = ((((uint64_t) fd.nFileSizeHigh) << 32) | fd.nFileSizeLow) >> 20;  // file itself is locked
+                FindClose(h);
+            }
+            const uint64_t mb = vol ? page_file_allowed_mb(initial, max, ram_mb, total_b.QuadPart >> 20,
+                                                           free_b.QuadPart >> 20, current_mb)
+                                    : (max > 0 ? (uint64_t) max : current_mb);
+            r.total_mb += mb;
+            char b[160];
+            if (max > 0 && initial == max)
+                std::snprintf(b, sizeof b, "%c: %lld MB", d, (long long) max);
+            else if (max > 0)
+                std::snprintf(b, sizeof b, "%c: %lld-%lld MB", d, (long long) initial, (long long) max);
+            else
+                std::snprintf(b, sizeof b, "%c: system-managed, now %llu MB, can grow to %llu", d,
+                              (unsigned long long) current_mb, (unsigned long long) mb);
+            std::string part = b;
+            if (max > 0 && mb < (uint64_t) max)
+                part += " (only " + std::to_string((unsigned long long) mb) + " fit the free disk)";
+            r.detail += (r.detail.empty() ? "" : ", ") + part;
+        }
+    }
+    if (r.detail.empty()) r.detail = "no page file";
+    return r;
+}
+
 bool read_ahead_enabled() { return false; }
 void advise_willneed(const void*, uint64_t) {}
 void advise_willneed(int, uint64_t, uint64_t) {}
@@ -146,6 +228,8 @@ uint64_t total_physical_memory() {
     const long pages = sysconf(_SC_PHYS_PAGES), page = sysconf(_SC_PAGE_SIZE);
     return pages > 0 && page > 0 ? (uint64_t) pages * (uint64_t) page : 0;
 }
+
+PageFiles page_files() { return {}; }   // Windows' commit limit only
 
 namespace {
 constexpr uint64_t kAdviseStep = 128ull << 10;

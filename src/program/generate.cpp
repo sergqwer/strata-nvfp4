@@ -451,7 +451,7 @@ struct Options {
     /// not hold that the expert profile ranks hottest are copied into RAM, the rest are read from the files in place
     /// (the GGUF shards when the pack has no experts.bin).  0 = the whole complement (--resident-experts).
     uint64_t resident_budget = 0;
-    /// The fork's low-RAM mode: -1 auto (on below 96 GB installed), 0 --no-low-ram, 1 --low-ram / --ram-budget.  On, it
+    /// The fork's low-RAM mode: -1 auto (on below 92 GiB installed), 0 --no-low-ram, 1 --low-ram / --ram-budget.  On, it
     /// is --mmap-experts with --resident-budget-gib (the --ram-budget, else the available RAM less 6 GiB).
     int low_ram = -1;
     /// R4: slots of VRAM-resident experts.  **0 = off, and off is the default.**
@@ -932,7 +932,7 @@ void usage() {
                  "                       round.  Not bit-exact run to run.  0 (default) = the blocking tier.\n"
                  "  --low-ram            (this fork) --mmap-experts --resident-budget-gib with the available RAM less\n"
                  "                       6 GiB: the hottest experts the GPU cache does not hold in RAM, the rest read\n"
-                 "                       from the files unbuffered.  On by itself below 96 GB installed; --no-low-ram:\n"
+                 "                       from the files unbuffered.  On by itself below 92 GiB installed; --no-low-ram:\n"
                  "                       never.  --ram-budget GIB: the same with at most GIB in RAM.\n");
 }
 
@@ -2367,12 +2367,14 @@ int main(int argc, char** argv) {
     bool multi_gpu = !split_devs.empty() && !split_same;   // cleared by --split-skip-if-fits before any stage loads
     bool split_own_auto = false;   // #340: the split keeps own prompt buffers by its rule (not --no-prefill-borrow)
     // ---- the fork's low-RAM mode.  The resident arena needs every expert in RAM (63 GiB for the NVFP4 pack); below
-    // 96 GB installed that cannot fit beside Windows, so the experts the GPU cache does not hold go to a RAM budget
-    // (0.1.31's tier: hottest first, page-locked) and the rest are read from the files when needed - unbuffered,
-    // since such a PC's file cache could not keep them either (FileExpertSource::set_unbuffered)
-    if (o.low_ram != 0 && !o.mmap_experts && o.shared_expert_arena.empty() && !o.expert_profile.empty() && !multi_gpu) {
+    // 92 GiB installed (a 64 GB PC) that cannot fit beside Windows, so the experts the GPU cache does not hold go to a
+    // RAM budget (0.1.31's tier: hottest first, page-locked) and the rest are read from the files when needed -
+    // unbuffered, since such a PC's file cache could not keep them either (FileExpertSource::set_unbuffered).
+    // A 96 GB PC (93.4-95.6 GiB listed) keeps the arena (platform::low_ram_auto): with 88 GiB for the engine it ran as on
+    // 128 GB with 16-21 GiB free (ram88: chat 13.1 ms a round, the low-RAM mode 20.3 with 0.5-1 GiB free)
+    if (!o.mmap_experts && o.shared_expert_arena.empty() && !o.expert_profile.empty() && !multi_gpu) {
         const uint64_t installed = strata::platform::total_physical_memory();
-        if (o.low_ram == 1 || (installed > 0 && installed < (96ull << 30))) {
+        if (o.low_ram == 1 || (o.low_ram == -1 && strata::platform::low_ram_auto(installed))) {
             o.mmap_experts = o.resident_cpu_experts = o.resident_pin = true;
             o.resident_headroom = 6ull << 30;   // left to Windows and the rest of the engine's host memory
             if (const char* v = std::getenv("STRATA_RESIDENT_HEADROOM_GIB"); v != nullptr && std::atof(v) >= 0.0)
@@ -2381,13 +2383,33 @@ int main(int argc, char** argv) {
                                                                        // the available RAM less the headroom
             std::fprintf(stderr, "strata generate: low RAM (%s; %.1f GiB installed): --mmap-experts with a RAM budget "
                                  "of %s, the rest of the experts read from the files\n",
-                         o.low_ram == 1 ? "--low-ram" : "below 96 GB installed", (double) installed / 1073741824.0,
+                         o.low_ram == 1 ? "--low-ram" : "below 92 GiB installed", (double) installed / 1073741824.0,
                          o.resident_budget >= installed ? "the available RAM less the headroom" : "--ram-budget");
+        } else {
+            std::fprintf(stderr, "strata generate: RAM: %.1f GiB installed (%s): every expert in RAM (the resident "
+                                 "arena), no low-RAM mode\n", (double) installed / 1073741824.0,
+                         o.low_ram == 0 ? "--no-low-ram" : installed == 0 ? "unknown" : "92 GiB or more");
         }
     } else if (o.low_ram == 1 && !o.mmap_experts) {
         std::fprintf(stderr, "strata generate: --low-ram needs one GPU and an --expert-profile (and no shared arena)\n");
         return 2;
     }
+#if defined(_WIN32)
+    // Windows' commit limit is RAM + page files, and WDDM charges the GPU's allocations to it too: short of it the auto
+    // expert cache opens smaller (a quarter less a try, issue #60) and an arena that cannot be committed stops the start
+    if (const auto pf = strata::platform::page_files(); pf.known && pf.total_mb < strata::platform::kPageFileWarnMb)
+        std::fprintf(stderr, "strata generate: WARNING: the page file is too small: %llu MB in all (%s). INCREASE it to "
+                             "%llu MB (64 GB). Windows lets all programs together commit only RAM + page file, and the "
+                             "engine commits ~100 GiB with the NVFP4 models (~80 in the low-RAM mode): the experts in "
+                             "RAM plus ~30 GiB that WDDM charges for the VRAM it uses. Short of that the expert cache in "
+                             "VRAM is made smaller, so the model can run significantly slower, or the start fails with "
+                             "an allocation error. System Properties (Win+R, sysdm.cpl) > Advanced > Performance "
+                             "Settings > Advanced > Virtual memory > Change: Custom size, initial and maximum %llu MB, "
+                             "Set, then restart Windows\n",
+                     (unsigned long long) pf.total_mb, pf.detail.c_str(),
+                     (unsigned long long) strata::platform::kPageFileAdviseMb,
+                     (unsigned long long) strata::platform::kPageFileAdviseMb);
+#endif
     // the adaptive tier's faster settings were measured with every expert in RAM; with a RAM tier a swap can read
     // an expert from the drive (a 64 GB run: the tier's host time 1.4 -> 2.7 ms a round, the round no shorter)
     if (o.resident_cpu_experts && !o.adapt_given) {

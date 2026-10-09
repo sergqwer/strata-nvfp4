@@ -110,6 +110,12 @@ void* reserve(uint64_t bytes, PageBacking& got, std::string& note, const std::st
     }
     void* p = VirtualAlloc(nullptr, (SIZE_T) bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     got = PageBacking::NormalPages;
+    if (p == nullptr) {   // 1455: Windows' commit limit (RAM + page file) is reached
+        const DWORD e = GetLastError();
+        note += "; the 4 KB allocation failed too (VirtualAlloc error " + std::to_string((unsigned long long) e) +
+                (e == ERROR_COMMITMENT_LIMIT ? ": the commit limit, RAM + page file, is reached - increase the page "
+                                               "file (64000 MB) or close programs" : "") + ")";
+    }
     return p;
 #else
     if (!shared_file.empty()) {
