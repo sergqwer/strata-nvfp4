@@ -5094,8 +5094,8 @@ NVFP4_REPOS = {
         },
         "profile": {},
     },
-    # the original (censored) Qwen: NVIDIA's NVFP4 converted (uploaded 2026-10-09); our GPTQ a placeholder until its
-    # upload - tools/nvfp4_table.py fills it
+    # the original (censored) Qwen, both uploaded 2026-10-09: NVIDIA's NVFP4 converted, and our GPTQ.  The PLE table,
+    # the embedding and the MTP head are the same files in both (nvfp4_fetch links them instead of a second download)
     QWEN_NV_REPO: {
         "revision": "cca8f7fee5ce0af932097340a75e06df25c4e57d",
         "pack": {
@@ -5120,7 +5120,30 @@ NVFP4_REPOS = {
         },
         "profile": {},
     },
-    QWEN_GPTQ_REPO: {"revision": "", **{c: {} for c in NVFP4_COMPONENTS}},
+    QWEN_GPTQ_REPO: {
+        "revision": "640a1db97446ddd5e89d2b70ecd0297987192c93",
+        "pack": {
+            "pack/dense.bin": (1538035200, "974df6dcefcae85e3fd2c19fcc12eeaacaadde8261ab732d5af5af6ce2e25a7a"),
+            "pack/experts.bin": (67948118016, "325e5e0d85c262a8d8278daf73b20696ec877d9a3ff584e57391fa69ad10bc64"),
+            "pack/index.txt": (93663, "f62dc71e1c74a72794db54d3917bc71131cc6eae6f3dcdc3fdada48ff70f93ab"),
+            "pack/native_experts.txt": (1599, "615f655fb28bf60b243664860b135710bf4177b111c6be89073e780a35de1018"),
+            "pack/tokenizer/chat_template.jinja": (8952, "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"),
+            "pack/tokenizer/merges.txt": (3600844, "080cf95432173729d160346b7882bd2a644b07f7a3813a3eb73f4e66787bfde9"),
+            "pack/tokenizer/token_type.json": (744960, "5088c8c298fc06af8382ddb3b76c888703ac2634e82263b97eedcc2ad202738b"),
+            "pack/tokenizer/tokenizer.json": (554, "87be2ac47d8bc7393b7435df6ccd276740019a393941a2585d5edce59f450c54"),
+            "pack/tokenizer/vocab.json": (5737005, "4ba64f0332abcfb0b600b7df1537d1e836e68009d5fb7cdb77339738dc6365c4"),
+        },
+        "dense": {"qwen-nvfp4-gptq-dense.gguf": (5991569472, "abdf74336b53d8f7ca3d99947f1eac8f19b8a544966750127cb61e561b127e3b")},
+        "ple": {"ple-fp8.gguf": (51200246176, "37f89b8ce5a3425932763257c40229ec02723ad2ab14b4bbfc26a486f4725c9c")},
+        "embd": {"token-embd-bf16.gguf": (1271398656, "386203af9070c7b43acb24ded8922876721d97bbad1a709b25cb49d694a7f51d")},
+        "mtp": {
+            "mtp/dense.bin": (116099072, "c724dc0b0822ada5d2977bf5bde821605feabaa64ea2e0045b67ca656329070a"),
+            "mtp/dense.txt": (1880, "8773c81ebb0986e37fe94a8a9933e87be48b1fabc6889a0106bcdab179d1c2ac"),
+            "mtp/draft_vocab.bin": (235852, "25d7fd1670a2e0ec885868d1718d410a3baab03bceeacf0a156cf93ffe4e1ef4"),
+            "mtp/experts.bin": (707788800, "09398406be61f1f54c93861f449e48b8df0bfccbc9ec9b2b7636775a6ea9244f"),
+        },
+        "profile": {},
+    },
 }
 NVFP4_FAMILIES = {
     "orca-nvfp4": {"title": "OrcaRouter Qwen3.8-Flash-Next Uncensored (NVFP4)",
