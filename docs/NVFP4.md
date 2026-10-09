@@ -202,7 +202,8 @@ cache from its end and refills it afterwards; a 32K chunk borrows ~5,300 slots) 
   VRAM slot (D2H, before the slot is refilled) into a spare slot, or into the least-ranked member's; the expert that
   moved into VRAM gives its slot back once its copy has landed.
 
-On by itself below 96 GB installed (`--low-ram` / `--no-low-ram`; `--ram-budget` caps it). Measured against the
+On by itself below 92 GiB installed, a 64 GB PC (`--low-ram` / `--no-low-ram`; `--ram-budget` caps it; a 96 GB PC,
+93-95.6 GiB listed, keeps every expert in RAM). Measured against the
 arena on the 128 GB PC, 300 greedy tokens:
 
 | | decode tok/s | RAM | commit |
