@@ -5094,8 +5094,32 @@ NVFP4_REPOS = {
         },
         "profile": {},
     },
-    # the original (censored) Qwen: placeholders until the uploads - tools/nvfp4_table.py fills them
-    QWEN_NV_REPO: {"revision": "", **{c: {} for c in NVFP4_COMPONENTS}},
+    # the original (censored) Qwen: NVIDIA's NVFP4 converted (uploaded 2026-10-09); our GPTQ a placeholder until its
+    # upload - tools/nvfp4_table.py fills it
+    QWEN_NV_REPO: {
+        "revision": "cca8f7fee5ce0af932097340a75e06df25c4e57d",
+        "pack": {
+            "pack/dense.bin": (1538625024, "1f1c2422069de292673ae6cee7d69f7090732dec69f3f125612a0de456279714"),
+            "pack/experts.bin": (67948118016, "bb42080bb7585505b64d091d5a734c05376bbd6171406fa9688a46fbc261b957"),
+            "pack/index.txt": (117490, "17793d1c5b187a73d3c1dc1677af4d4c9b23845394dd7e88bfa53396b41b77e3"),
+            "pack/native_experts.txt": (1590, "d7f8b4372bb122f3d711030e5d522bff1c8746ac7d133a59a2cc7277283e59b6"),
+            "pack/tokenizer/chat_template.jinja": (8952, "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"),
+            "pack/tokenizer/merges.txt": (3600844, "080cf95432173729d160346b7882bd2a644b07f7a3813a3eb73f4e66787bfde9"),
+            "pack/tokenizer/token_type.json": (744960, "5088c8c298fc06af8382ddb3b76c888703ac2634e82263b97eedcc2ad202738b"),
+            "pack/tokenizer/tokenizer.json": (554, "87be2ac47d8bc7393b7435df6ccd276740019a393941a2585d5edce59f450c54"),
+            "pack/tokenizer/vocab.json": (5737005, "4ba64f0332abcfb0b600b7df1537d1e836e68009d5fb7cdb77339738dc6365c4"),
+        },
+        "dense": {"qwen-nvidia-nvfp4-dense.gguf": (5992176896, "0f795ca0cbb908e0cf2b894b30103e21455b5a05346a7ef79da208540cfd2be3")},
+        "ple": {"ple-fp8.gguf": (51200246176, "37f89b8ce5a3425932763257c40229ec02723ad2ab14b4bbfc26a486f4725c9c")},
+        "embd": {"token-embd-bf16.gguf": (1271398656, "386203af9070c7b43acb24ded8922876721d97bbad1a709b25cb49d694a7f51d")},
+        "mtp": {
+            "mtp/dense.bin": (116099072, "c724dc0b0822ada5d2977bf5bde821605feabaa64ea2e0045b67ca656329070a"),
+            "mtp/dense.txt": (1880, "8773c81ebb0986e37fe94a8a9933e87be48b1fabc6889a0106bcdab179d1c2ac"),
+            "mtp/draft_vocab.bin": (235852, "25d7fd1670a2e0ec885868d1718d410a3baab03bceeacf0a156cf93ffe4e1ef4"),
+            "mtp/experts.bin": (707788800, "09398406be61f1f54c93861f449e48b8df0bfccbc9ec9b2b7636775a6ea9244f"),
+        },
+        "profile": {},
+    },
     QWEN_GPTQ_REPO: {"revision": "", **{c: {} for c in NVFP4_COMPONENTS}},
 }
 NVFP4_FAMILIES = {

@@ -1,7 +1,7 @@
 """The original, censored Qwen in this fork's NVFP4 format: qwen-nvidia-nvfp4 (NVIDIA's ModelOpt NVFP4 checkpoint
-converted) and qwen-nvfp4-gptq (every expert NVFP4 by GPTQ).  Not offered while their file tables are placeholders; with
-filled tables the menu lists them after the uncensored model and says which are censored, and an install names its
-config, served model, files and license.  tools/test_setup_nvfp4.py's harness (setup.main() on mocked PCs).
+converted) and qwen-nvfp4-gptq (every expert NVFP4 by GPTQ).  NVIDIA's is uploaded and offered, the GPTQ one is a
+placeholder until its upload; with filled tables the menu lists them after the uncensored model and says which are
+censored, and an install names its config, served model, files and license.  tools/test_setup_nvfp4.py's harness (setup.main() on mocked PCs).
 
     python -m unittest tools.test_setup_qwen_nvfp4
 """
@@ -37,23 +37,43 @@ class Names(unittest.TestCase):
         self.assertNotIn("qwen-nvfp4", setup.NVFP4_FAMILIES)          # the key itself says NVIDIA
 
 
-class Placeholders(unittest.TestCase):
-    def test_not_offered_until_the_uploads(self):
-        for f in QWEN:
-            files, why = setup.nvfp4_files(f)              # the tables as committed
-            self.assertEqual(files, [])
-            self.assertIn("its pack files are not on Hugging Face yet", why)
+class AsCommitted(unittest.TestCase):
+    """NVIDIA's is uploaded (its table pinned); the GPTQ one is a placeholder until its upload."""
+    def test_nvidia_s_is_offered_the_gptq_one_not_yet(self):
+        files, why = setup.nvfp4_files("qwen-nvidia-nvfp4")
+        self.assertIsNone(why)
+        self.assertEqual({f[2] for f in files}, {"cca8f7fee5ce0af932097340a75e06df25c4e57d"})
+        self.assertEqual({f[1] for f in files}, {QNV})
+        self.assertEqual(round(setup.nvfp4_experts_gib(files), 2), 63.28)
+        files, why = setup.nvfp4_files("qwen-nvfp4-gptq")
+        self.assertEqual(files, [])
+        self.assertIn("its pack files are not on Hugging Face yet", why)
+
+    def test_the_menu_with_the_committed_tables(self):
         ram, found = PROFILES["128GB-1x24GB"]
-        code, out, cfg, _ = run(ram, found, ["--no-start"], answers="")
+        code, out, cfg, _ = run(ram, found, ["--no-start"], repos=setup.NVFP4_REPOS, answers="")
         self.assertEqual(code, 0, out[-3000:])
-        self.assertEqual(len(menu_lines(out)), 1 + len(setup.FAMILIES))   # not in the menu, a line says why
-        self.assertIn("(Qwen3.8-Flash-Next (NVIDIA's NVFP4): not offered, not published yet", out)
+        lines = menu_lines(out)
+        self.assertEqual(len(lines), 2 + len(setup.FAMILIES))
+        self.assertTrue(lines[0].startswith("1) OrcaRouter"), lines)
+        self.assertTrue(lines[1].startswith("2) Qwen3.8-Flash-Next (NVIDIA's NVFP4)"), lines)
         self.assertIn("(Qwen3.8-Flash-Next (NVFP4, GPTQ): not offered, not published yet", out)
-        for f in QWEN:
-            with self.subTest(f):
-                code, out, cfg, _ = run(ram, found, ["--family", f, "--no-start"])
-                self.assertEqual(code, 1)
-                self.assertIn("is not offered: not published yet", out)
+        self.assertEqual(cfg["model_name"], "orcarouter-qwen3.8-flash-next-uncensored-nvfp4")   # still the default
+        code, out, cfg, _ = run(ram, found, ["--family", "qwen-nvfp4-gptq", "--no-start"], repos=setup.NVFP4_REPOS)
+        self.assertEqual(code, 1)
+        self.assertIn("is not offered: not published yet", out)
+
+    def test_nvidia_s_install_pins_its_upload(self):
+        ram, found = PROFILES["128GB-1x24GB"]
+        got = []
+        code, out, cfg, _ = run(ram, found, ["--family", "qwen-nvidia-nvfp4", "--no-start"], repos=setup.NVFP4_REPOS,
+                                downloads=got)
+        self.assertEqual(code, 0, out[-3000:])
+        rev = "cca8f7fee5ce0af932097340a75e06df25c4e57d"
+        self.assertIn(f"https://huggingface.co/{QNV}/resolve/{rev}/pack/experts.bin", got)
+        self.assertIn(f"https://huggingface.co/{QNV}/resolve/{rev}/ple-fp8.gguf", got)
+        self.assertTrue(arg(cfg, "--native").endswith("/qwen-nvidia-nvfp4-dense.gguf"))
+        self.assertTrue(arg(cfg, "--mtp").replace("\\", "/").endswith(setup.repo_dir(QNV) + "/mtp"))
 
 
 class Published(unittest.TestCase):
