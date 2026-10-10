@@ -374,6 +374,48 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### orca-nvfp4 withdrawn, censorship off by a switch (2026-10-10, release 0.1.41-nvfp4.5)
+
+- **orca-nvfp4 is a much weaker agent.** OrcaRouter's abliteration orthogonalizes a refusal direction out of all 149
+  matrices that write the residual stream, in all 48 layers. On the same Claude Code task it ran 10-70 steps against
+  the original Qwen's 175, with a clearly worse result. Measured on our packs: it ends its thinking sooner - the mean
+  change of log p(`</think>`) over 8,550 rows of the model's own thinking is +0.119 nats - and on the captured 72K-token
+  Claude Code request (0.1.41-nvfp4.3) it thought ~1,000-1,150 tokens (two orca packs, 5 greedy runs each) against the
+  original's 1,699. Teacher-forced KL to the original 0.047. Setup no longer offers it; `qwen-nvfp4-gptq` is the
+  default, and an install of orca keeps working and is told why on each run (`NVFP4_WITHDRAWN`, the replacement
+  `--family qwen-nvfp4-gptq --uncensored on`).
+- **The switch: `--uncensored on`** (off by default; setup asks "Disable censorship?", default no). The engine
+  removes a per-layer refusal direction from every hyper-connection residual stream after layers 8-33
+  (`--control-vector-scaled data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0 --control-vector-layer-range 8 33
+  --cvec-mode project --cvec-dir per-layer`): upstream's experimental speed projection mechanism, with this fork's
+  vector. The engine is unchanged. The vector is the difference of the residual means of 320 harmful and 320
+  harmless prompts at the assistant-header positions, on this engine and the `qwen-nvfp4-gptq` pack; its window and
+  strength were picked from ~30 variants for refusals at or below 5% with the least change to the thinking
+  ([data/uncensor/README.md](../data/uncensor/README.md) has the method):
+
+  | | stock | this vector | upstream's vector (4-44) | orca |
+  |---|---|---|---|---|
+  | refusals, thinking on, held-out EN / UK | 30/30, 29/30 (of 30 each) | 0/104, 0/30 | 2/104, 1/30 | - |
+  | refusals, thinking off, EN / UK | 102/104, 30/30 | 3/104, 2/30 | 3/104, 2/30 | - |
+  | KL to the original / the same top token | 0 / 100% | 0.026 / 94.4% | 0.043 / 93.1% | 0.047 / 92.9% |
+  | log p(`</think>`) shift, nats | 0 | +0.019 | +0.092 | +0.119 |
+  | thinking tokens on the 72K request, 5 runs (loops) | 1,699 (0) | 1,947 (0) | 1,825 (0) | ~1,000-1,150 (0) |
+
+  The KL is over 5,153 rows of code, prose and the model's own replies; most of the vector's thinking-off "refusals"
+  are capability disclaimers followed by an answer. Decode on the 72K request: 159.0 tokens/s against 158.8.
+- **Where it is offered:** `UNCENSOR_FAMILIES` in setup.py, now `qwen-nvfp4-gptq` only (the GGUF Qwen quants are
+  being measured). Never `qwen-nvidia-nvfp4`: the NVIDIA Open Model License does not allow bypassing the model's
+  safety guardrails, so setup refuses `--uncensored on` there with that reason (`UNCENSOR_REFUSED`), and not Swift
+  1.5 or the Coder, which have other weights. Upstream's `--experimental-speed-projection on|off` is an alias for the
+  NVFP4 models; for the GGUF Qwen models it stays upstream's own option with upstream's vector.
+- **Per request:** setup writes `"uncensored": true` into `strata-<model>.json` beside the flags, the default for
+  requests. The server reads `"uncensored": true|false` per request, in the config (top level or the sampling block)
+  and in the Chat settings shared with apps, as upstream's `experimental_speed_projection` (which wins when both are
+  given). The web app's switch is "Disable censorship" in Sampling, and the About tab says the projection is loaded.
+- **Checks:** the engine is 0.1.41-nvfp4.3's (1217e500). Tests: setup's and the table's 506 OK (orca withdrawn, the
+  default, the switch for each family, the read-back of an install), the server's 605 OK (13 skipped; the
+  `uncensored` alias's 4 among them).
+
 ### The original Qwen in NVFP4 (2026-10-09, release 0.1.41-nvfp4.4)
 
 Setup offers two models of the original, censored Qwen3.8-Flash-Next beside `orca-nvfp4`, which stays the default.
