@@ -54,8 +54,9 @@ class CarryOver(unittest.TestCase):
         a = cfg["args"]
         self.assertEqual(a[a.index("--max-context") + 1], "131072")       # the new choice is used
         self.assertNotIn("--hand-option", a)                               # setup chooses the engine options...
-        self.assertIn("kept from your earlier strata-q2_0.json: sampling, mcp_servers, mcp, cors_origins, "
-                      "reasoning_effort", out)
+        # sampling: setup writes the model's recommended values now; the user's own one (min_p) is what was kept
+        self.assertIn("kept from your earlier strata-q2_0.json: mcp_servers, mcp, cors_origins, "
+                      "reasoning_effort, sampling min_p", out)
         self.assertIn("kept as strata-q2_0.json.bak", out)
         self.assertIn("--hand-option", out)                                # ...and says which ones it did not keep
 
