@@ -20,14 +20,15 @@ What the first run does (each step is skipped when it is already done):
   6. prepares the model for Strata and fetches the MTP draft layer (~5 GB, from the original Qwen checkpoint)
   7. writes run-<model>.bat / run-<model>.sh and starts the model
 
-This fork (sergqwer/strata-nvfp4) also offers its NVFP4 models, ready-made on Hugging Face: orca-nvfp4 (OrcaRouter's
-uncensored Flash-Next, every expert NVFP4 by GPTQ; the default where the PC meets its requirements), and the original,
-censored Qwen: qwen-nvidia-nvfp4 (NVIDIA's ModelOpt NVFP4 checkpoint, converted) and qwen-nvfp4-gptq (every expert NVFP4
-by GPTQ).  Nothing is converted on the PC, and the engine is this fork's (its release's, or compiled from this
-source).  --dry-run shows what setup would do for them.  huihui-nvfp4 was withdrawn in 0.1.41-nvfp4.3 (it often loops in long thinking); an
-install of it keeps working.
+This fork (sergqwer/strata-nvfp4) also offers its NVFP4 models of the original, censored Qwen, ready-made on Hugging
+Face: qwen-nvfp4-gptq (every expert NVFP4 by GPTQ; the default where the PC meets its requirements) and
+qwen-nvidia-nvfp4 (NVIDIA's ModelOpt NVFP4 checkpoint, converted).  --uncensored on (qwen-nvfp4-gptq only, off by
+default) adds this fork's refusal-direction projection (data/uncensor).  Nothing is converted on the PC, and the
+engine is this fork's (its release's, or compiled from this source).  --dry-run shows what setup would do for them.
+Withdrawn, an install of either keeps working: huihui-nvfp4 (0.1.41-nvfp4.3, it often loops in long thinking) and
+orca-nvfp4 (0.1.41-nvfp4.5, its abliteration made it a much weaker agent).
 
-Options: --family orca-nvfp4|qwen-nvidia-nvfp4|qwen-nvfp4-gptq|qwen|swift|coder|unsloth, --model Q2_0|IQ2_XS|IQ3_XXS|IQ3_S, --context 32768, --rope-scaling none|linear|yarn
+Options: --family qwen-nvfp4-gptq|qwen-nvidia-nvfp4|qwen|swift|coder|unsloth, --uncensored on|off, --model Q2_0|IQ2_XS|IQ3_XXS|IQ3_S, --context 32768, --rope-scaling none|linear|yarn
 (--rope-scale F; past the trained 262144 the setup adds yarn and the factor is the final context over 262144,
 at least 1 - an explicit --rope-scaling none is refused for such a context), --vision yes|no|gpu|cpu, --port
 8080, --yes (recommended
@@ -313,6 +314,18 @@ FAMILIES = {
 MMPROJ = "mmproj-Qwen3.8-Flash-Next-BF16.gguf"
 # EXPERIMENTAL, off by default (setup asks): a control vector shipped with the repository, see its README
 ESP_VECTOR = ROOT / "data" / "experimental-speed-projection" / "Qwen3.8-Flash-Next-experimental-speed-projection.gguf"
+# --uncensored on (0.1.41-nvfp4.5, off by default): this fork's refusal-direction projection, made on qwen-nvfp4-gptq
+# (data/uncensor/README.md) and applied as upstream's speed projection is (--cvec-mode project), so the server's
+# per-request switch (experimental_speed_projection, alias "uncensored") turns it off for a request.  Offered only
+# for UNCENSOR_FAMILIES; never for NVIDIA's model (UNCENSOR_REFUSED: its license).
+UNCENSOR_VECTOR = ROOT / "data" / "uncensor" / "qwen-nvfp4-gptq-uncensored.gguf"
+UNCENSOR_LAYERS = (8, 33)
+UNCENSOR_FAMILIES = ("qwen-nvfp4-gptq",)
+UNCENSOR_REFUSED = {
+    "qwen-nvidia-nvfp4": "the NVIDIA Open Model License does not allow bypassing the model's safety guardrails",
+    "swift": "Swift 1.5 has other weights: the projection was made for the original Qwen",
+    "coder": "the Coder has other weights: the projection was made for the original Qwen",
+}
 # the image encoder on the GPU (~1.2 GB at 1024 image tokens) warms up before the engine starts, so the engine
 # sizes its expert slots around it and the default reserve (700 MiB) is enough; engines before 0.1.2 need more
 VISION_GPU_SMALL_RESERVE_MIB = 1000    # the tip for images on a <= 12 GB card (the engine's LOW line asked ~1003)
@@ -4036,12 +4049,31 @@ def choices_from_config(cfg_path: Path) -> dict:
             "context": int(val("--max-context")) if val("--max-context") else None,
             "kv": val("--kv") if val("--kv") in ("int8", "q4_0") else None,
             "vision": ("gpu" if vis.get("gpu") else "cpu") if isinstance(vis, dict) else "none",
-            "esp": ("on" if Path(esp_path).name == ESP_VECTOR.name else esp_path) if esp_path else "off",
+            "esp": ("on" if Path(esp_path).name == ESP_VECTOR.name else "off" if Path(esp_path).name ==
+                    UNCENSOR_VECTOR.name else esp_path) if esp_path else "off",
+            "uncensored": "on" if esp_path and Path(esp_path).name == UNCENSOR_VECTOR.name else None,
             "host": cfg.get("host"), "api_key": cfg.get("api_key"), "port": cfg.get("port"), "gpu": cfg.get("gpu"),
             "layer_split": cfg.get("layer_split"), "cuda": 12 if config_toolkit(cfg) == 12 else None,
             # #493: --vram-reserve-mib given at setup (images write the default 700 themselves)
             "vram_reserve_mib": int(val("--vram-reserve-mib")) if (val("--vram-reserve-mib") or "").isdigit() and (
                 vis is None or int(val("--vram-reserve-mib")) != VISION["gpu"]["reserve_mib"]) else None}
+
+
+def uncensor_args(vector: Path = None) -> list:
+    """The engine's flags for --uncensored on: the projection on UNCENSOR_LAYERS, upstream's control-vector flags."""
+    first, last = UNCENSOR_LAYERS
+    return ["--control-vector-scaled", f"{vector or UNCENSOR_VECTOR}:1.0", "--control-vector-layer-range", str(first),
+            str(last), "--cvec-mode", "project", "--cvec-dir", "per-layer"]
+
+
+def uncensored_choice(a) -> str | None:
+    """"on", "off" or None (not given): --uncensored, else upstream's --experimental-speed-projection on|off, its
+    alias for the NVFP4 models (a vector file given there is the GGUF models' option)."""
+    v = (getattr(a, "uncensored", None) or "").strip().lower()
+    if not v:
+        v = (getattr(a, "experimental_speed_projection", None) or "").strip().lower()
+    return {"on": "on", "yes": "on", "y": "on", "1": "on", "off": "off", "no": "off", "n": "off",
+            "0": "off"}.get(v)
 
 
 def withdrawn_family(cfg_path: Path) -> str | None:
@@ -4914,15 +4946,14 @@ def bundled_cuda(eng) -> bool:
         return False
 
 
-# The NVFP4 models: OrcaRouter's abliterated Flash-Next with every expert NVFP4 by GPTQ, and the original Qwen (NVIDIA's
-# ModelOpt NVFP4 checkpoint converted, and by GPTQ), ready-made on Hugging Face - nothing is converted on the PC
-# (huihui-ai's, offered in 0.1.41-nvfp4.1/.2, is withdrawn: NVFP4_WITHDRAWN).
+# The NVFP4 models: the original Qwen, by this fork's GPTQ and NVIDIA's ModelOpt NVFP4 checkpoint converted, ready-made
+# on Hugging Face - nothing is converted on the PC (huihui-ai's abliteration, offered in 0.1.41-nvfp4.1/.2, and
+# OrcaRouter's, offered in 0.1.41-nvfp4.1-.4, are withdrawn: NVFP4_WITHDRAWN).
 # NVFP4_REPOS holds one table per repository, what its upload fixed: the commit, and per component its files (path
 # in the repository: bytes, SHA-256).  A family takes each component
 # from the repository its "sources" name - its own, or a shared one (the PLE table and the embedding, when they are
 # Qwen's own) - and is offered only once all of them are listed (nvfp4_files).
-NVFP4_MODEL = "NVFP4"                  # the one size: strata-orca-nvfp4.json, run-orca-nvfp4.bat
-ORCA_REPO = "Maximilian228/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-NVFP4-GPTQ-Strata"
+NVFP4_MODEL = "NVFP4"                  # the one size: strata-qwen-gptq-nvfp4.json, run-qwen-gptq-nvfp4.bat
 QWEN_NV_REPO = "Maximilian228/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Strata"    # nvidia/Qwen3.8-Flash-Next-NVFP4, converted
 QWEN_GPTQ_REPO = "Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata"     # Qwen/Qwen3.8-Flash-Next by GPTQ (this fork)
 # pack: the experts pack folder (index.txt, experts.bin, dense.bin, native_experts.txt, tokenizer/); dense: the GGUF
@@ -4933,30 +4964,6 @@ NVFP4_COMPONENTS = ("pack", "dense", "ple", "embd", "mtp", "profile")
 NVFP4_REPOS = {
     # tools/nvfp4_table.py <repo> --revision <commit> (2026-10-09, the uploads' commits): "revision" pins every
     # download, each component {path: (bytes, "sha256")}.
-    ORCA_REPO: {
-        "revision": "34c2fc2cd547c5278800c67c3ab9f0e3405f6942",
-        "pack": {
-            "pack/dense.bin": (1538625024, "0c83c1629ffdb6b13ee2a504f37aa7837ba62c4ecbaebf40eb0beb82b2075bca"),
-            "pack/experts.bin": (67948118016, "11285bd6f1c5d8d9338905f5b16a89c3910651da7835a259c26b6a1a1eb91e71"),
-            "pack/index.txt": (117515, "53440aa4730542ae0042e18e63e6d47af72ed869e6c85963dad84d2cf3ed01d4"),
-            "pack/native_experts.txt": (1599, "615f655fb28bf60b243664860b135710bf4177b111c6be89073e780a35de1018"),
-            "pack/tokenizer/chat_template.jinja": (8952, "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"),
-            "pack/tokenizer/merges.txt": (3600844, "080cf95432173729d160346b7882bd2a644b07f7a3813a3eb73f4e66787bfde9"),
-            "pack/tokenizer/token_type.json": (744960, "5088c8c298fc06af8382ddb3b76c888703ac2634e82263b97eedcc2ad202738b"),
-            "pack/tokenizer/tokenizer.json": (554, "87be2ac47d8bc7393b7435df6ccd276740019a393941a2585d5edce59f450c54"),
-            "pack/tokenizer/vocab.json": (5737005, "4ba64f0332abcfb0b600b7df1537d1e836e68009d5fb7cdb77339738dc6365c4"),
-        },
-        "dense": {"orca-nvfp4-dense.gguf": (5992177344, "6efd902e5fdb9dd58ce32608b645296721d11d0fc60a9677d4f322452a927ffe")},
-        "ple": {"ple-fp8.gguf": (51200246144, "40f95a6242e08e9aea2e525cd3b21c3239163d1040682facf5cf2484192d42ce")},
-        "embd": {"token-embd-bf16.gguf": (1271398688, "62cb3bbd00013a04e76b831acafd9b87ed1376b59a50e85b0e91278f72e3a8c8")},
-        "mtp": {
-            "mtp/dense.bin": (116099072, "85f313ccb60e934e61b31001a42349f0503e97586d9cc2529cb227cfab14e3ac"),
-            "mtp/dense.txt": (1880, "8773c81ebb0986e37fe94a8a9933e87be48b1fabc6889a0106bcdab179d1c2ac"),
-            "mtp/draft_vocab.bin": (235852, "25d7fd1670a2e0ec885868d1718d410a3baab03bceeacf0a156cf93ffe4e1ef4"),
-            "mtp/experts.bin": (707788800, "96bdec41a96658aa7c3f28fdd388b2ccf4bffa253de85bee94b20231fdfa8bf3"),
-        },
-        "profile": {},
-    },
     # the original (censored) Qwen, both uploaded 2026-10-09: NVIDIA's NVFP4 converted, and our GPTQ.  The PLE table,
     # the embedding and the MTP head are the same files in both (nvfp4_fetch links them instead of a second download)
     QWEN_NV_REPO: {
@@ -5009,16 +5016,17 @@ NVFP4_REPOS = {
     },
 }
 NVFP4_FAMILIES = {
-    "orca-nvfp4": {"title": "OrcaRouter Qwen3.8-Flash-Next Uncensored (NVFP4)",
-                   "by": "OrcaRouter's uncensored Flash-Next, every expert NVFP4 by GPTQ (this fork)",
-                   "about": "4.5-bit experts, closer to the full model than the 2-3-bit GGUFs; it does not refuse",
-                   "tag": "orca-", "name": "orcarouter-qwen3.8-flash-next-uncensored",
-                   "license": "Qwen Community License 1.0, Qwen3.8-Flash-Next's: the LICENSE file OrcaRouter ships "
-                              "(its model card says Apache 2.0): https://huggingface.co/OrcaRouter/Qwen3.8-Flash-Next-Uncensored",
-                   "sources": {c: ORCA_REPO for c in NVFP4_COMPONENTS}},
-    # the original Qwen3.8-Flash-Next, censored: it refuses what Qwen refuses.  NVIDIA's NVFP4 checkpoint (ModelOpt,
-    # plain rounding of every expert) converted, and this fork's GPTQ quantization of the same BF16 model - the same
-    # format, size and speed
+    # the original Qwen3.8-Flash-Next, censored: it refuses what Qwen refuses.  This fork's GPTQ quantization of the
+    # BF16 model (the default; --uncensored on adds the refusal-direction projection), and NVIDIA's NVFP4 checkpoint
+    # (ModelOpt, plain rounding of every expert) converted - the same format, size and speed
+    "qwen-nvfp4-gptq": {"title": "Qwen3.8-Flash-Next (NVFP4, GPTQ)",
+                        "by": "the original Qwen, every expert NVFP4 by GPTQ (this fork)",
+                        "about": "censored unless --uncensored on (this fork's refusal-direction projection); GPTQ, "
+                                 "less error than NVIDIA's plain rounding at the same size and speed",
+                        "tag": "qwen-gptq-", "name": "qwen3.8-flash-next-gptq",
+                        "license": "Qwen Community License 1.0, Qwen3.8-Flash-Next's: "
+                                   "https://huggingface.co/Qwen/Qwen3.8-Flash-Next",
+                        "sources": {c: QWEN_GPTQ_REPO for c in NVFP4_COMPONENTS}},
     "qwen-nvidia-nvfp4": {"title": "Qwen3.8-Flash-Next (NVIDIA's NVFP4)",
                           "by": "the original Qwen, NVIDIA's ModelOpt NVFP4 checkpoint converted for Strata",
                           "about": "censored (it refuses what Qwen refuses); NVIDIA's plain rounding of every expert",
@@ -5027,28 +5035,24 @@ NVFP4_FAMILIES = {
                                      "Model License) and Qwen3.8-Flash-Next's Qwen Community License 1.0: "
                                      "https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4",
                           "sources": {c: QWEN_NV_REPO for c in NVFP4_COMPONENTS}},
-    "qwen-nvfp4-gptq": {"title": "Qwen3.8-Flash-Next (NVFP4, GPTQ)",
-                        "by": "the original Qwen, every expert NVFP4 by GPTQ (this fork)",
-                        "about": "censored, as qwen-nvidia-nvfp4; GPTQ instead of NVIDIA's plain rounding, the same size "
-                                 "and speed",
-                        "tag": "qwen-gptq-", "name": "qwen3.8-flash-next-gptq",
-                        "license": "Qwen Community License 1.0, Qwen3.8-Flash-Next's: "
-                                   "https://huggingface.co/Qwen/Qwen3.8-Flash-Next",
-                        "sources": {c: QWEN_GPTQ_REPO for c in NVFP4_COMPONENTS}},
 }
-NVFP4_DEFAULT = "orca-nvfp4"           # this fork's recommended model, where the PC meets its requirements
+NVFP4_DEFAULT = "qwen-nvfp4-gptq"      # this fork's recommended model, where the PC meets its requirements
 # Families setup no longer offers.  An install of one keeps working (its config and files are left alone) and every
-# run says why it was withdrawn and what replaces it; "copies": its files another family can link instead of a
-# download (nvfp4_same: the PLE table is the same file in both repositories).
+# run says why it was withdrawn and what replaces it; "copies" (optional): its files another family can link instead
+# of a download (nvfp4_same).
 NVFP4_WITHDRAWN = {
     "huihui-nvfp4": {"title": "Huihui Qwen3.8-Flash-Next abliterated (NVFP4)", "tag": "huihui-",
-                     "replacement": "orca-nvfp4",
+                     "replacement": "qwen-nvfp4-gptq --uncensored on",
                      # 0.1.41-nvfp4.3, loopcap: a captured 72K-token Claude Code request (adaptive thinking, effort xhigh)
                      # replayed greedy looped in its thinking 9 of 10 times (the old 0.1.40.3 engine too), 2 of 5 with
-                     # Qwen's sampling; orca-nvfp4 0 of 5
-                     "why": "it often loops in long thinking (9 of 10 runs of a long Claude Code request; orca-nvfp4 none of 5)",
-                     "copies": {"Maximilian228/Huihui-Qwen3.8-Flash-Next-abliterated-NVFP4-GPTQ-Strata": {
-                         "ple-fp8.gguf": "40f95a6242e08e9aea2e525cd3b21c3239163d1040682facf5cf2484192d42ce"}}},
+                     # Qwen's sampling
+                     "why": "it often loops in long thinking (9 of 10 runs of a long Claude Code request)"},
+    "orca-nvfp4": {"title": "OrcaRouter Qwen3.8-Flash-Next Uncensored (NVFP4)", "tag": "orca-",
+                   "replacement": "qwen-nvfp4-gptq --uncensored on",
+                   # 0.1.41-nvfp4.5: OrcaRouter's abliteration edits all 149 residual writers.  On the same Claude Code
+                   # task it ran 10-70 steps against the original Qwen's 175; it ends its thinking sooner (delta log
+                   # p(</think>) +0.119 nats; loopcap thinking ~1000-1150 tokens against the original's ~1700)
+                   "why": "its abliteration (all 149 residual writers edited) made it a much weaker agent: 10-70 steps against the original Qwen's 175 on the same Claude Code task, its thinking cut short"},
 }
 NVFP4_MIN_ARCH = 75                    # RTX 20 and newer (docs/NVFP4.md, "Other GPUs")
 NVFP4_MIN_VRAM_GB = 11.5               # a 12 GB card (nvidia-smi lists ~11.99); an 8 GB one has no room for the cache
@@ -5389,8 +5393,17 @@ def nvfp4_install(a, family: str, gpu: dict, multi: list, cuda_tk: int, ram: flo
              f"rest of the {gib:.0f} GiB are read from experts.bin on the SSD when needed")
     if a.gguf_dir:
         warn("--gguf-dir is for the GGUF models: not used")
-    if (a.experimental_speed_projection or "off").strip().lower() not in ("off", "no", "n", "0", ""):
-        warn("the experimental speed projection is made for the original Qwen3.8-Flash-Next: left off")
+    unc = uncensored_choice(a)
+    if unc == "on" and family in UNCENSOR_REFUSED:
+        fail(f"--uncensored is not available for {family}: {UNCENSOR_REFUSED[family]}",
+             "--family qwen-nvfp4-gptq --uncensored on: this fork's GPTQ quant of the same model, under the Qwen "
+             "Community License")
+    if unc == "on" and family not in UNCENSOR_FAMILIES:
+        fail(f"--uncensored is offered for {', '.join(UNCENSOR_FAMILIES)} only", f"--family {UNCENSOR_FAMILIES[0]}")
+    esp_file = (a.experimental_speed_projection or "").strip()
+    if esp_file and esp_file.lower() not in ("on", "off", "yes", "no", "y", "n", "1", "0"):
+        warn("--experimental-speed-projection with a vector file is the GGUF models' option: not used "
+             "(--uncensored on|off here)")
     if a.kv_streaming == "on":
         warn("--kv-streaming: this engine grows the K/V in VRAM as the context fills instead: not used")
     vram = gpu["vram_gb"]
@@ -5439,6 +5452,22 @@ def nvfp4_install(a, family: str, gpu: dict, multi: list, cuda_tk: int, ram: flo
         say("  VRAM for the experts.")
         vision = "cpu" if ask("Do you want images?", ["y", "n"], "n", a.yes) == "y" else "none"
     ok("images: " + {"none": "off", "gpu": "on (encoder on the GPU)", "cpu": "on (encoder on the CPU)"}[vision])
+    uncensored = False
+    if family in UNCENSOR_FAMILIES:                   # the original Qwen, censored by default
+        if unc is None:
+            say()
+            say("  Censorship: the model declines what Qwen declines. Setup can turn that off with this fork's")
+            say("  refusal-direction projection (data/uncensor/README.md): 0 of 104 test requests refused, its")
+            say("  thinking as long as the original's. You are responsible for what it writes; the web app and the")
+            say("  API turn it off per request.")
+            unc = "on" if ask("Disable censorship?", ["y", "n"], "n", a.yes) == "y" else "off"
+        uncensored = unc == "on"
+        if uncensored and not UNCENSOR_VECTOR.is_file():
+            fail(f"the uncensored projection's vector is missing: {UNCENSOR_VECTOR}", "use a full Strata checkout (git clone)")
+        ok("censorship: " + ("off (--uncensored on: the refusal-direction projection, layers "
+                              f"{UNCENSOR_LAYERS[0]}-{UNCENSOR_LAYERS[1]})" if uncensored else "on (the original model)"))
+    if uncensored:
+        extra += uncensor_args()
     tag = fam["tag"] + NVFP4_MODEL
     cfg_path = ROOT / f"strata-{tag.lower()}.json"
     models_dir = Path(a.models_dir)
@@ -5544,6 +5573,8 @@ def nvfp4_install(a, family: str, gpu: dict, multi: list, cuda_tk: int, ram: flo
     for k in ("host", "api_key"):
         if getattr(a, k):
             cfg[k] = getattr(a, k)
+    if uncensored:                                     # the default for requests (the server's alias of
+        cfg["uncensored"] = True                       # experimental_speed_projection); a request can say false
     if draft_vocab:
         cfg["draft_vocab"] = draft_vocab
     if a.browser is not None:
@@ -5616,8 +5647,8 @@ def sycl_setup(argv) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--family", choices=[*NVFP4_FAMILIES, *NVFP4_WITHDRAWN, *FAMILIES],
-                    help="orca-nvfp4 (this fork's default) = the uncensored NVFP4 model, qwen-nvidia-nvfp4 (NVIDIA's) or "
-                         "qwen-nvfp4-gptq = the original, censored Qwen in NVFP4; qwen = Qwen3.8-Flash-Next, "
+                    help="qwen-nvfp4-gptq (this fork's default) or qwen-nvidia-nvfp4 (NVIDIA's) = the original, censored "
+                         "Qwen in NVFP4; qwen = Qwen3.8-Flash-Next, "
                          "swift = Swift 1.5, coder, unsloth = the GGUF models")
     ap.add_argument("--dry-run", action="store_true",
                     help="the NVFP4 models: show what setup would download, install and write, then stop (nothing is "
@@ -5640,6 +5671,9 @@ def main() -> int:
                     help="the most image tokens a picture becomes (default 1024 with the encoder on the GPU, 300 on "
                          "the CPU): more reads small text and charts better, and takes longer to encode; remembered "
                          "for this model")
+    ap.add_argument("--uncensored", choices=["on", "off"],
+                    help="qwen-nvfp4-gptq: on = this fork's refusal-direction projection (data/uncensor), the model no "
+                         "longer declines; off by default. Never for NVIDIA's model (its license)")
     ap.add_argument("--experimental-speed-projection", metavar="on|off|GGUF",
                     help="EXPERIMENTAL, off by default: the control vector in data/experimental-speed-projection "
                          "(or another GGUF) as a projection on layers 4-44; see docs/DETAILS.md")
@@ -5779,6 +5813,7 @@ def main() -> int:
                 a.kv = a.kv or ch["kv"]
                 a.vision = a.vision or ch["vision"]
                 a.experimental_speed_projection = a.experimental_speed_projection or ch["esp"]
+                a.uncensored = a.uncensored or ch.get("uncensored")
                 a.host, a.api_key = a.host or ch["host"], a.api_key or ch["api_key"]
                 a.port = a.port or ch["port"]
                 if a.vram_reserve_mib is None:          # #493: an explicit reserve set up before
@@ -6053,7 +6088,7 @@ def main() -> int:
         return nvfp4_install(a, family, gpu, multi, cuda_tk, ram, roots, adopted, port)
     if a.dry_run:
         fail("--dry-run shows the plan of this fork's NVFP4 models only",
-             "--family orca-nvfp4, qwen-nvidia-nvfp4 or qwen-nvfp4-gptq")
+             "--family qwen-nvfp4-gptq or qwen-nvidia-nvfp4")
     fam = FAMILIES[family]
     ok(f"model: {fam['title']}")
     if fam.get("license"):
@@ -6244,6 +6279,10 @@ def main() -> int:
     # EXPERIMENTAL: the experimental-speed-projection control vector (data/experimental-speed-projection), off unless
     # chosen here; with it loaded, the web app and the API switch it off per request
     esp = None
+    if (getattr(a, "uncensored", None) or "").lower() == "on":
+        fail(f"--uncensored is not available for {family}: " + UNCENSOR_REFUSED.get(
+             family, f"this fork's projection is measured on {', '.join(UNCENSOR_FAMILIES)} only so far"),
+             f"--family {UNCENSOR_FAMILIES[0]} --uncensored on")
     esp_choice = (a.experimental_speed_projection or "").strip()
     if family in ("qwen", "coder"):                   # the Coder: the same model's residual stream
         if not esp_choice:
