@@ -49,6 +49,9 @@ class FakeGGUF:
         self.tensors = [types.SimpleNamespace(name=n) for n in names]
 
 
+REPO = Path(setup.__file__).resolve().parent     # where setup's own data lives (not the mocked ROOT)
+
+
 def normalize(v, t: Path):
     """The config with the temp folder and the platform's names taken out (it compares on Windows and Linux)."""
     if isinstance(v, dict):
@@ -56,7 +59,8 @@ def normalize(v, t: Path):
     if isinstance(v, list):
         return [normalize(x, t) for x in v]
     if isinstance(v, str):
-        return re.sub(rf"(?<![w.-]){re.escape(setup.EXE)}(?![w.-])", "<EXE>", v.replace(str(t), "<T>").replace("\\", "/"))   # #973: only the whole name, not "strata-x.log" on Linux
+        v = v.replace(str(t), "<T>").replace(str(REPO), "<REPO>")   # the repository's data/ (the uncensor vector)
+        return re.sub(rf"(?<![w.-]){re.escape(setup.EXE)}(?![w.-])", "<EXE>", v.replace("\\", "/"))   # #973: only the whole name, not "strata-x.log" on Linux
     return v
 
 

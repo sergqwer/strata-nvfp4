@@ -27,6 +27,7 @@ import setup  # noqa: E402
 from test_setup_golden import PROFILES, card, install  # noqa: E402
 
 QG, QNV = setup.QWEN_GPTQ_REPO, setup.QWEN_NV_REPO
+VEC = "<REPO>/data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0"   # the golden harness's name for the repository
 ORCA = "Maximilian228/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-NVFP4-GPTQ-Strata"   # withdrawn in 0.1.41-nvfp4.5
 HUIHUI = "Maximilian228/Huihui-Qwen3.8-Flash-Next-abliterated-NVFP4-GPTQ-Strata"   # withdrawn: NVFP4_WITHDRAWN
 OTHER = "Maximilian228/Other-NVFP4-GPTQ-Strata"                                  # a second repository (links)
@@ -213,7 +214,7 @@ class EngineArgs(unittest.TestCase):
             "--expert-profile", "<T>/data/expert-profile.bin", "--expert-cache", "auto", "--prefill", "auto",
             "--spec", "6", "--spec-min-p", "0.7", "--mtp", f"{m}/mtp/rt", "--max-context", "262144", "--kv", "int8",
             # the censorship switch: loaded, off by default ("uncensored": false)
-            "--control-vector-scaled", str(setup.UNCENSOR_VECTOR).replace(chr(92), "/") + ":1.0",
+            "--control-vector-scaled", VEC,
             "--control-vector-layer-range", "8", "33", "--cvec-mode", "project", "--cvec-dir", "per-layer",
             "--vision"])
         self.assertIs(cfg["uncensored"], False)
@@ -892,11 +893,11 @@ class Uncensored(unittest.TestCase):
         self.assertEqual(setup.UNCENSOR_VECTOR.parent.name, "uncensor")
         self.assertTrue((setup.UNCENSOR_VECTOR.parent / "README.md").is_file())
         self.assertEqual(setup.UNCENSOR_LAYERS, (8, 33))
-        self.assertEqual(setup.UNCENSOR_FAMILIES, ("qwen-nvfp4-gptq",))
+        self.assertEqual(setup.UNCENSOR_FAMILIES, ("qwen-nvfp4-gptq", "qwen", "unsloth"))
         self.assertIn("qwen-nvidia-nvfp4", setup.UNCENSOR_REFUSED)
 
     def want(self):
-        return ["--control-vector-scaled", str(setup.UNCENSOR_VECTOR).replace(chr(92), "/") + ":1.0",
+        return ["--control-vector-scaled", VEC,
                 "--control-vector-layer-range", "8", "33", "--cvec-mode", "project", "--cvec-dir"]
 
     def test_off_by_default_with_the_vector_loaded(self):
@@ -968,8 +969,7 @@ class Uncensored(unittest.TestCase):
                 self.assertEqual(code, 0, out[-3000:])
                 self.assertFalse(any("uncensor" in str(x) for x in cfg["args"]), cfg["args"])
                 self.assertNotIn("uncensored", cfg)
-        for family, why in (("swift", "Swift 1.5 has other weights"), ("coder", "the Coder has other weights"),
-                            ("qwen", "measured on qwen-nvfp4-gptq only so far")):
+        for family, why in (("swift", "Swift 1.5 has other weights"), ("coder", "the Coder has other weights")):
             with self.subTest(family):
                 code, out, cfg, _ = install_with(ram, found, ["--family", family, "--uncensored", "on", "--no-start"])
                 self.assertEqual((code, cfg), (1, None))
@@ -994,6 +994,58 @@ class Uncensored(unittest.TestCase):
         self.assertEqual(code, 0, out[-3000:])
         self.assertIn("Found your earlier install", out)
         self.assertIn("censorship: off by default (--uncensored on)", out)
+
+
+class UncensoredGguf(unittest.TestCase):
+    """The original Qwen's GGUFs (ISTA's qwen family, Unsloth's): the same switch, loaded and off by default; it
+    replaces upstream's speed projection there.  The Coder keeps upstream's; IQ2_XS is said to loop."""
+
+    def cvec(self, cfg):
+        a = cfg["args"]
+        i = a.index("--control-vector-scaled") if "--control-vector-scaled" in a else None
+        return None if i is None else a[i:i + 9]
+
+    def test_loaded_and_off_by_default(self):
+        ram, found = PROFILES["128GB-1x24GB"]
+        for argv, on in ((["--family", "qwen", "--model", "Q2_0", "--no-start"], False),
+                         (["--family", "qwen", "--model", "Q2_0", "--uncensored", "on", "--no-start"], True),
+                         (["--family", "qwen", "--model", "IQ3_XXS", "--experimental-speed-projection", "on", "--no-start"],
+                          True),                                                        # upstream's name: the alias
+                         (["--family", "unsloth", "--no-start"], False)):
+            with self.subTest(argv=argv):
+                code, out, cfg, _ = install_with(ram, found, argv)
+                self.assertEqual(code, 0, out[-3000:])
+                self.assertEqual(self.cvec(cfg), ["--control-vector-scaled", VEC, "--control-vector-layer-range", "8",
+                                                  "33", "--cvec-mode", "project", "--cvec-dir", "per-layer"])
+                self.assertIs(cfg["uncensored"], on)
+                self.assertNotIn("experimental-speed-projection", " ".join(cfg["args"]))   # not upstream's vector
+                self.assertNotIn("experimental speed projection:", out)                   # nor its question
+
+    def test_the_menu_asks_once(self):
+        ram, found = PROFILES["128GB-1x24GB"]
+        code, out, cfg, asked = run(ram, found, ["--family", "qwen", "--model", "Q2_0", "--no-start"], answers="")
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertEqual(len([q for q in asked if q.startswith("Disable censorship?")]), 1, asked)
+        self.assertFalse(any("speed projection" in q for q in asked), asked)    # upstream's question is not asked
+        self.assertIs(cfg["uncensored"], False)
+
+    def test_the_coder_keeps_upstream_s_projection(self):
+        ram, found = PROFILES["128GB-1x24GB"]
+        code, out, cfg, _ = install_with(ram, found, ["--family", "coder", "--experimental-speed-projection", "on",
+                                                       "--no-start"])
+        self.assertEqual(code, 0, out[-3000:])
+        a = cfg["args"]
+        self.assertIn("experimental-speed-projection", a[a.index("--control-vector-scaled") + 1])
+        self.assertNotIn("uncensored", cfg)
+
+    def test_iq2_xs_is_said_to_loop(self):
+        ram, found = PROFILES["128GB-1x24GB"]
+        code, out, cfg, _ = install_with(ram, found, ["--family", "qwen", "--model", "IQ2_XS", "--no-start"])
+        self.assertEqual(code, 0, out[-3000:])
+        flat = " ".join(out.split())
+        self.assertIn("IQ2_XS: it looped in its thinking in 3 of 3 greedy replays of a long Claude Code request", flat)
+        code, out, cfg, _ = install_with(ram, found, ["--family", "qwen", "--model", "Q2_0", "--no-start"])
+        self.assertNotIn("looped in its thinking", out)
 
 
 if __name__ == "__main__":

@@ -405,11 +405,23 @@ Tried and dropped:
 
   The KL is over 5,153 rows of code, prose and the model's own replies; most of the vector's thinking-off "refusals"
   are capability disclaimers followed by an answer. Decode on the 72K request: 159.0 tokens/s against 158.8.
-- **Where it is offered:** `UNCENSOR_FAMILIES` in setup.py, now `qwen-nvfp4-gptq` only (the GGUF Qwen quants are
-  being measured). Never `qwen-nvidia-nvfp4`: the NVIDIA Open Model License does not allow bypassing the model's
+- **Where it is offered:** `UNCENSOR_FAMILIES` in setup.py: `qwen-nvfp4-gptq`, `qwen` (ISTA's GGUFs) and `unsloth`,
+  each with the vector loaded and off by default; for the GGUFs it replaces upstream's speed projection. Measured
+  against each quant's own stock model:
+
+  | quant | refusals, thinking off EN / UK (stock) | thinking on EN / UK (stock) | KL | log p(`</think>`) shift | loopcap thinking, stock / this |
+  |---|---|---|---|---|---|
+  | ISTA Q2_0 | 1/104, 2/30 (30/30, 28/30) | 1/104, 0/30 (30/30, 19/30) | 0.016 | +0.027 to +0.040 (upstream's +0.087 to +0.149) | 965 / LOOP / 1,766 vs 1,306 / 1,350 / 906, no loop |
+  | ISTA IQ2_XS | 1/104, 2/30 | 0/104 EN | 0.017 | -0.003 to +0.066 (upstream's +0.12 to +0.20) | 3 of 3 loop vs 2 of 3 |
+  | Unsloth UD-Q4_K_XL | 4/104 (disclaimers counted), 1/30 | 0/104, 1/30 (30/30, 29/30) | - | - | 888 / 1,183 / 1,731 vs 1,204 / 1,255 / 1,343, no loop |
+
+  IQ3_XXS and IQ3_S were not measured (they sit between Q2_0 and NVFP4, which both work), nor Unsloth's default
+  UD-IQ4_XS (measured on UD-Q4_K_XL). IQ2_XS loops in long greedy agentic thinking by itself, 3 of 3 without the
+  vector; the vector does not make it worse, and setup warns when IQ2_XS is chosen (`LOOPING_MODELS`). Never
+  `qwen-nvidia-nvfp4`: the NVIDIA Open Model License does not allow bypassing the model's
   safety guardrails, so setup refuses `--uncensored on` there with that reason (`UNCENSOR_REFUSED`), and not Swift
-  1.5 or the Coder, which have other weights. Upstream's `--experimental-speed-projection on|off` is an alias for the
-  NVFP4 models; for the GGUF Qwen models it stays upstream's own option with upstream's vector.
+  1.5 or the Coder, which have other weights. Upstream's `--experimental-speed-projection on|off` is an alias of
+  `--uncensored`; for the Coder it stays upstream's own option with upstream's vector.
 - **Per request:** the server reads `"uncensored": true|false` per request, in the config (top level, as setup
   writes it, or the sampling block) and in the Chat settings shared with apps, as upstream's
   `experimental_speed_projection` (which wins when both are given), and reports the default in `/metrics`
@@ -426,9 +438,9 @@ Tried and dropped:
   setup.py's table, the same repository, revision and SHA-256s, and the image encoder) and checks each one. Its
   config loads the vector off (`"uncensored": false`). A bundle from before keeps starting orca from its own config
   until the new model is downloaded.
-- **Checks:** the engine is 0.1.41-nvfp4.3's (1217e500). Tests: setup's and the table's 507 OK (orca withdrawn,
-  the default, the switch loaded and off for qwen-nvfp4-gptq, none for the refused families, the read-back of an
-  install), the bundle's 21 OK (`model-files.json` = setup's table, the config, the download), the server's 606 OK
+- **Checks:** the engine is 0.1.41-nvfp4.3's (1217e500). Tests: setup's and the table's 511 OK (orca withdrawn,
+  the default, the switch loaded and off for qwen-nvfp4-gptq and the qwen and unsloth GGUFs, none for the refused
+  families, the IQ2_XS warning, the read-back of an install), the bundle's 21 OK (`model-files.json` = setup's table, the config, the download), the server's 606 OK
   (13 skipped; the `uncensored` alias and its default among them).
 
 ### The original Qwen in NVFP4 (2026-10-09, release 0.1.41-nvfp4.4)
