@@ -4,7 +4,7 @@
 2,560 values per layer (GGUF `controlvector` format). The JSON beside it has its per-layer strengths, how it was built,
 and its scores.
 
-**What it does.** `setup --uncensored on` (or "Disable censorship?" answered yes) starts the engine with
+**What it does.** For `qwen-nvfp4-gptq` setup (and the Windows bundle's config) starts the engine with
 
 ```
 --control-vector-scaled data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0 --control-vector-layer-range 8 33
@@ -13,9 +13,11 @@ and its scores.
 
 After each of layers 8-33 the engine removes that layer's refusal direction from every hyper-connection residual
 stream (`h -= s (h . v) v`; `s` is the direction's norm, 1.0 on every layer here). The model then stops declining
-requests. It is the mechanism upstream's experimental speed projection uses, with this fork's own vector. The web
-app's "Disable censorship" switch and the API field `"uncensored": false` (alias `"experimental_speed_projection"`)
-turn it off for a request; `"uncensored": true|false` in `strata-<model>.json` is the default for requests.
+requests. It is the mechanism upstream's experimental speed projection uses, with this fork's own vector. It is
+loaded but **off** unless chosen: `"uncensored": false` in `strata-<model>.json` is the default for requests
+(`true` when setup's "Disable censorship?" is answered yes, or `--uncensored on`), and the web app's "Disable
+censorship" switch and the API field `"uncensored"` (alias `"experimental_speed_projection"`) change it per
+request. Off, a request runs the original model bit for bit (the kernel skips the projection).
 
 **Where.** Made and measured on `qwen-nvfp4-gptq`, the only family setup offers it for. Never for
 `qwen-nvidia-nvfp4`: the NVIDIA Open Model License does not allow bypassing the model's safety guardrails. Not for
