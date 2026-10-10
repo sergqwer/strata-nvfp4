@@ -15,6 +15,7 @@
     "--vision"
   ],
   "uncensored": false,
+  "sampling": {"temperature": 1.0, "top_p": 0.95, "top_k": 20},
   "vision": {"exe": "engine/strata-vision.exe", "mmproj": "models/mmproj-Qwen3.8-Flash-Next-BF16.gguf",
              "model": "models/qwen-nvfp4-gptq/qwen-nvfp4-gptq-dense.gguf", "gpu": false, "max_tokens": 1024},
   "cwd": ".",
