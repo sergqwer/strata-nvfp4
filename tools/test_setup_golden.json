@@ -26,7 +26,16 @@
     "--kv",
     "int8",
     "--kv-resident",
-    "32768"
+    "32768",
+    "--control-vector-scaled",
+    "<REPO>/data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0",
+    "--control-vector-layer-range",
+    "8",
+    "33",
+    "--cvec-mode",
+    "project",
+    "--cvec-dir",
+    "per-layer"
    ],
    "cwd": "<T>",
    "exe": "<T>/engine/<EXE>",
@@ -38,7 +47,8 @@
    "log": "<T>/strata-iq3_s.log",
    "model_name": "qwen3.8-flash-next-iq3_s",
    "port": 8080,
-   "tokenizer": "<T>/data/packs/iq3_s/tokenizer"
+   "tokenizer": "<T>/data/packs/iq3_s/tokenizer",
+   "uncensored": false
   }
  },
  "128GB-1x24GB qwen IQ3_XXS": {
@@ -68,7 +78,16 @@
     "--kv",
     "int8",
     "--kv-resident",
-    "32768"
+    "32768",
+    "--control-vector-scaled",
+    "<REPO>/data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0",
+    "--control-vector-layer-range",
+    "8",
+    "33",
+    "--cvec-mode",
+    "project",
+    "--cvec-dir",
+    "per-layer"
    ],
    "cwd": "<T>",
    "exe": "<T>/engine/<EXE>",
@@ -80,7 +99,8 @@
    "log": "<T>/strata-iq3_xxs.log",
    "model_name": "qwen3.8-flash-next-iq3_xxs",
    "port": 8080,
-   "tokenizer": "<T>/data/packs/iq3_xxs/tokenizer"
+   "tokenizer": "<T>/data/packs/iq3_xxs/tokenizer",
+   "uncensored": false
   }
  },
  "128GB-1x24GB qwen Q2_0": {
@@ -110,7 +130,16 @@
     "--kv",
     "int8",
     "--kv-resident",
-    "32768"
+    "32768",
+    "--control-vector-scaled",
+    "<REPO>/data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0",
+    "--control-vector-layer-range",
+    "8",
+    "33",
+    "--cvec-mode",
+    "project",
+    "--cvec-dir",
+    "per-layer"
    ],
    "cwd": "<T>",
    "exe": "<T>/engine/<EXE>",
@@ -122,7 +151,8 @@
    "log": "<T>/strata-q2_0.log",
    "model_name": "qwen3.8-flash-next-q2_0",
    "port": 8080,
-   "tokenizer": "<T>/data/packs/q2_0/tokenizer"
+   "tokenizer": "<T>/data/packs/q2_0/tokenizer",
+   "uncensored": false
   }
  },
  "128GB-1x24GB qwen recommended": {
@@ -152,7 +182,16 @@
     "--kv",
     "int8",
     "--kv-resident",
-    "32768"
+    "32768",
+    "--control-vector-scaled",
+    "<REPO>/data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0",
+    "--control-vector-layer-range",
+    "8",
+    "33",
+    "--cvec-mode",
+    "project",
+    "--cvec-dir",
+    "per-layer"
    ],
    "cwd": "<T>",
    "exe": "<T>/engine/<EXE>",
@@ -164,7 +203,8 @@
    "log": "<T>/strata-iq3_xxs.log",
    "model_name": "qwen3.8-flash-next-iq3_xxs",
    "port": 8080,
-   "tokenizer": "<T>/data/packs/iq3_xxs/tokenizer"
+   "tokenizer": "<T>/data/packs/iq3_xxs/tokenizer",
+   "uncensored": false
   }
  },
  "128GB-1x24GB unsloth UD-Q4_K_XL": {
@@ -192,7 +232,16 @@
     "--kv",
     "int8",
     "--resident-budget-gib",
-    "71"
+    "71",
+    "--control-vector-scaled",
+    "<REPO>/data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0",
+    "--control-vector-layer-range",
+    "8",
+    "33",
+    "--cvec-mode",
+    "project",
+    "--cvec-dir",
+    "per-layer"
    ],
    "cwd": "<T>",
    "exe": "<T>/engine/<EXE>",
@@ -204,7 +253,8 @@
    "log": "<T>/strata-unsloth-ud-q4_k_xl.log",
    "model_name": "qwen3.8-flash-next-unsloth-ud-q4_k_xl",
    "port": 8080,
-   "tokenizer": "<T>/data/packs/unsloth-ud-q4_k_xl/tokenizer"
+   "tokenizer": "<T>/data/packs/unsloth-ud-q4_k_xl/tokenizer",
+   "uncensored": false
   }
  },
  "32GB-2x24GB qwen IQ3_S": {
@@ -233,7 +283,16 @@
     "131072",
     "--kv",
     "int8",
-    "--resident-experts"
+    "--resident-experts",
+    "--control-vector-scaled",
+    "<REPO>/data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0",
+    "--control-vector-layer-range",
+    "8",
+    "33",
+    "--cvec-mode",
+    "project",
+    "--cvec-dir",
+    "per-layer"
    ],
    "cwd": "<T>",
    "exe": "<T>/engine/<EXE>",
@@ -249,7 +308,8 @@
    "log": "<T>/strata-iq3_s.log",
    "model_name": "qwen3.8-flash-next-iq3_s",
    "port": 8080,
-   "tokenizer": "<T>/data/packs/iq3_s/tokenizer"
+   "tokenizer": "<T>/data/packs/iq3_s/tokenizer",
+   "uncensored": false
   }
  },
  "32GB-2x24GB qwen IQ3_XXS": {
@@ -278,7 +338,16 @@
     "131072",
     "--kv",
     "int8",
-    "--resident-experts"
+    "--resident-experts",
+    "--control-vector-scaled",
+    "<REPO>/data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0",
+    "--control-vector-layer-range",
+    "8",
+    "33",
+    "--cvec-mode",
+    "project",
+    "--cvec-dir",
+    "per-layer"
    ],
    "cwd": "<T>",
    "exe": "<T>/engine/<EXE>",
@@ -294,7 +363,8 @@
    "log": "<T>/strata-iq3_xxs.log",
    "model_name": "qwen3.8-flash-next-iq3_xxs",
    "port": 8080,
-   "tokenizer": "<T>/data/packs/iq3_xxs/tokenizer"
+   "tokenizer": "<T>/data/packs/iq3_xxs/tokenizer",
+   "uncensored": false
   }
  },
  "32GB-2x24GB qwen Q2_0": {
@@ -323,7 +393,16 @@
     "131072",
     "--kv",
     "int8",
-    "--resident-experts"
+    "--resident-experts",
+    "--control-vector-scaled",
+    "<REPO>/data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0",
+    "--control-vector-layer-range",
+    "8",
+    "33",
+    "--cvec-mode",
+    "project",
+    "--cvec-dir",
+    "per-layer"
    ],
    "cwd": "<T>",
    "exe": "<T>/engine/<EXE>",
@@ -339,7 +418,8 @@
    "log": "<T>/strata-q2_0.log",
    "model_name": "qwen3.8-flash-next-q2_0",
    "port": 8080,
-   "tokenizer": "<T>/data/packs/q2_0/tokenizer"
+   "tokenizer": "<T>/data/packs/q2_0/tokenizer",
+   "uncensored": false
   }
  },
  "32GB-2x24GB qwen recommended": {
@@ -368,7 +448,16 @@
     "131072",
     "--kv",
     "int8",
-    "--resident-experts"
+    "--resident-experts",
+    "--control-vector-scaled",
+    "<REPO>/data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0",
+    "--control-vector-layer-range",
+    "8",
+    "33",
+    "--cvec-mode",
+    "project",
+    "--cvec-dir",
+    "per-layer"
    ],
    "cwd": "<T>",
    "exe": "<T>/engine/<EXE>",
@@ -384,7 +473,8 @@
    "log": "<T>/strata-q2_0.log",
    "model_name": "qwen3.8-flash-next-q2_0",
    "port": 8080,
-   "tokenizer": "<T>/data/packs/q2_0/tokenizer"
+   "tokenizer": "<T>/data/packs/q2_0/tokenizer",
+   "uncensored": false
   }
  },
  "32GB-2x24GB unsloth UD-Q4_K_XL": {
@@ -412,7 +502,16 @@
     "--kv",
     "int8",
     "--resident-budget-gib",
-    "8"
+    "8",
+    "--control-vector-scaled",
+    "<REPO>/data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0",
+    "--control-vector-layer-range",
+    "8",
+    "33",
+    "--cvec-mode",
+    "project",
+    "--cvec-dir",
+    "per-layer"
    ],
    "cwd": "<T>",
    "exe": "<T>/engine/<EXE>",
@@ -424,7 +523,8 @@
    "log": "<T>/strata-unsloth-ud-q4_k_xl.log",
    "model_name": "qwen3.8-flash-next-unsloth-ud-q4_k_xl",
    "port": 8080,
-   "tokenizer": "<T>/data/packs/unsloth-ud-q4_k_xl/tokenizer"
+   "tokenizer": "<T>/data/packs/unsloth-ud-q4_k_xl/tokenizer",
+   "uncensored": false
   }
  },
  "47GB-2x16GB qwen IQ3_S": {
@@ -453,7 +553,16 @@
     "65536",
     "--kv",
     "int8",
-    "--resident-experts"
+    "--resident-experts",
+    "--control-vector-scaled",
+    "<REPO>/data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0",
+    "--control-vector-layer-range",
+    "8",
+    "33",
+    "--cvec-mode",
+    "project",
+    "--cvec-dir",
+    "per-layer"
    ],
    "cwd": "<T>",
    "exe": "<T>/engine/<EXE>",
@@ -469,7 +578,8 @@
    "log": "<T>/strata-iq3_s.log",
    "model_name": "qwen3.8-flash-next-iq3_s",
    "port": 8080,
-   "tokenizer": "<T>/data/packs/iq3_s/tokenizer"
+   "tokenizer": "<T>/data/packs/iq3_s/tokenizer",
+   "uncensored": false
   }
  },
  "47GB-2x16GB qwen IQ3_XXS": {
@@ -498,7 +608,16 @@
     "65536",
     "--kv",
     "int8",
-    "--resident-experts"
+    "--resident-experts",
+    "--control-vector-scaled",
+    "<REPO>/data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0",
+    "--control-vector-layer-range",
+    "8",
+    "33",
+    "--cvec-mode",
+    "project",
+    "--cvec-dir",
+    "per-layer"
    ],
    "cwd": "<T>",
    "exe": "<T>/engine/<EXE>",
@@ -514,7 +633,8 @@
    "log": "<T>/strata-iq3_xxs.log",
    "model_name": "qwen3.8-flash-next-iq3_xxs",
    "port": 8080,
-   "tokenizer": "<T>/data/packs/iq3_xxs/tokenizer"
+   "tokenizer": "<T>/data/packs/iq3_xxs/tokenizer",
+   "uncensored": false
   }
  },
  "47GB-2x16GB qwen Q2_0": {
@@ -542,7 +662,16 @@
     "--max-context",
     "65536",
     "--kv",
-    "int8"
+    "int8",
+    "--control-vector-scaled",
+    "<REPO>/data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0",
+    "--control-vector-layer-range",
+    "8",
+    "33",
+    "--cvec-mode",
+    "project",
+    "--cvec-dir",
+    "per-layer"
    ],
    "cwd": "<T>",
    "exe": "<T>/engine/<EXE>",
@@ -558,7 +687,8 @@
    "log": "<T>/strata-q2_0.log",
    "model_name": "qwen3.8-flash-next-q2_0",
    "port": 8080,
-   "tokenizer": "<T>/data/packs/q2_0/tokenizer"
+   "tokenizer": "<T>/data/packs/q2_0/tokenizer",
+   "uncensored": false
   }
  },
  "47GB-2x16GB qwen recommended": {
@@ -586,7 +716,16 @@
     "--max-context",
     "65536",
     "--kv",
-    "int8"
+    "int8",
+    "--control-vector-scaled",
+    "<REPO>/data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0",
+    "--control-vector-layer-range",
+    "8",
+    "33",
+    "--cvec-mode",
+    "project",
+    "--cvec-dir",
+    "per-layer"
    ],
    "cwd": "<T>",
    "exe": "<T>/engine/<EXE>",
@@ -602,7 +741,8 @@
    "log": "<T>/strata-q2_0.log",
    "model_name": "qwen3.8-flash-next-q2_0",
    "port": 8080,
-   "tokenizer": "<T>/data/packs/q2_0/tokenizer"
+   "tokenizer": "<T>/data/packs/q2_0/tokenizer",
+   "uncensored": false
   }
  },
  "47GB-2x16GB unsloth UD-Q4_K_XL": {
@@ -630,7 +770,16 @@
     "--kv",
     "int8",
     "--resident-budget-gib",
-    "23"
+    "23",
+    "--control-vector-scaled",
+    "<REPO>/data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0",
+    "--control-vector-layer-range",
+    "8",
+    "33",
+    "--cvec-mode",
+    "project",
+    "--cvec-dir",
+    "per-layer"
    ],
    "cwd": "<T>",
    "exe": "<T>/engine/<EXE>",
@@ -642,7 +791,8 @@
    "log": "<T>/strata-unsloth-ud-q4_k_xl.log",
    "model_name": "qwen3.8-flash-next-unsloth-ud-q4_k_xl",
    "port": 8080,
-   "tokenizer": "<T>/data/packs/unsloth-ud-q4_k_xl/tokenizer"
+   "tokenizer": "<T>/data/packs/unsloth-ud-q4_k_xl/tokenizer",
+   "uncensored": false
   }
  },
  "64GB-1x32GB qwen IQ3_S": {
@@ -670,7 +820,16 @@
     "--max-context",
     "131072",
     "--kv",
-    "int8"
+    "int8",
+    "--control-vector-scaled",
+    "<REPO>/data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0",
+    "--control-vector-layer-range",
+    "8",
+    "33",
+    "--cvec-mode",
+    "project",
+    "--cvec-dir",
+    "per-layer"
    ],
    "cwd": "<T>",
    "exe": "<T>/engine/<EXE>",
@@ -682,7 +841,8 @@
    "log": "<T>/strata-iq3_s.log",
    "model_name": "qwen3.8-flash-next-iq3_s",
    "port": 8080,
-   "tokenizer": "<T>/data/packs/iq3_s/tokenizer"
+   "tokenizer": "<T>/data/packs/iq3_s/tokenizer",
+   "uncensored": false
   }
  },
  "64GB-1x32GB qwen IQ3_XXS": {
@@ -712,7 +872,16 @@
     "--kv",
     "int8",
     "--kv-resident",
-    "32768"
+    "32768",
+    "--control-vector-scaled",
+    "<REPO>/data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0",
+    "--control-vector-layer-range",
+    "8",
+    "33",
+    "--cvec-mode",
+    "project",
+    "--cvec-dir",
+    "per-layer"
    ],
    "cwd": "<T>",
    "exe": "<T>/engine/<EXE>",
@@ -724,7 +893,8 @@
    "log": "<T>/strata-iq3_xxs.log",
    "model_name": "qwen3.8-flash-next-iq3_xxs",
    "port": 8080,
-   "tokenizer": "<T>/data/packs/iq3_xxs/tokenizer"
+   "tokenizer": "<T>/data/packs/iq3_xxs/tokenizer",
+   "uncensored": false
   }
  },
  "64GB-1x32GB qwen Q2_0": {
@@ -754,7 +924,16 @@
     "--kv",
     "int8",
     "--kv-resident",
-    "32768"
+    "32768",
+    "--control-vector-scaled",
+    "<REPO>/data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0",
+    "--control-vector-layer-range",
+    "8",
+    "33",
+    "--cvec-mode",
+    "project",
+    "--cvec-dir",
+    "per-layer"
    ],
    "cwd": "<T>",
    "exe": "<T>/engine/<EXE>",
@@ -766,7 +945,8 @@
    "log": "<T>/strata-q2_0.log",
    "model_name": "qwen3.8-flash-next-q2_0",
    "port": 8080,
-   "tokenizer": "<T>/data/packs/q2_0/tokenizer"
+   "tokenizer": "<T>/data/packs/q2_0/tokenizer",
+   "uncensored": false
   }
  },
  "64GB-1x32GB qwen recommended": {
@@ -796,7 +976,16 @@
     "--kv",
     "int8",
     "--kv-resident",
-    "32768"
+    "32768",
+    "--control-vector-scaled",
+    "<REPO>/data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0",
+    "--control-vector-layer-range",
+    "8",
+    "33",
+    "--cvec-mode",
+    "project",
+    "--cvec-dir",
+    "per-layer"
    ],
    "cwd": "<T>",
    "exe": "<T>/engine/<EXE>",
@@ -808,7 +997,8 @@
    "log": "<T>/strata-iq3_xxs.log",
    "model_name": "qwen3.8-flash-next-iq3_xxs",
    "port": 8080,
-   "tokenizer": "<T>/data/packs/iq3_xxs/tokenizer"
+   "tokenizer": "<T>/data/packs/iq3_xxs/tokenizer",
+   "uncensored": false
   }
  },
  "64GB-1x32GB unsloth UD-Q4_K_XL": {
@@ -836,7 +1026,16 @@
     "--kv",
     "int8",
     "--resident-budget-gib",
-    "40"
+    "40",
+    "--control-vector-scaled",
+    "<REPO>/data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0",
+    "--control-vector-layer-range",
+    "8",
+    "33",
+    "--cvec-mode",
+    "project",
+    "--cvec-dir",
+    "per-layer"
    ],
    "cwd": "<T>",
    "exe": "<T>/engine/<EXE>",
@@ -848,7 +1047,8 @@
    "log": "<T>/strata-unsloth-ud-q4_k_xl.log",
    "model_name": "qwen3.8-flash-next-unsloth-ud-q4_k_xl",
    "port": 8080,
-   "tokenizer": "<T>/data/packs/unsloth-ud-q4_k_xl/tokenizer"
+   "tokenizer": "<T>/data/packs/unsloth-ud-q4_k_xl/tokenizer",
+   "uncensored": false
   }
  },
  "96GB-1x16GB qwen IQ3_S": {
@@ -878,7 +1078,16 @@
     "--kv",
     "int8",
     "--kv-resident",
-    "32768"
+    "32768",
+    "--control-vector-scaled",
+    "<REPO>/data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0",
+    "--control-vector-layer-range",
+    "8",
+    "33",
+    "--cvec-mode",
+    "project",
+    "--cvec-dir",
+    "per-layer"
    ],
    "cwd": "<T>",
    "exe": "<T>/engine/<EXE>",
@@ -890,7 +1099,8 @@
    "log": "<T>/strata-iq3_s.log",
    "model_name": "qwen3.8-flash-next-iq3_s",
    "port": 8080,
-   "tokenizer": "<T>/data/packs/iq3_s/tokenizer"
+   "tokenizer": "<T>/data/packs/iq3_s/tokenizer",
+   "uncensored": false
   }
  },
  "96GB-1x16GB qwen IQ3_XXS": {
@@ -920,7 +1130,16 @@
     "--kv",
     "int8",
     "--kv-resident",
-    "32768"
+    "32768",
+    "--control-vector-scaled",
+    "<REPO>/data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0",
+    "--control-vector-layer-range",
+    "8",
+    "33",
+    "--cvec-mode",
+    "project",
+    "--cvec-dir",
+    "per-layer"
    ],
    "cwd": "<T>",
    "exe": "<T>/engine/<EXE>",
@@ -932,7 +1151,8 @@
    "log": "<T>/strata-iq3_xxs.log",
    "model_name": "qwen3.8-flash-next-iq3_xxs",
    "port": 8080,
-   "tokenizer": "<T>/data/packs/iq3_xxs/tokenizer"
+   "tokenizer": "<T>/data/packs/iq3_xxs/tokenizer",
+   "uncensored": false
   }
  },
  "96GB-1x16GB qwen Q2_0": {
@@ -962,7 +1182,16 @@
     "--kv",
     "int8",
     "--kv-resident",
-    "32768"
+    "32768",
+    "--control-vector-scaled",
+    "<REPO>/data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0",
+    "--control-vector-layer-range",
+    "8",
+    "33",
+    "--cvec-mode",
+    "project",
+    "--cvec-dir",
+    "per-layer"
    ],
    "cwd": "<T>",
    "exe": "<T>/engine/<EXE>",
@@ -974,7 +1203,8 @@
    "log": "<T>/strata-q2_0.log",
    "model_name": "qwen3.8-flash-next-q2_0",
    "port": 8080,
-   "tokenizer": "<T>/data/packs/q2_0/tokenizer"
+   "tokenizer": "<T>/data/packs/q2_0/tokenizer",
+   "uncensored": false
   }
  },
  "96GB-1x16GB qwen recommended": {
@@ -1004,7 +1234,16 @@
     "--kv",
     "int8",
     "--kv-resident",
-    "32768"
+    "32768",
+    "--control-vector-scaled",
+    "<REPO>/data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0",
+    "--control-vector-layer-range",
+    "8",
+    "33",
+    "--cvec-mode",
+    "project",
+    "--cvec-dir",
+    "per-layer"
    ],
    "cwd": "<T>",
    "exe": "<T>/engine/<EXE>",
@@ -1016,7 +1255,8 @@
    "log": "<T>/strata-iq3_xxs.log",
    "model_name": "qwen3.8-flash-next-iq3_xxs",
    "port": 8080,
-   "tokenizer": "<T>/data/packs/iq3_xxs/tokenizer"
+   "tokenizer": "<T>/data/packs/iq3_xxs/tokenizer",
+   "uncensored": false
   }
  },
  "96GB-1x16GB unsloth UD-Q4_K_XL": {
@@ -1044,7 +1284,16 @@
     "--kv",
     "int8",
     "--resident-budget-gib",
-    "71"
+    "71",
+    "--control-vector-scaled",
+    "<REPO>/data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0",
+    "--control-vector-layer-range",
+    "8",
+    "33",
+    "--cvec-mode",
+    "project",
+    "--cvec-dir",
+    "per-layer"
    ],
    "cwd": "<T>",
    "exe": "<T>/engine/<EXE>",
@@ -1056,7 +1305,8 @@
    "log": "<T>/strata-unsloth-ud-q4_k_xl.log",
    "model_name": "qwen3.8-flash-next-unsloth-ud-q4_k_xl",
    "port": 8080,
-   "tokenizer": "<T>/data/packs/unsloth-ud-q4_k_xl/tokenizer"
+   "tokenizer": "<T>/data/packs/unsloth-ud-q4_k_xl/tokenizer",
+   "uncensored": false
   }
  }
 }

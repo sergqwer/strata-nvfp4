@@ -44,15 +44,20 @@ page).
   ([The original Qwen in NVFP4](docs/NVFP4.md#the-original-qwen-in-nvfp4-2026-10-09-release-0141-nvfp44)).
 - **`qwen-nvfp4-gptq` is the default** where the PC meets the [requirements](#requirements); a PC below them gets a
   GGUF model as the default, and `--family qwen-nvfp4-gptq --yes` installs it anyway.
-- **Disable censorship (off by default):** for `qwen-nvfp4-gptq` setup always loads this fork's refusal-direction
-  projection ([data/uncensor](data/uncensor/README.md)) and leaves it off: the web app's "Disable censorship"
+- **Disable censorship (off by default):** for `qwen-nvfp4-gptq` and the original Qwen's GGUFs (`qwen`, ISTA's;
+  `unsloth`) setup always loads this fork's refusal-direction projection ([data/uncensor](data/uncensor/README.md))
+  and leaves it off: the web app's "Disable censorship"
   switch (Sampling) and the API field `"uncensored": true` turn it on for a request, and setup's question "Disable
   censorship?" (default no; `--uncensored on|off`) sets the default, `"uncensored"` in `strata-<model>.json`. Off,
   a request runs the original model. On, the engine removes the model's refusal direction from its residual stream
   after layers 8-33: with thinking on, 0 of 104
   English and 0 of 30 Ukrainian held-out harmful requests refused (the original refuses almost all), KL 0.026 to the
   original, and its thinking as long as the original's (1,947 against 1,699 tokens on a long Claude Code request,
-  log p(`</think>`) +0.019 nats). Upstream's `experimental_speed_projection` is the same switch. Never for
+  log p(`</think>`) +0.019 nats). On the GGUFs, against each quant's own stock model (measured on Q2_0, IQ2_XS and
+  UD-Q4_K_XL): thinking-on refusals 1, 0 and 0 of 104, KL 0.016-0.017 (Q2_0, IQ2_XS), log p(`</think>`) +0.027 to
+  +0.040 on Q2_0 (upstream's vector +0.087 to +0.149); it replaces upstream's speed projection there. IQ2_XS loops
+  in long greedy agentic thinking by itself (3 of 3 replays of the long request, with the switch on or off): choose
+  another size for agents. Upstream's `experimental_speed_projection` is the same switch. Never for
   `qwen-nvidia-nvfp4`, where nothing is loaded: the NVIDIA Open Model License does not allow bypassing its safety
   guardrails. The vector is
   under the Qwen Community License 1.0; removing refusals removes a safety behaviour, and what the model writes with
