@@ -8349,19 +8349,32 @@ int main(int argc, char** argv) {
         // KL ~0.003-0.006; docs/DETAILS.md).  =0 restores 0.1.41's bytes.  Nothing to do, so no default and no line, when every
         // expert is in VRAM; off with --batch slots (a window then mixes requests, and one request's skip would depend on
         // another's tokens) and, as in the dispatch, with a peer or helper GPU.  A layer split is fine: each stage skips by itself.
+        // The fork: no default with NVFP4 experts (any layer).  On qwen-nvfp4-gptq the skip moved the answers by teacher-forced
+        // KL 0.035 against it off - as much as the GPTQ quantization's own error against an all-Q8_0 reference (0.038) - and
+        // in the normal mode p(</think>) came early x1.35, for +11.5% decode; docs/NVFP4.md.  STRATA_ROUTE_TAIL_SKIP=7
+        // opts in; the GGUF packs keep upstream's default.
         {
             const char* tse = std::getenv("STRATA_ROUTE_TAIL_SKIP");
+            bool nvfp4_experts = false;
+            if (native_pack)
+                for (const auto& f : strata::kernels::cpu::expert_layout().fmt)
+                    nvfp4_experts = nvfp4_experts || f.gu_type == 40 || f.d_type == 40;   // kNvfp4Type
 #if !defined(STRATA_USE_HIP)
-            const bool tail_default_ok = tse == nullptr && !all_experts_resident && o.batch == 0 && o.peer_device < 0;
+            const bool tail_default_path = tse == nullptr && !all_experts_resident && o.batch == 0 && o.peer_device < 0;
 #else
-            const bool tail_default_ok = false;   // HIP and SYCL stay as they were
+            const bool tail_default_path = false;   // HIP and SYCL stay as they were
 #endif
+            const bool tail_default_ok = tail_default_path && !nvfp4_experts;
             if (tail_default_ok) strata::core::set_tail_skip_rank(7);
             if (strata::core::tail_skip_rank() > 0 && !all_experts_resident)
                 std::fprintf(stderr, "strata serve: STRATA_ROUTE_TAIL_SKIP=%d is ON%s: a missed expert that every token of a verify window routes at rank %d or "
                                      "lower is skipped (+10..20%% decode on 12-16 GB cards that miss experts, answers differ slightly from 0.1.41); "
                                      "STRATA_ROUTE_TAIL_SKIP=0 turns it off\n", strata::core::tail_skip_rank(),
                              tse == nullptr ? " (default)" : "", strata::core::tail_skip_rank());
+            else if (tail_default_path && nvfp4_experts)
+                std::fprintf(stderr, "strata serve: STRATA_ROUTE_TAIL_SKIP is OFF by default with NVFP4 experts (this fork: it moved "
+                                     "qwen-nvfp4-gptq's answers by KL 0.035, as much as the quantization's own error, and ended "
+                                     "thinking sooner); STRATA_ROUTE_TAIL_SKIP=7 turns it on (+11.5%% decode on an RTX 5090)\n");
         }
         if (o.adapt_every > 0 && o.adapt_swaps > 0 && !all_experts_resident)
             drive.d.usage.assign((size_t) (g.n_layers * g.n_expert), 0.0f);
