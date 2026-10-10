@@ -77,6 +77,54 @@ class Apply(unittest.TestCase):
         self.assertNotIn("mcp_servers", got)
 
 
+class Uncensored(unittest.TestCase):
+    """The censorship switch's default ("uncensored", 0.1.41-nvfp4.7): settable where setup loaded the refusal
+    projection; refused where it did not (NVIDIA's model, Swift, the Coder); null is the default (off) again."""
+    VEC = ["--control-vector-scaled", "data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0",
+           "--control-vector-layer-range", "8", "33", "--cvec-mode", "project", "--cvec-dir", "per-layer"]
+    WITH = {**CFG, "args": CFG["args"] + VEC, "uncensored": False}
+
+    def test_listed_after_the_sampling_keys(self):
+        keys = [k for k, _, _ in runconfig.EDITABLE]
+        self.assertEqual(keys.index("uncensored"), keys.index("sampling.min_p") + 1)
+        got = {k["key"]: k for k in runconfig.view(self.WITH, "strata-qwen-gptq-nvfp4.json")["keys"]}
+        self.assertEqual((got["uncensored"]["kind"], got["uncensored"]["value"]), ("bool", False))
+        self.assertNotIn("available", got["uncensored"])
+        self.assertIn("Disable censorship by default", got["uncensored"]["help"])
+
+    def test_true_and_false_round_trip(self):
+        new, changed = runconfig.apply(self.WITH, {"uncensored": True})
+        self.assertEqual((changed, new["uncensored"]), (["uncensored"], True))
+        self.assertEqual(new["args"], self.WITH["args"])                   # the vector stays loaded
+        new, changed = runconfig.apply(new, {"uncensored": False})
+        self.assertEqual((changed, new["uncensored"]), (["uncensored"], False))
+        with self.assertRaises(ValueError):
+            runconfig.apply(self.WITH, {"uncensored": "yes"})
+
+    def test_refused_without_a_projection(self):
+        for cfg in (CFG, {**CFG, "model_name": "qwen3.8-flash-next-nvidia-nvfp4"}):
+            with self.assertRaises(ValueError) as e:
+                runconfig.apply(cfg, {"uncensored": True})
+            self.assertIn("no refusal projection", str(e.exception))
+            self.assertIn("NVIDIA", str(e.exception))
+            new, _ = runconfig.apply({**cfg, "uncensored": True}, {"uncensored": False})   # off is always allowed
+            self.assertIs(new["uncensored"], False)
+        got = {k["key"]: k for k in runconfig.view(CFG, "strata-qwen-nvidia-nvfp4.json")["keys"]}
+        self.assertIs(got["uncensored"]["available"], False)
+        self.assertIn("not available", got["uncensored"]["help"])
+
+    def test_null_removes_the_key(self):
+        new, changed = runconfig.apply(self.WITH, {"uncensored": None})
+        self.assertEqual(changed, ["uncensored"])
+        self.assertNotIn("uncensored", new)
+        new, changed = runconfig.apply({**CFG, "uncensored": True}, {"uncensored": None})   # without a vector too
+        self.assertNotIn("uncensored", new)
+
+    def test_the_page_renders_it_like_the_other_bools(self):
+        js = (ROOT / "serve" / "web" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('k.available === false ? " disabled" : ""', js)    # a model without the projection: greyed out
+
+
 class Http(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
