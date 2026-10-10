@@ -1,0 +1,2 @@
+# prepare-model.cmd: downloads the model ready-made from Hugging Face (tools/bundle_model.py) - nothing is converted
+huggingface_hub[hf_xet]==0.36.2

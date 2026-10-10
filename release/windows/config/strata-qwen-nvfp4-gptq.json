@@ -1,0 +1,26 @@
+{
+  "exe": "engine/strata.exe",
+  "args": [
+    "--pack", "models/qwen-nvfp4-gptq/pack",
+    "--native", "models/qwen-nvfp4-gptq/qwen-nvfp4-gptq-dense.gguf",
+    "--native-dense-gguf", "models/qwen-nvfp4-gptq/qwen-nvfp4-gptq-dense.gguf",
+    "--ple-gguf", "models/qwen-nvfp4-gptq/ple-fp8.gguf",
+    "--embd-gguf", "models/qwen-nvfp4-gptq/token-embd-bf16.gguf",
+    "--expert-profile", "data/expert-profile.bin", "--expert-cache", "auto",
+    "--prefill", "auto", "--spec", "6", "--spec-min-p", "0.7",
+    "--mtp", "models/qwen-nvfp4-gptq/mtp",
+    "--max-context", "262144", "--kv", "int8",
+    "--control-vector-scaled", "data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0",
+    "--control-vector-layer-range", "8", "33", "--cvec-mode", "project", "--cvec-dir", "per-layer",
+    "--vision"
+  ],
+  "uncensored": false,
+  "vision": {"exe": "engine/strata-vision.exe", "mmproj": "models/mmproj-Qwen3.8-Flash-Next-BF16.gguf",
+             "model": "models/qwen-nvfp4-gptq/qwen-nvfp4-gptq-dense.gguf", "gpu": false, "max_tokens": 1024},
+  "cwd": ".",
+  "tokenizer": "models/qwen-nvfp4-gptq/pack/tokenizer",
+  "model_name": "qwen3.8-flash-next-gptq-nvfp4",
+  "anthropic_thinking": "on_request",
+  "log": "strata.log",
+  "host": "127.0.0.1"
+}
