@@ -625,18 +625,21 @@ class RamRule(unittest.TestCase):
 
 
 def page_file_os(paging, existing=("\\??\\C:\\pagefile.sys",), volumes=None):
-    """The OS query page_files() makes, mocked: the registry's PagingFiles / ExistingPageFiles and each drive's
-    (volume MB, free MB, page file MB now)."""
+    """The OS query page_files() makes (through #1693's page_file_setting / page_file_gb), mocked: the registry's
+    PagingFiles / ExistingPageFiles, each drive's (volume MB, free MB, page file MB now) as _drive_mb reads them
+    (free, now), and a commit limit that adds nothing to the files."""
     vols = volumes or {}
+    same = types.SimpleNamespace(ullTotalPageFile=0, ullTotalPhys=0)
     return [mock.patch.object(setup, "WIN", True),
             mock.patch.object(setup, "_mm_multi_sz", lambda name: None if paging is None else list(paging)
                               if name == "PagingFiles" else list(existing)),
-            mock.patch.object(setup, "_volume_mb", lambda d: vols.get(d, (1907726, 900000, 0)))]
+            mock.patch.object(setup, "_drive_mb", lambda d: vols.get(d, (1907726, 900000, 0))[1:]),
+            mock.patch.object(setup, "_memory_status", lambda: same)]
 
 
 class PageFile(unittest.TestCase):
-    """A page file below 60000 MB in all FOR SURE is warned about (setup and the engine, never a stop), a fixed 64000
-    advised; sizes in the Virtual memory dialog's MB, every drive's file summed.  A file Windows grows on demand
+    """A page file below 60000 MB in all FOR SURE is warned about (setup and the engine, never a stop), a fixed 65536
+    (#1693's PAGE_FILE_FIXED_MB) advised; sizes in the Virtual memory dialog's MB, every drive's file summed.  A file Windows grows on demand
     (system-managed, or initial below maximum) counts at its size now, never at what it may grow to (upstream #60)."""
     def pf(self, *a, ram=95.6, **k):
         with contextlib.ExitStack() as st:
@@ -656,7 +659,7 @@ class PageFile(unittest.TestCase):
         self.assertIsNone(self.pf(["C:\\pagefile.sys 60000 60000"], volumes={"C": (1907726, 900000, 60000)})[1])
         got, w = self.pf(["C:\\pagefile.sys 59999 59999"], volumes={"C": (1907726, 900000, 59999)})
         self.assertEqual(got[0], 59999)
-        self.assertIn("INCREASE it to 64000 MB (64 GB), a fixed size", w[0])
+        self.assertIn("INCREASE it to 65536 MB (64 GB), a fixed size", w[0])
         self.assertIn("59999 MB in all for sure (C: 59999 MB)", w[0])
         self.assertNotIn("grow on demand", w[0])
 
@@ -671,7 +674,7 @@ class PageFile(unittest.TestCase):
         self.assertEqual(got, (16000, "C: 16000-64000 MB, grows on demand, now 16000 MB", True))
         self.assertIn("It is set to grow on demand", w[0])
         self.assertIn("a fixed 64 GB worked", w[0])
-        self.assertIn("initial and maximum both 64000 MB", w[0])
+        self.assertIn("initial and maximum both 65536 MB", w[0])
         self.assertIn("16000 MB for sure, it grows on demand", w[1])
         got, w = self.pf(["C:\\pagefile.sys 16000 64000"], volumes={"C": (953869, 400000, 64000)})   # grown already
         self.assertEqual(got[0], 64000)
@@ -690,7 +693,7 @@ class PageFile(unittest.TestCase):
                 got, w = self.pf(paging, volumes={"C": (953869, 500000, 6000)})
                 self.assertEqual(got, (6000, "C: system-managed, grows on demand, now 6000 MB", True))
                 self.assertIn("It is set to grow on demand", w[0])
-                self.assertIn("INCREASE it to 64000 MB (64 GB), a fixed size", w[0])
+                self.assertIn("INCREASE it to 65536 MB (64 GB), a fixed size", w[0])
         got, w = self.pf(["?:\\pagefile.sys"], existing=("\\??\\D:\\pagefile.sys",),
                          volumes={"D": (1907726, 900000, 6000)})                       # where Windows keeps it now
         self.assertEqual(got, (6000, "D: system-managed, grows on demand, now 6000 MB", True))
@@ -702,17 +705,19 @@ class PageFile(unittest.TestCase):
         got, w = self.pf([])
         self.assertEqual(got, (0, "no page file", False))
         self.assertIn("0 MB in all for sure (no page file)", w[0])
-        self.assertEqual(self.pf(None), (None, None))                                # the setting cannot be read
+        got, w = self.pf(None)                                     # the setting cannot be read: the commit limit counts
+        self.assertEqual(got, (0, "the setting not read", False))
+        self.assertIsNotNone(w)
         with mock.patch.object(setup, "WIN", False):
             self.assertIsNone(setup.page_files())
 
     def test_the_message(self):
         _, (long, short) = self.pf(["C:\\pagefile.sys 16000 16000"], volumes={"C": (953869, 400000, 16000)})
-        for words in ("WARNING", "INCREASE it to 64000 MB", "commit only RAM + page file", "~100 GiB",
+        for words in ("WARNING", "INCREASE it to 65536 MB", "commit only RAM + page file", "~100 GiB",
                       "~30 GiB that WDDM charges", "significantly slower", "not start", "sysdm.cpl",
-                      "Virtual memory", "initial and maximum both 64000 MB"):
+                      "Virtual memory", "initial and maximum both 65536 MB"):
             self.assertIn(words, long)
-        self.assertIn("INCREASE it to 64000 MB, a fixed size", short)
+        self.assertIn("INCREASE it to 65536 MB, a fixed size", short)
 
     def test_check_and_install_say_it_framed_and_again_at_the_end(self):
         found = [card(0, "NVIDIA GeForce RTX 5090", 31.8, "120")]
@@ -720,9 +725,9 @@ class PageFile(unittest.TestCase):
         code, out, _, _ = run(95.6, found, ["--check"], extra=small)
         self.assertEqual(code, 0, out[-3000:])                               # a warning, never a stop
         self.assertIn("!" * 100, out)
-        self.assertIn("[!]  WARNING: the page file is too small - INCREASE it to 64000 MB", out)
+        self.assertIn("[!]  WARNING: the page file is too small - INCREASE it to 65536 MB", out)
         tail = out[out.index("This PC can run Strata"):]
-        self.assertIn("WARNING: the page file is too small (16000 MB for sure): INCREASE it to 64000 MB, a fixed size", tail)
+        self.assertIn("WARNING: the page file is too small (16000 MB for sure): INCREASE it to 65536 MB, a fixed size", tail)
         for argv in (["--family", "qwen-nvfp4-gptq", "--no-start"], ["--family", "qwen-nvfp4-gptq", "--dry-run"]):
             with self.subTest(argv):
                 code, out, _, _ = run(95.6, found, argv, extra=small)
@@ -735,7 +740,7 @@ class PageFile(unittest.TestCase):
         self.assertEqual(code, 0, out[-3000:])
         self.assertIn("It is set to grow on demand", " ".join(out.split()))
         self.assertIn("WARNING: the page file is too small (6000 MB for sure, it grows on demand): INCREASE it to "
-                      "64000 MB, a fixed size", out[out.index("This PC can run Strata"):])
+                      "65536 MB, a fixed size", out[out.index("This PC can run Strata"):])
         code, out, _, _ = run(95.6, found, ["--check"])                      # the harness: 2 x 64000 MB
         self.assertNotIn("page file is too small", out)
 
