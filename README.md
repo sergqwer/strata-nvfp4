@@ -2,7 +2,7 @@
 
 **Qwen3.8-Flash-Next (125B hybrid MoE) with NVFP4 experts on one RTX 20, 30, 40 or 50 card (12 GB of VRAM or more)
 and 64 GB of RAM or more, text and pictures.** A fork of [Niko1221/Strata](https://github.com/Niko1221/Strata), on
-upstream 0.1.41. Setup installs, ready-made from Hugging Face, the original Qwen in NVFP4 (our GPTQ, or NVIDIA's
+upstream 0.1.42. Setup installs, ready-made from Hugging Face, the original Qwen in NVFP4 (our GPTQ, or NVIDIA's
 checkpoint converted), censored as Qwen ships it; on ours an opt-in switch turns the censorship off. Upstream's GGUF
 models are still offered.
 
@@ -14,6 +14,17 @@ models are still offered.
 
 ## What's new
 
+- **On upstream 0.1.42 (0.1.42-nvfp4.1).** Upstream's own changes now run here too:
+  - **The route tail skip is on by default** (`STRATA_ROUTE_TAIL_SKIP=7`): a missed expert that every token of a
+    verify window routes at rank 7-9 is neither fetched nor computed. With `qwen-nvfp4-gptq` decode is 11.5% faster
+    (193.7 against 174.0 tokens/s), but the answers change more than upstream's models show: teacher-forced KL
+    0.035 against the skip off (top token the same 93.7% of the time), more than the censorship switch's 0.026.
+    No loops in 3 long Claude Code replays. `STRATA_ROUTE_TAIL_SKIP=0` (in the config's `"env"`) turns it off
+    ([numbers](docs/NVFP4.md#upstream-0142-2026-10-10-release-0142-nvfp41)).
+  - **Decode's PCIe share is upstream's measured one** (from the CPU pool's speed: 0.35 here); this fork's per-layer
+    cost model is gone. The same speed as the old fixed share.
+  - Four fixes this fork sent upstream are upstream's code now: the unbuffered start of the resident RAM mode, the
+    page-file advice (a fixed 65536 MB), the K/V trim's residency upload, the prompt buffers' size.
 - **Censorship can be turned off (0.1.41-nvfp4.5).** The original Qwen (`qwen-nvfp4-gptq`, and the original Qwen's
   GGUFs `qwen` and `unsloth`) now runs with or without censorship. The switch is off by default. To turn it on:
   - for one chat: the web app's **"Disable censorship"** switch;
@@ -150,7 +161,7 @@ page).
     up to the free RAM less 6 GiB, and the rest are read from `experts.bin` when needed. `--low-ram` forces it,
     `--no-low-ram` turns it off, `--ram-budget GIB` caps it
     ([64 GB of RAM](docs/NVFP4.md#64-gb-of-ram-2026-09-30), [A 96 GB PC](docs/NVFP4.md#a-96-gb-pc-2026-10-09-release-0141-nvfp42)).
-- **Page file: set a fixed 64000 MB** (initial = maximum). Windows lets all programs together commit at most RAM +
+- **Page file: set a fixed 65536 MB** (initial = maximum). Windows lets all programs together commit at most RAM +
   page file, and the engine commits ~100 GiB with every expert in RAM (~80 GiB in the low-RAM mode): the experts
   plus ~30 GiB that WDDM charges for the VRAM it uses. Nothing of the model is paged out, but short of commit the
   expert cache in VRAM is made smaller, and the model can run significantly slower (a chat's round 17% and 38%
@@ -159,7 +170,7 @@ page).
   system-managed or growing file (initial below maximum) counts at its size now, since it may not grow in time
   while WDDM charges the VRAM (upstream #60), and the warning then says to make it fixed. To set it: Win+R
   `sysdm.cpl` > Advanced > Performance Settings > Advanced > Virtual memory > Change: Custom size, initial and
-  maximum 64000 MB, then restart Windows.
+  maximum 65536 MB, then restart Windows.
 - **Disk:** ~130 GB for an NVFP4 model (128.8 GB of files; the expert pack and the 51 GB n-gram table are most of
   it). Setup checks the free space first. Use the fastest NVMe drive you have: every start reads 63 GiB of experts.
 
@@ -206,8 +217,8 @@ Each change was measured (first-token KL against a reference, interleaved speed 
   experts, 7,060 -> 8,290 slots at 262K; `--no-kv-grow` allocates the whole window
   ([Faster without changing an answer](docs/NVFP4.md#faster-without-changing-an-answer-2026-10-01-release-0131-nvfp42)).
 - **Small prompt chunks shared with the CPU** (this fork's change, upstream's default since 0.1.41); on top of
-  upstream's, NVFP4 packs share chunks up to 4,096 tokens and the DeltaNet recurrence runs in chunks from 128 tokens.
-  Decode's PCIe share is measured per layer too ([Small prompt chunks with the CPU](docs/NVFP4.md#small-prompt-chunks-with-the-cpu-2026-10-06-release-0139-nvfp44)).
+  upstream's, NVFP4 packs share chunks up to 4,096 tokens and the DeltaNet recurrence runs in chunks from 128 tokens
+  ([Small prompt chunks with the CPU](docs/NVFP4.md#small-prompt-chunks-with-the-cpu-2026-10-06-release-0139-nvfp44)).
 - **The adaptive VRAM tier** re-ranks every 2 rounds, up to 192 swaps, counts x0.92 (upstream: 4 / 96 / x0.7), and
   admits the PCIe share's experts into VRAM
   ([The adaptive VRAM tier](docs/NVFP4.md#the-adaptive-vram-tier-and-an-audit-2026-10-01-release-0131-nvfp43),
@@ -292,8 +303,9 @@ The switches kept only for A/B runs (each gives the same bits or a measured alte
 | `--no-kv-grow`, `STRATA_KV_GROW=0` | the K/V allocated for the whole context at start |
 | `STRATA_KV_GROW_INIT` / `_STEP` | the K/V's cells at start (16384) and its growth step (8192) |
 | `--vram-reserve-mib N` | VRAM left unused (default 700); also a smaller card's budget on a bigger one |
-| `--pcie-frac F` | a fixed share of decode's cache misses fetched over PCIe (default: each layer's count from measured costs) |
-| `STRATA_PCIE_BALANCE=0` | decode keeps the link probe's fixed PCIe share |
+| `--pcie-frac F` | a fixed share of decode's cache misses fetched over PCIe (default: upstream's, set from the CPU pool's speed in the first decode windows) |
+| `STRATA_PCIE_FRAC_DEFAULT=old` | decode keeps the link probe's fixed PCIe share (upstream 0.1.41's rule) |
+| `STRATA_ROUTE_TAIL_SKIP=0` | decode computes every missed expert again (upstream's default since 0.1.42 skips those routed only at rank 7-9; this fork measured KL 0.035 with it on) |
 | `STRATA_PREFILL_CPU_SHARE=x\|0` | a fixed CPU share of a small prompt chunk's streamed experts / none (default `auto`: measured, and only while sharing is faster; `STRATA_DBG_CPU_GATE=1` prints its readings) |
 | `--adapt-every N`, `--adapt-swaps N`, `--adapt-decay F` | the adaptive VRAM tier: re-rank every N rounds, up to N swaps, counts x F after each (default 2 / 192 / 0.92 with a cache of 20-60% of the experts and every expert in RAM, else upstream's 4 / 96 / 0.7) |
 | `STRATA_ADAPT_FETCH=0\|1\|2` | decode: the PCIe share's experts admitted into the VRAM tier (2, the default: instead of the tier's own swaps where an admission ran; 1: beside them; 0: off) |

@@ -374,6 +374,60 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### Upstream 0.1.42 (2026-10-10, release 0.1.42-nvfp4.1)
+
+- **The port.** rel/0.1.41's first-parent chain since v0.1.41 holds 109 commits; 104 are carried. Dropped, because
+  upstream 0.1.42 does the same: 0edc8c58 (the resident RAM mode's unbuffered start, upstream's f04ab568 = #1696),
+  3c3425fe and 8119924f (`bytes_needed`'s source flag, a26fcbcd = #1283, already in), and this fork's per-layer PCIe
+  cost model, 2e02a0e4 and c027c540 (`STRATA_PCIE_BALANCE`), for upstream's measured share (aa7b0cb1). Taken over
+  this fork's code in conflicts: #1690's `res_put` in `kvg_trim`, #1693's page-file count and advice in setup (the
+  fork's NVFP4 rule, a framed warning below 60000 MB, sits on top of it, and the engine now advises 65536 MB as setup
+  does), and upstream's coalesced Q8_0 dequant (e910e410) for this fork's. Kept and merged: the NVFP4 CPU rows beside
+  upstream's AVX1 ones (#1699), `prefill auto` up to 32768 with #1630's Windows HIP cap, the adaptive tier's settings
+  with `--adapt-min-gain`, the `--adapt-decay` range check (#1284, still open), the tier's residency copy (#1517)
+  with upstream's look-ahead stats, `STRATA_ADAPT_FETCH` with the tail skip (a skipped miss is never fetched), the PLE
+  batch readers (#1516) with `--aux-cpus`, #567's prompt encoder with upstream's tokenizer caches, the `uncensored`
+  key with #1819's sampling aliases, and the peer context fix beside the memory guard.
+- **Two fixes the port needed.** 0.1.42 takes the CPU share's rows buffer once at its largest (04dbe561), so the
+  fork's `row_sd` ones, allocated inside the reallocation that no longer ran, stayed null: a 2K prompt with the share
+  stopped at `prefill moe_combine: invalid argument` (52b272eb). And 0.1.42's PLE probe (#1425 #1549 #1629), which
+  switches a slow drive to mapped reads, timed its reads while this fork's expert arena loaded on its own thread from
+  the same SSD (63 GiB at 11 GiB/s): 5,500 rows/s, "slow", and the mapped reads took a 32K prompt's PLE from 231 ms to
+  20.2 s (the prompt 3.7 -> 23.4 s). The probe now runs once the arena is in, with 256-token batches through the batch
+  readers: 810,000-826,000 rows/s, the bar and the switch upstream's (a9d03502, eb344b39).
+- **The route tail skip** (`STRATA_ROUTE_TAIL_SKIP=7`, upstream's default on CUDA serve with one GPU or a layer split,
+  not with every expert in VRAM, `--batch` slots, a peer or helper GPUs) applies to the NVFP4 path: it works in the
+  dispatch, before any format is read. On `qwen-nvfp4-gptq` (cache 8000, every prompt through the verify windows,
+  STRATA_LOGPOS, the uncensor work's texts: 5,153 rows of code, prose and the model's replies, 8,550 of its thinking):
+
+  | against the skip off | KL | KL thinking | same top token | log p(`</think>`) | p(`</think>`) early |
+  |---|---|---|---|---|---|
+  | fixed placement (no PCIe share, no tier) | 0.0352 (p99 0.43) | 0.0089 | 94.1% | +0.147 / +0.144 | x1.05 |
+  | the normal mode (PCIe share, tier) | 0.0353 (p99 0.43) | 0.0090 | 93.7% | +0.188 / +0.106 | x1.35 |
+  | the normal mode, off against off | 0 | 0 | 100% | 0 | x1.00 |
+
+  For scale, on the same texts: the censorship switch 0.026 (thinking +0.024), upstream's speed projection 0.043
+  (+0.159), orca's abliteration 0.047 (+0.154). Upstream measured KL 0.003-0.006 on its models. Loopcap (the captured
+  72K Claude Code request, greedy, 3 runs): no loop, 2,820 / 1,192 / 2,271 thinking tokens (0.1.41's stock: 1,099 -
+  2,292, mean 1,699), 178-194 tokens/s.
+- **The PCIe share measured from the CPU pool** (aa7b0cb1; CUDA, one GPU, no `--pcie-frac`): the link 57.9 GB/s, the
+  pool 49-50 us a missed expert (55-56 GB/s of expert bytes): 0.25 -> 0.35 in every run.
+- **Decode speed**, 5 interleaved rounds of the 4 chats of the uncensor work (EN, UK, code, agent; greedy, the tray's
+  settings, cache auto, ~2,800 tokens a run):
+
+  | | tokens/s | against the default |
+  |---|---|---|
+  | 0.1.42's defaults | 193.7 +- 6.1 | |
+  | `STRATA_ROUTE_TAIL_SKIP=0` | 174.0 +- 8.7 | **1.115 +- 0.051** (5 of 5 rounds faster) |
+  | `STRATA_PCIE_FRAC_DEFAULT=old` (0.25) | 197.2 +- 7.4 | 0.983 +- 0.045 (2 of 5) |
+
+  The tail skip gains 11.5%; the measured share is as fast as the fixed 0.25, as this fork's per-layer model was.
+- **Checks** (release build 86e1caa3): against 0.1.41-nvfp4.7's engine (1217e500, references made with it on
+  `qwen-nvfp4-gptq`: the orca packs are deleted), 2K and 32K give the same logits and 32 tokens (`--pcie-frac 0.25`,
+  the CPU share 0.5, 6,000 slots; the tail skip is a serve default, so not in these runs). With every fork default
+  off the logits equal upstream 0.1.42's on IQ2_XS (32K, 12,000 slots). Tests: 115 of 118 pass (the 3 that fail need model files this PC does not have); the server's 708 OK (15
+  skipped); setup's and the tools' 769, all but `test_iq_pack` (no `yaml` in that venv).
+
 ### The censorship switch in Model settings (2026-10-10, release 0.1.41-nvfp4.7)
 
 The web page's Model settings view (GET / POST /config, `serve/runconfig.py` EDITABLE) lists the run config's
