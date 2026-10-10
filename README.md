@@ -18,7 +18,8 @@ models are still offered.
   GGUFs `qwen` and `unsloth`) now runs with or without censorship. The switch is off by default. To turn it on:
   - for one chat: the web app's **"Disable censorship"** switch;
   - for one request: the API field `"uncensored": true`;
-  - as the default: install with `START-HERE.bat --uncensored on`.
+  - as the default: install with `START-HERE.bat --uncensored on`, or set **Disable censorship by default** in the
+    web page's Model settings (0.1.41-nvfp4.7; used from the model's next start).
 
   The engine removes the model's refusal direction at run time in layers 8-33 only; the weights are untouched.
   - With it on and thinking on, 0 of 104 English and 0 of 30 Ukrainian test requests were refused.
@@ -33,6 +34,9 @@ models are still offered.
   - An existing orca install keeps working.
 - **Recommended sampling (0.1.41-nvfp4.6).** Setup writes the model's own `temperature 1.0, top_p 0.95, top_k 20`
   into the config, as the default for requests that send none. Before, Claude Code decoded greedy.
+- **Model settings has a Disable censorship switch too (0.1.41-nvfp4.7):** the default for requests that do not
+  say, saved in the run config (`"uncensored"`) and used from the next start; greyed out for a model without the
+  refusal projection (NVIDIA's, Swift, the Coder).
 
 The design is upstream's: the routed experts live in RAM, the most-used ones are cached in VRAM, the misses are
 computed on the CPU and fetched over PCIe in parallel with the GPU, and an MTP draft head speculates. Upstream's README

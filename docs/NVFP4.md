@@ -374,6 +374,17 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### The censorship switch in Model settings (2026-10-10, release 0.1.41-nvfp4.7)
+
+The web page's Model settings view (GET / POST /config, `serve/runconfig.py` EDITABLE) lists the run config's
+`"uncensored"` right after the sampling keys: on / off / default, the switch's default for requests that do not say,
+used from the model's next start like the other settings. A chat's Disable censorship switch and the API field
+`"uncensored"` still decide per request. On a config that loads no refusal projection (no `--control-vector-scaled`:
+NVIDIA's model, whose license does not allow bypassing its safety guardrails, Swift 1.5, the Coder) the entry is
+greyed out, and setting it on is refused with that reason; off and default are always allowed. The engine is
+unchanged (1217e500). Tests: `serve/test_runconfig` (listed, true / false round trip with a vector, refused
+without one, null removes the key), the server's suite 611 (13 skipped).
+
 ### The model's recommended sampling (2026-10-10, release 0.1.41-nvfp4.6)
 
 Setup writes each model's recommended sampling into the run config it builds: `"sampling": {"temperature": 1.0,
