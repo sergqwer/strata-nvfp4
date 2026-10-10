@@ -377,3 +377,13 @@ checks.
 
 MIT, as upstream ([LICENSE](LICENSE), copyright Niko1221 and the Strata contributors). llama.cpp / ggml code compiled
 into the build is MIT as well.
+
+## Star History
+
+<a href="https://www.star-history.com/#sergqwer/strata-nvfp4&Date">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=sergqwer/strata-nvfp4&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=sergqwer/strata-nvfp4&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=sergqwer/strata-nvfp4&type=Date" />
+ </picture>
+</a>
