@@ -8,7 +8,8 @@
    build-release/) and the image encoder (release/build-vision.cmd: CPU only, build-vision-cpu/), and checks with
    ninja dry runs that both are current - a bundle once shipped the previous release's engine.
 3. Assembles dist/strata-nvfp4: that engine, cuBLAS from %CUDA_PATH%, the part of llama.cpp the converter imports,
-   and the bundle's own files (README, scripts, config) from release/windows/.
+   and the bundle's own files (README, scripts, config, model-files.json: what prepare-model.cmd downloads) from
+   release/windows/.
    release-manifest.json lists every file's SHA-256 and, for config/ and data/, every version git has of their
    source: update.cmd (tools/bundle_update.py) replaces a file still as a release shipped it, never one the user changed.
 4. Zips it to dist/strata-nvfp4-v<VERSION>-windows-x64.zip and writes its SHA-256 beside it.
@@ -95,7 +96,10 @@ shutil.copytree(LLAMA / "gguf-py", OUT / "third_party" / "llama.cpp" / "gguf-py"
 (OUT / "third_party" / "llama.cpp" / "COMMIT").write_text(git("rev-parse", "HEAD", cwd=LLAMA) + "\n")
 
 # data, docs, license
-for name in ("expert-profile.bin", "draft_vocab.bin"):
+for name in ("expert-profile.bin", "draft_vocab.bin",
+             # the censorship switch the config loads (off by default: "uncensored": false)
+             "uncensor/qwen-nvfp4-gptq-uncensored.gguf", "uncensor/qwen-nvfp4-gptq-uncensored.json",
+             "uncensor/README.md"):
     cp(REPO / "data" / name, OUT / "data" / name)
 cp(REPO / "docs" / "NVFP4.md", OUT / "docs" / "NVFP4.md")
 cp(REPO / "LICENSE", OUT / "LICENSE")

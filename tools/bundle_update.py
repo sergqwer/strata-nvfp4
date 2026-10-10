@@ -424,7 +424,8 @@ def main(argv=None, root: Path | None = None, opener=urllib.request.urlopen) -> 
     for line in lines:
         say("  " + line)
     z.unlink(missing_ok=True)
-    for req, venv in (("requirements-serve.txt", ".venv-serve"), ("requirements-convert.txt", ".venv-convert")):
+    for req, venv in (("requirements-serve.txt", ".venv-serve"), ("requirements-model.txt", ".venv-model"),
+                      ("requirements-convert.txt", ".venv-convert")):
         old, new, py = root / ".previous" / req, root / req, root / venv / "Scripts" / "python.exe"
         if py.exists() and new.exists() and not (old.exists() and same(old, new)):
             say("  %s changed: updating %s ..." % (req, venv))

@@ -1,14 +1,15 @@
 # Strata NVFP4 — ready-made engine for Windows
 
-Qwen3.8-Flash-Next (125B hybrid MoE), OrcaRouter's abliteration in ModelOpt NVFP4, on one GeForce RTX 20, 30, 40 or 50
-card with 12 GB of VRAM or more and 64 GB of RAM or more - text and pictures.
+Qwen3.8-Flash-Next (125B hybrid MoE), the original model with every expert NVFP4 by this fork's GPTQ, on one GeForce
+RTX 20, 30, 40 or 50 card with 12 GB of VRAM or more and 64 GB of RAM or more - text and pictures. Censored as Qwen
+ships it; a switch turns that off (see Censorship).
 Source, measurements and how it works: https://github.com/sergqwer/strata-nvfp4
 
 ## What you need
 
 - **GPU:** GeForce RTX 20, 30, 40 or 50 with 12 GB of VRAM or more. Built and measured on an RTX 5090 (32 GB); the
   other generations' code paths were tested on it too. With less VRAM, lower `--max-context` in
-  `config\strata-nvfp4.json` (the engine says so when it does not fit):
+  `config\strata-qwen-nvfp4-gptq.json` (the engine says so when it does not fit):
 
   | card's VRAM | `--max-context` | expert slots | decode, measured* |
   | --- | ---: | ---: | ---: |
@@ -22,34 +23,33 @@ Source, measurements and how it works: https://github.com/sergqwer/strata-nvfp4
 
 - **Driver:** NVIDIA 580 or newer (CUDA 13). The CUDA runtime is inside `strata.exe` and cuBLAS is in `engine\`,
   so no CUDA toolkit is needed.
-- **RAM:** 64 GB or more. With 96 GB or more all 63 GiB of experts stay in RAM (~69 GiB in all); with less, the
+- **RAM:** 64 GB or more. With 92 GiB installed or more (a 96 GB PC) all 63 GiB of experts stay in RAM (~67 GiB in
+  all); with less, the
   engine keeps only the ones the graphics card does not hold, hottest first, and reads the rest from the file when
   needed - by itself, 6 GB stay free for Windows. `--no-low-ram` in the config turns that off, `--low-ram` forces it,
   `--ram-budget GIB` caps it. With 64 GB and an RTX 5090 all of them fit (44 GiB): a 32K prompt waits 9.3 s
   (96+ GB: 5.7 s), the answer after it runs at 97 tokens/s, and the start takes ~16 s (measured on the RTX 5090 + 128
   GB PC with 60 GiB of RAM locked away, as on a 64 GB PC whose Windows uses 6 GB).
 
-- **Pagefile:** at least **32 GB with 128 GB of RAM, 64 GB with 96 GB, 48 GB with 64 GB** (System > About >
-  Advanced system settings > Performance > Advanced > Virtual memory; set a fixed initial size). Windows allows all
-  programs together to reserve only RAM + pagefile, and the engine reserves ~70-98 GiB (Windows counts the GPU's
-  memory too); nothing of the model is actually written to the pagefile. Too small, and the start fails with an
-  allocation error.
+- **Pagefile: a fixed 64000 MB** (Win+R `sysdm.cpl` > Advanced > Performance Settings > Advanced > Virtual memory >
+  Change: Custom size, initial and maximum 64000 MB, then restart). Windows allows all programs together to reserve
+  only RAM + pagefile, and the engine reserves ~100 GiB (~80 in the low-RAM mode; Windows counts the GPU's memory
+  too); nothing of the model is actually written to the pagefile. Short of it the expert cache is made smaller (the
+  model can run significantly slower) or the start fails; the engine prints a `WARNING` below 60000 MB.
 - **CPU:** any x86-64 with AVX2; AVX-512 (Zen 4/5) is used automatically for the CPU share of the experts.
-- **Disk:** ~340 GB free while the model is prepared, ~200 GB afterwards (delete `models\checkpoint`, 135 GB, and
-  `models\mtp\tensors` once `prepare-model.cmd` is done). The start reads 63 GiB, so the fastest NVMe drive you
-  have is the right place for this folder (the experts are in after ~7 s from a PCIe 5 drive; a PCIe 4 drive reads
-  about half as fast).
+- **Disk:** ~130 GB for the model files (129.7 GB with the image encoder). The start reads 63 GiB, so the fastest
+  NVMe drive you have is the right place for this folder (the experts are in after ~7 s from a PCIe 5 drive; a
+  PCIe 4 drive reads about half as fast).
 - **Python 3.11 or newer** on PATH (the scripts make their own virtual environments here).
 
 ## Two steps
 
-1. **`prepare-model.cmd`** — downloads
-   [jpezzulli/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-ModelOpt-NVFP4](https://huggingface.co/jpezzulli/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-ModelOpt-NVFP4)
-   (126 GB) and converts it into `models\`, the n-gram (PLE) table kept in FP8 and the token embedding in BF16
-   exactly as Qwen ships them, and the image encoder from the checkpoint's own vision tower. It takes a while; if
-   it stops, run it again and it resumes. Coming from an older release: run it again too - it adds only what is
-   missing (`models\mmproj-f32.gguf`, 1.8 GB, and `models\token-embd-bf16.gguf`, 1.3 GB; the checkpoint must still
-   be in `models\checkpoint`).
+1. **`prepare-model.cmd`** — downloads the model ready-made:
+   [Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata)
+   at the revision `model-files.json` pins (the same files setup.py installs: the expert pack, the dense GGUF, the
+   FP8 n-gram table, the BF16 embedding, the MTP draft head) and the image encoder, 129.7 GB into `models\`. Every
+   file is checked against its SHA-256; nothing is converted. If it stops, run it again and it resumes;
+   `prepare-model.cmd --check` only says what is there.
 2. **`start-server.cmd`** — loads the model and serves it on **http://127.0.0.1:8080**:
    - a chat page at `http://127.0.0.1:8080/`
    - OpenAI API at `/v1/chat/completions`, Anthropic API at `/v1/messages` (Claude Code can point at it)
@@ -72,17 +72,27 @@ right away.
 
 | | |
 | --- | ---: |
-| Writes a chat answer (to its end) | ~138 tokens/s |
-| Writes a long answer after a 32K prompt | ~132 tokens/s |
-| Reads a 32K prompt | ~6,800 tokens/s |
+| Writes a chat answer (English, Ukrainian, code, an agent turn; mean of 3 runs) | ~180 tokens/s |
+| Reads a 32K prompt (an NVFP4 pack of the same format and size) | ~3.7 s |
 
 ## Settings
 
-`config\strata-nvfp4.json` holds the engine flags: context (`--max-context`, up to 262144), KV cache (`--kv int8`),
-paths. Environment switches:
+`config\strata-qwen-nvfp4-gptq.json` holds the engine flags: context (`--max-context`, up to 262144), KV cache
+(`--kv int8`), paths. Environment switches:
 
 - `STRATA_PREFILL_NVFP4=w4a8` (default) / `w4a4` (faster prompt reading, less accurate) / `fp16` (exact, slower)
-- `--pcie-frac F` in the config: the share of cache misses fetched over PCIe (default 0.25)
+- `--pcie-frac F` in the config: a fixed share of cache misses fetched over PCIe (by default the engine measures it)
+
+## Censorship
+
+The model declines what Qwen declines. The config loads this fork's refusal-direction projection
+(`data\uncensor`, layers 8-33) and leaves it **off** (`"uncensored": false`): with it off, the answers are the
+original model's. The chat page's **Disable censorship** switch (Sampling) and the API field `"uncensored": true`
+turn it on for a request; `"uncensored": true` in the config makes on the default. Measured on this model: with
+thinking on, 0 of 104 English and 0 of 30 Ukrainian held-out harmful requests refused, KL 0.026 to the original,
+its thinking as long as the original's (`data\uncensor\README.md`). The vector is under the Qwen Community
+License 1.0; removing refusals removes a safety behaviour, and what the model writes with it on is your
+responsibility.
 
 ## Large pages (optional, needs one sign-out)
 
@@ -118,10 +128,14 @@ per tool turn (~0.5 s).
 | --- | --- |
 | `engine\` | `strata.exe`, `strata-vision.exe` (the image encoder), NVIDIA cuBLAS (`cublas64_13.dll`, `cublasLt64_13.dll`), `BUILD.json` |
 | `serve\` | the server and its chat page |
-| `tools\`, `third_party\llama.cpp\` | the converters `prepare-model.cmd` runs (llama.cpp's at its pinned commit) |
-| `data\` | the expert-cache profile and the draft vocabulary |
+| `tools\` | `bundle_model.py` (what `prepare-model.cmd` runs), the updater, and the converters for making a pack yourself (with `third_party\llama.cpp\`, llama.cpp's at its pinned commit) |
+| `data\` | the expert-cache profile, the draft vocabulary, `uncensor\` (the censorship switch's vector) |
+| `model-files.json` | the files `prepare-model.cmd` downloads: repository, revision, size and SHA-256 of each |
 | `docs\NVFP4.md` | accuracy and speed measurements |
 
-The model is an abliterated fine-tune: it does not refuse. What it is used for is on whoever runs it.
+**Coming from a bundle before 0.1.41-nvfp4.5** (orca-nvfp4, converted from jpezzulli's ModelOpt checkpoint): that
+model was withdrawn - as an agent it did much worse than the original Qwen. `start-server.cmd` still starts it
+(with `config\strata-nvfp4.json`) until `prepare-model.cmd` has downloaded the original Qwen; then it starts that.
+`models\checkpoint`, `models\pack`, `models\orca-nvfp4.gguf` and `models\mtp` can go afterwards.
 
 License: MIT (see `LICENSE`); third-party parts in `THIRD-PARTY-NOTICES.txt`.
