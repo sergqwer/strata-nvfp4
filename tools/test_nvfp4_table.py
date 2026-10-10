@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 import nvfp4_table as T  # noqa: E402
 import setup  # noqa: E402
 
-REPO = setup.ORCA_REPO
+REPO = setup.QWEN_GPTQ_REPO
 COMMIT = "a" * 40
 SMALL = {"pack/index.txt": b"index", "pack/native_experts.txt": b"native", "pack/tokenizer/vocab.json": b"{}",
          "mtp/rt/dense.txt": b"dense"}
@@ -64,7 +64,7 @@ class Table(unittest.TestCase):
         self.assertIn("# not a component: README.md, mmproj-x.gguf", src)
         table = eval("{" + src.split("\n    # not")[0] + "}")          # noqa: S307 - the tool's own output
         with mock.patch.object(setup, "NVFP4_REPOS", {**setup.NVFP4_REPOS, **table}):
-            files, why = setup.nvfp4_files("orca-nvfp4")
+            files, why = setup.nvfp4_files("qwen-nvfp4-gptq")
         self.assertIsNone(why)
         self.assertEqual(len(files), len(SMALL) + len(BIG))
         self.assertAlmostEqual(setup.nvfp4_experts_gib(files), 63.3, places=1)

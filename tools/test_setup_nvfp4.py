@@ -1,5 +1,5 @@
-"""This fork's NVFP4 model in setup (orca-nvfp4, the default; huihui-nvfp4 withdrawn in 0.1.41-nvfp4.3, an install of it
-kept): chosen from the menu or by --family, the
+"""This fork's NVFP4 models in setup (qwen-nvfp4-gptq, the default, and qwen-nvidia-nvfp4; huihui-nvfp4 and
+orca-nvfp4 withdrawn, an install of either kept; --uncensored): chosen from the menu or by --family, the
 start script's engine arguments (the tray's working set), a family refused while its file table (NVFP4_REPOS) is
 empty, the requirements (an NVIDIA RTX 20+ card, 12 GB of VRAM, 64 GB of RAM, the engine's low-RAM mode below 92 GiB,
 the disk, the page file), the engine (this fork's, never upstream's) and --dry-run.  setup.main() on mocked PCs through
@@ -26,7 +26,8 @@ sys.path.insert(0, str(ROOT / "tools"))
 import setup  # noqa: E402
 from test_setup_golden import PROFILES, card, install  # noqa: E402
 
-ORCA = setup.ORCA_REPO
+QG, QNV = setup.QWEN_GPTQ_REPO, setup.QWEN_NV_REPO
+ORCA = "Maximilian228/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-NVFP4-GPTQ-Strata"   # withdrawn in 0.1.41-nvfp4.5
 HUIHUI = "Maximilian228/Huihui-Qwen3.8-Flash-Next-abliterated-NVFP4-GPTQ-Strata"   # withdrawn: NVFP4_WITHDRAWN
 OTHER = "Maximilian228/Other-NVFP4-GPTQ-Strata"                                  # a second repository (links)
 FORK = "https://github.com/sergqwer/strata-nvfp4"
@@ -52,8 +53,8 @@ def table(own: str) -> dict:
             "profile": {}}
 
 
-FILLED = {ORCA: table("orca")}
-EMPTY = {r: {"revision": "", **{c: {} for c in setup.NVFP4_COMPONENTS}} for r in (ORCA,)}
+FILLED = {QG: table("qwen-gptq"), QNV: table("qwen-nv")}
+EMPTY = {r: {"revision": "", **{c: {} for c in setup.NVFP4_COMPONENTS}} for r in (QG, QNV)}
 # the withdrawn family's PLE copy, as setup links it (the test tables' PLE SHA-256)
 WITHDRAWN = {"huihui-nvfp4": {**setup.NVFP4_WITHDRAWN["huihui-nvfp4"],
                               "copies": {HUIHUI: {"ple-fp8-e4m3.gguf": sha("ple")}}}}
@@ -113,37 +114,39 @@ def arg(cfg, flag):
 
 
 class Choice(unittest.TestCase):
-    def test_the_default_is_orca(self):
+    def test_the_default_is_qwen_gptq(self):
         ram, found = PROFILES["128GB-1x24GB"]
         code, out, cfg, asked = run(ram, found, ["--no-start"])
         self.assertEqual(code, 0, out[-3000:])
         self.assertEqual(asked, [])
-        self.assertEqual(cfg["model_name"], "orcarouter-qwen3.8-flash-next-uncensored-nvfp4")
-        self.assertIn("Maximilian228--OrcaRouter-Qwen3.8-Flash-Next-Uncensored-NVFP4-GPTQ-Strata", arg(cfg, "--pack"))
+        self.assertEqual(cfg["model_name"], "qwen3.8-flash-next-gptq-nvfp4")
+        self.assertIn("Maximilian228--Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata", arg(cfg, "--pack"))
         self.assertIn("Its license: Qwen Community License 1.0", out)
 
-    def test_the_menu_offers_orca_first_then_the_gguf_models(self):
+    def test_the_menu_offers_the_nvfp4_models_first_then_the_gguf_models(self):
         ram, found = PROFILES["128GB-1x24GB"]
         code, out, cfg, asked = run(ram, found, ["--no-start"], answers="")
         self.assertEqual(code, 0, out[-3000:])
         self.assertIn("Which model? [1]", asked[0])
         menu = out[out.index("=== Step 2"):out.index("[ok] model:")]
         lines = [x.strip() for x in menu.splitlines() if x.strip()[:2] in {f"{i})" for i in range(1, 10)}]
-        self.assertTrue(lines[0].startswith("1) OrcaRouter"), lines)
-        self.assertTrue(lines[1].startswith("2) Qwen3.8-Flash-Next "), lines)
-        self.assertEqual(len(lines), 1 + len(setup.FAMILIES))
+        self.assertTrue(lines[0].startswith("1) Qwen3.8-Flash-Next (NVFP4, GPTQ)"), lines)
+        self.assertTrue(lines[1].startswith("2) Qwen3.8-Flash-Next (NVIDIA's NVFP4)"), lines)
+        self.assertTrue(lines[2].startswith("3) Qwen3.8-Flash-Next "), lines)
+        self.assertEqual(len(lines), 2 + len(setup.FAMILIES))
         self.assertNotIn("Huihui", menu)                                  # withdrawn
-        self.assertEqual(cfg["model_name"], "orcarouter-qwen3.8-flash-next-uncensored-nvfp4")
+        self.assertNotIn("OrcaRouter", menu)                              # withdrawn
+        self.assertEqual(cfg["model_name"], "qwen3.8-flash-next-gptq-nvfp4")
 
-    def test_orca_by_number_and_by_flag(self):
+    def test_qwen_gptq_by_number_and_by_flag(self):
         ram, found = PROFILES["128GB-1x24GB"]
-        for argv, answers in ((["--no-start"], {"Which model": "1"}), (["--family", "orca-nvfp4", "--no-start"], "")):
+        for argv, answers in ((["--no-start"], {"Which model": "1"}), (["--family", "qwen-nvfp4-gptq", "--no-start"], "")):
             with self.subTest(argv=argv):
                 code, out, cfg, _ = run(ram, found, argv, answers=answers)
                 self.assertEqual(code, 0, out[-3000:])
-                self.assertEqual(cfg["model_name"], "orcarouter-qwen3.8-flash-next-uncensored-nvfp4")
-                self.assertIn("OrcaRouter-Qwen3.8-Flash-Next-Uncensored-NVFP4-GPTQ-Strata", arg(cfg, "--native"))
-                self.assertIn("its model card says Apache 2.0", out)
+                self.assertEqual(cfg["model_name"], "qwen3.8-flash-next-gptq-nvfp4")
+                self.assertIn("Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata", arg(cfg, "--native"))
+                self.assertIn("Its license: Qwen Community License 1.0", out)
 
     def test_the_gguf_families_stay(self):
         ram, found = PROFILES["128GB-1x24GB"]
@@ -154,7 +157,7 @@ class Choice(unittest.TestCase):
         code, out, cfg, _ = run(ram, found, ["--model", "IQ2_XS", "--no-start"])
         self.assertEqual(code, 0, out[-3000:])
         self.assertEqual(cfg["model_name"], "qwen3.8-flash-next-iq2_xs")
-        code, out, _, _ = run(ram, found, ["--family", "orca-nvfp4", "--model", "IQ2_XS", "--no-start"])
+        code, out, _, _ = run(ram, found, ["--family", "qwen-nvfp4-gptq", "--model", "IQ2_XS", "--no-start"])
         self.assertNotEqual(code, 0)
         self.assertIn("has one size: leave out --model IQ2_XS", out)
 
@@ -165,12 +168,12 @@ class Choice(unittest.TestCase):
         code, out, cfg, _ = install_with(ram, found, ["--setup", "--no-start"], configs=[("strata-coder-q2_0.json", old)])
         self.assertEqual(code, 0, out[-3000:])
         self.assertTrue(cfg["model_name"].startswith("qwen3.8-flash-next-coder"), cfg["model_name"])
-        nv = {"exe": "x", "args": ["--max-context", "131072"], "model_name": "orcarouter-qwen3.8-flash-next-uncensored-nvfp4"}
-        code, out, cfg, _ = install_with(ram, found, ["--setup", "--no-start"], configs=[("strata-orca-nvfp4.json", nv)])
+        nv = {"exe": "x", "args": ["--max-context", "131072"], "model_name": "qwen3.8-flash-next-gptq-nvfp4"}
+        code, out, cfg, _ = install_with(ram, found, ["--setup", "--no-start"], configs=[("strata-qwen-gptq-nvfp4.json", nv)])
         self.assertEqual(code, 0, out[-3000:])
-        self.assertEqual(cfg["model_name"], "orcarouter-qwen3.8-flash-next-uncensored-nvfp4")
-        code, out, cfg, _ = install_with(ram, found, ["--no-start"])         # a new install: orca
-        self.assertEqual(cfg["model_name"], "orcarouter-qwen3.8-flash-next-uncensored-nvfp4")
+        self.assertEqual(cfg["model_name"], "qwen3.8-flash-next-gptq-nvfp4")
+        code, out, cfg, _ = install_with(ram, found, ["--no-start"])         # a new install: qwen-nvfp4-gptq
+        self.assertEqual(cfg["model_name"], "qwen3.8-flash-next-gptq-nvfp4")
 
     def test_cuda_12_does_not_offer_them(self):
         # --cuda 12 (or a split with a Pascal card): the NVFP4 models need the CUDA 13 engine - never the default,
@@ -180,30 +183,30 @@ class Choice(unittest.TestCase):
         self.assertEqual(code, 0, out[-3000:])
         self.assertFalse(cfg["model_name"].endswith("-nvfp4"), cfg["model_name"])
         self.assertIn("not offered, it runs on the CUDA 13 engine only", out)
-        code, out, _, _ = run(ram, found, ["--cuda", "12", "--family", "orca-nvfp4", "--no-start"])
+        code, out, _, _ = run(ram, found, ["--cuda", "12", "--family", "qwen-nvfp4-gptq", "--no-start"])
         self.assertEqual(code, 1)
         self.assertIn("leave out --cuda 12", out)
         self.assertNotIn("--gpu N", out)
         code, out, _, _ = run(ram, found, ["--cuda", "12", "--check"])
-        self.assertIn("orca-nvfp4 not offered: it runs on the CUDA 13 engine only", " ".join(out.split()))
+        self.assertIn("qwen-nvfp4-gptq not offered: it runs on the CUDA 13 engine only", " ".join(out.split()))
 
     def test_an_earlier_install_is_read_back(self):
         with tempfile.TemporaryDirectory() as d:
-            p = Path(d) / "strata-orca-nvfp4.json"
+            p = Path(d) / "strata-qwen-gptq-nvfp4.json"
             p.write_text(json.dumps({"exe": "x", "args": ["--max-context", "131072", "--kv", "int8"],
                                      "vision": {"gpu": False}}))
             ch = setup.choices_from_config(p)
         self.assertEqual((ch["family"], ch["model"], ch["context"], ch["kv"], ch["vision"]),
-                         ("orca-nvfp4", "NVFP4", 131072, "int8", "cpu"))
+                         ("qwen-nvfp4-gptq", "NVFP4", 131072, "int8", "cpu"))
 
 
 class EngineArgs(unittest.TestCase):
     def test_the_tray_s_working_set(self):
         ram, found = PROFILES["128GB-1x24GB"]
-        code, out, cfg, _ = run(ram, found, ["--family", "orca-nvfp4", "--context", "262144", "--vision", "yes",
+        code, out, cfg, _ = run(ram, found, ["--family", "qwen-nvfp4-gptq", "--context", "262144", "--vision", "yes",
                                              "--no-start"])
         self.assertEqual(code, 0, out[-3000:])
-        m = "<T>/models/Maximilian228--OrcaRouter-Qwen3.8-Flash-Next-Uncensored-NVFP4-GPTQ-Strata"
+        m = "<T>/models/Maximilian228--Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata"
         self.assertEqual(cfg["args"], [
             "--pack", f"{m}/pack", "--native", f"{m}/dense-q8_0.gguf", "--native-dense-gguf", f"{m}/dense-q8_0.gguf",
             "--ple-gguf", f"{m}/ple-fp8-e4m3.gguf", "--embd-gguf", f"{m}/token-embd-bf16.gguf",
@@ -220,20 +223,20 @@ class EngineArgs(unittest.TestCase):
         for prof, want in (("128GB-1x24GB", "131072"), ("64GB-1x32GB", "262144"), ("96GB-1x16GB", "65536")):
             ram, found = PROFILES[prof]
             with self.subTest(prof):
-                code, out, cfg, _ = run(ram, found, ["--family", "orca-nvfp4", "--no-start"])
+                code, out, cfg, _ = run(ram, found, ["--family", "qwen-nvfp4-gptq", "--no-start"])
                 self.assertEqual(code, 0, out[-3000:])
                 self.assertEqual(arg(cfg, "--max-context"), want)
                 self.assertEqual(arg(cfg, "--kv"), "int8")
                 self.assertNotIn("--vision", cfg["args"])
                 self.assertNotIn("--kv-resident", cfg["args"])               # the K/V grows in VRAM instead
         ram, found = PROFILES["128GB-1x24GB"]
-        code, out, cfg, _ = run(ram, found, ["--family", "orca-nvfp4", "--context", "8192", "--no-start"])
+        code, out, cfg, _ = run(ram, found, ["--family", "qwen-nvfp4-gptq", "--context", "8192", "--no-start"])
         self.assertNotIn("--kv", cfg["args"])
 
     def test_a_shipped_profile_and_one_from_the_repository(self):
-        repos = {**FILLED, ORCA: {**FILLED[ORCA], "profile": {"expert-profile.bin": (196632, sha("prof"))}}}
+        repos = {**FILLED, QG: {**FILLED[QG], "profile": {"expert-profile.bin": (196632, sha("prof"))}}}
         ram, found = PROFILES["128GB-1x24GB"]
-        code, out, cfg, _ = run(ram, found, ["--family", "orca-nvfp4", "--no-start"], repos=repos)
+        code, out, cfg, _ = run(ram, found, ["--family", "qwen-nvfp4-gptq", "--no-start"], repos=repos)
         self.assertEqual(code, 0, out[-3000:])
         self.assertTrue(arg(cfg, "--expert-profile").endswith("-Strata/expert-profile.bin"))
 
@@ -250,7 +253,7 @@ class Tables(unittest.TestCase):
 
     def test_an_empty_table_is_not_offered(self):
         ram, found = PROFILES["128GB-1x24GB"]
-        code, out, cfg, _ = run(ram, found, ["--family", "orca-nvfp4", "--no-start"], repos=EMPTY)
+        code, out, cfg, _ = run(ram, found, ["--family", "qwen-nvfp4-gptq", "--no-start"], repos=EMPTY)
         self.assertEqual(code, 1)
         self.assertIn("is not offered: not published yet", out)
         self.assertIn("its pack files are not on Hugging Face yet", out)
@@ -258,7 +261,7 @@ class Tables(unittest.TestCase):
         code, out, cfg, _ = run(ram, found, ["--no-start"], repos=EMPTY)
         self.assertEqual(code, 0, out[-3000:])
         self.assertEqual(cfg["model_name"], "qwen3.8-flash-next-iq3_xxs")
-        self.assertIn("(OrcaRouter Qwen3.8-Flash-Next Uncensored (NVFP4): not offered, not published yet", out)
+        self.assertIn("(Qwen3.8-Flash-Next (NVFP4, GPTQ): not offered, not published yet", out)
 
     def test_an_incomplete_table_is_refused(self):
         def without(repo, comp, path=None, **change):
@@ -270,13 +273,13 @@ class Tables(unittest.TestCase):
             return {r: {k: ({p: tuple(x) for p, x in v.items()} if isinstance(v, dict) else v) for k, v in d.items()}
                     for r, d in t.items()}
 
-        cases = {"index.txt": without(ORCA, "pack", "pack/index.txt"),
-                 "tokenizer/vocab.json": without(ORCA, "pack", "pack/tokenizer/vocab.json"),
-                 "upload is not finished yet": without(ORCA, "pack", revision="main"),
-                 "its mtp files are not on Hugging Face yet": without(ORCA, "mtp", mtp={})}
+        cases = {"index.txt": without(QG, "pack", "pack/index.txt"),
+                 "tokenizer/vocab.json": without(QG, "pack", "pack/tokenizer/vocab.json"),
+                 "upload is not finished yet": without(QG, "pack", revision="main"),
+                 "its mtp files are not on Hugging Face yet": without(QG, "mtp", mtp={})}
         for why, repos in cases.items():
             with self.subTest(why), mock.patch.object(setup, "NVFP4_REPOS", repos):
-                files, got = setup.nvfp4_files("orca-nvfp4")
+                files, got = setup.nvfp4_files("qwen-nvfp4-gptq")
                 self.assertEqual(files, [])
                 self.assertIn(why, got)
 
@@ -284,11 +287,11 @@ class Tables(unittest.TestCase):
 class Requirements(unittest.TestCase):
     def test_nvidia_rtx_20_or_newer_only(self):
         with mock.patch.object(setup, "NVFP4_REPOS", FILLED):
-            self.assertIsNone(setup.nvfp4_offer("orca-nvfp4", card(0, "RTX 2080 Ti", 11.0, "75"), False))
-            self.assertIn("RTX 20 card or newer", setup.nvfp4_offer("orca-nvfp4", card(0, "GTX 1080 Ti", 11.0, "61"),
+            self.assertIsNone(setup.nvfp4_offer("qwen-nvfp4-gptq", card(0, "RTX 2080 Ti", 11.0, "75"), False))
+            self.assertIn("RTX 20 card or newer", setup.nvfp4_offer("qwen-nvfp4-gptq", card(0, "GTX 1080 Ti", 11.0, "61"),
                                                                     False))
             amd = {"index": 0, "name": "Radeon RX 7900 XTX", "vram_gb": 24.0, "arch": "gfx1100"}
-            self.assertIn("NVIDIA cards only", setup.nvfp4_offer("orca-nvfp4", amd, True))
+            self.assertIn("NVIDIA cards only", setup.nvfp4_offer("qwen-nvfp4-gptq", amd, True))
 
     def test_a_small_card_or_little_ram_is_not_the_default_but_can_be_chosen(self):
         for prof in ("32GB-2x24GB", "8GB-card"):
@@ -299,15 +302,15 @@ class Requirements(unittest.TestCase):
                 self.assertEqual(code, 0, out[-3000:])
                 self.assertFalse(cfg["model_name"].endswith("-nvfp4"))      # --yes alone: a GGUF model
                 self.assertIn("<- needs", out)
-                code, out, cfg, _ = run(ram, found, ["--family", "orca-nvfp4", "--no-start"])   # explicit: consent
+                code, out, cfg, _ = run(ram, found, ["--family", "qwen-nvfp4-gptq", "--no-start"])   # explicit: consent
                 self.assertEqual(code, 0, out[-3000:])
                 self.assertIn("as you chose", out)
-                code, out, cfg, _ = run(ram, found, ["--family", "orca-nvfp4", "--no-start"], answers="")
+                code, out, cfg, _ = run(ram, found, ["--family", "qwen-nvfp4-gptq", "--no-start"], answers="")
                 self.assertEqual(code, 1)                                    # Enter declines the risk
 
     def test_the_low_ram_mode_below_92_gib(self):
         ram, found = PROFILES["64GB-1x32GB"]
-        code, out, cfg, _ = run(ram, found, ["--family", "orca-nvfp4", "--no-start"])
+        code, out, cfg, _ = run(ram, found, ["--family", "qwen-nvfp4-gptq", "--no-start"])
         self.assertEqual(code, 0, out[-3000:])
         self.assertIn("the engine's low-RAM mode (on by itself below 92 GiB)", out)
         for flag in ("--low-ram", "--no-low-ram", "--mmap-experts", "--resident-experts", "--ram-budget"):
@@ -315,24 +318,24 @@ class Requirements(unittest.TestCase):
         for argv, want in ((["--low-ram", "on"], ["--low-ram"]), (["--low-ram", "off"], ["--no-low-ram"]),
                            (["--resident-budget-gib", "40"], ["--ram-budget", "40"])):
             with self.subTest(argv):
-                code, out, cfg, _ = run(ram, found, ["--family", "orca-nvfp4", "--no-start", *argv])
+                code, out, cfg, _ = run(ram, found, ["--family", "qwen-nvfp4-gptq", "--no-start", *argv])
                 self.assertEqual(code, 0, out[-3000:])
                 i = cfg["args"].index(want[0])
                 self.assertEqual(cfg["args"][i:i + len(want)], want)
         ram, found = PROFILES["128GB-1x24GB"]
-        code, out, cfg, _ = run(ram, found, ["--family", "orca-nvfp4", "--no-start"])
+        code, out, cfg, _ = run(ram, found, ["--family", "qwen-nvfp4-gptq", "--no-start"])
         self.assertIn("all 63 GiB of experts are loaded into RAM", out)
 
     def test_one_gpu(self):
         ram, found = PROFILES["47GB-2x16GB"]
-        code, out, cfg, _ = run(ram, found, ["--family", "orca-nvfp4", "--gpus", "0,1", "--no-start"])
+        code, out, cfg, _ = run(ram, found, ["--family", "qwen-nvfp4-gptq", "--gpus", "0,1", "--no-start"])
         self.assertEqual(code, 0, out[-3000:])
         self.assertIn("runs on one GPU here", out)
         self.assertEqual(cfg["gpu"], 0)
 
     def test_the_disk(self):
         ram, found = PROFILES["128GB-1x24GB"]
-        code, out, _, _ = run(ram, found, ["--family", "orca-nvfp4", "--no-start"],
+        code, out, _, _ = run(ram, found, ["--family", "qwen-nvfp4-gptq", "--no-start"],
                               extra=[mock.patch.object(setup, "free_gb", lambda p: 100.0)])
         self.assertEqual(code, 1)
         self.assertRegex(out, r"not enough free disk space in .*: need ~12[0-9] GB")
@@ -348,20 +351,20 @@ class Files(unittest.TestCase):
                 # one models folder for every run (the harness makes a new temp folder per run; the last flag wins)
                 return run(ram, found, [*argv, "--models-dir", d], downloads=got)
 
-            code, out, cfg, _ = install_in(["--family", "orca-nvfp4", "--no-start"])
+            code, out, cfg, _ = install_in(["--family", "qwen-nvfp4-gptq", "--no-start"])
             self.assertEqual(code, 0, out[-3000:])
-            rev = FILLED[ORCA]["revision"]
-            self.assertIn(f"https://huggingface.co/{ORCA}/resolve/{rev}/pack/experts.bin", got)
-            self.assertEqual(len(got), sum(len(FILLED[ORCA][c]) for c in setup.NVFP4_COMPONENTS))
+            rev = FILLED[QG]["revision"]
+            self.assertIn(f"https://huggingface.co/{QG}/resolve/{rev}/pack/experts.bin", got)
+            self.assertEqual(len(got), sum(len(FILLED[QG][c]) for c in setup.NVFP4_COMPONENTS))
             got.clear()
-            code, out, cfg, _ = install_in(["--family", "orca-nvfp4", "--no-start"])
+            code, out, cfg, _ = install_in(["--family", "qwen-nvfp4-gptq", "--no-start"])
             self.assertEqual((code, got), (0, []))                           # every file already here and checked
             self.assertIn("pack/experts.bin already downloaded", out)
 
     def test_modelscope_is_said_not_tried(self):
         ram, found = PROFILES["128GB-1x24GB"]
         with mock.patch.dict(setup.os.environ, {"STRATA_SOURCE": "modelscope"}):
-            code, out, cfg, _ = run(ram, found, ["--family", "orca-nvfp4", "--no-start"])
+            code, out, cfg, _ = run(ram, found, ["--family", "qwen-nvfp4-gptq", "--no-start"])
         self.assertEqual(code, 0, out[-3000:])
         self.assertIn("ModelScope has no copy of", out)
 
@@ -373,7 +376,7 @@ class Fetch(unittest.TestCase):
         t = tempfile.TemporaryDirectory()
         self.addCleanup(t.cleanup)
         self.models = Path(t.name) / "models"
-        self.dst = self.models / setup.repo_dir(ORCA) / "ple.gguf"
+        self.dst = self.models / setup.repo_dir(QG) / "ple.gguf"
         self.dst.parent.mkdir(parents=True)
         self.got = []
 
@@ -383,9 +386,9 @@ class Fetch(unittest.TestCase):
             if not (dst.exists() and setup.done(dst)):
                 dst.write_bytes(data)
                 setup.mark(dst)
-        files = [("ple", ORCA, "1" * 40, "ple.gguf", size or len(data), hashlib.sha256(data).hexdigest())]
+        files = [("ple", QG, "1" * 40, "ple.gguf", size or len(data), hashlib.sha256(data).hexdigest())]
         with mock.patch.object(setup, "download", fake_download), mock.patch.object(setup, "NVFP4_REPOS", {}):
-            setup.nvfp4_fetch(files, {(ORCA, "ple.gguf"): self.dst}, [self.models])
+            setup.nvfp4_fetch(files, {(QG, "ple.gguf"): self.dst}, [self.models])
 
     def test_a_mark_of_another_version_is_downloaded_again_at_once(self):
         # the table pins a new file: the old one, checked under its own SHA-256, goes now, not after a failed hash
@@ -394,7 +397,7 @@ class Fetch(unittest.TestCase):
         self.dst.with_name("ple.gguf.done").write_text(f"sha256 {hashlib.sha256(old).hexdigest()}")
         self.fetch(b"B" * 1000)
         self.assertEqual(self.dst.read_bytes(), b"B" * 1000)
-        self.assertEqual(self.got, [(f"https://huggingface.co/{ORCA}/resolve/{'1' * 40}/ple.gguf", False)])
+        self.assertEqual(self.got, [(f"https://huggingface.co/{QG}/resolve/{'1' * 40}/ple.gguf", False)])
         self.assertIn(f"sha256 {hashlib.sha256(b'B' * 1000).hexdigest()}", self.dst.with_name("ple.gguf.done").read_text())
         self.assertFalse(self.dst.with_name("ple.gguf.part.sha256").exists())
 
@@ -424,7 +427,7 @@ class Fetch(unittest.TestCase):
         def urlopen(req, timeout=None):
             asked.append(req.full_url)
             raise setup.urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
-        url = f"https://huggingface.co/{ORCA}/resolve/{'1' * 40}/ple.gguf"
+        url = f"https://huggingface.co/{QG}/resolve/{'1' * 40}/ple.gguf"
         with mock.patch.object(setup.urllib.request, "urlopen", urlopen), mock.patch.object(setup.time, "sleep"), \
                 mock.patch("sys.stdout", io.StringIO()) as out, self.assertRaises(SystemExit):
             setup.download(url, self.dst, "ple.gguf", unpinned_ok=False)
@@ -443,11 +446,11 @@ class Fetch(unittest.TestCase):
         part.write_bytes(b"P" * 1000)                      # begun before the other model had it
         want.write_text(sha_)
         repos = {OTHER: {"revision": "2" * 40, "ple": {"ple.gguf": (len(data), sha_)}}}
-        files = [("ple", ORCA, "1" * 40, "ple.gguf", len(data), sha_)]
+        files = [("ple", QG, "1" * 40, "ple.gguf", len(data), sha_)]
         with mock.patch.object(setup, "NVFP4_REPOS", repos), \
                 mock.patch.object(setup, "download", mock.Mock(side_effect=AssertionError("downloaded"))), \
                 mock.patch("sys.stdout", io.StringIO()):
-            setup.nvfp4_fetch(files, {(ORCA, "ple.gguf"): self.dst}, [self.models])
+            setup.nvfp4_fetch(files, {(QG, "ple.gguf"): self.dst}, [self.models])
         self.assertTrue(self.dst.exists())
         self.assertFalse(part.exists())
         self.assertFalse(want.exists())
@@ -488,7 +491,7 @@ class Calibration(unittest.TestCase):
     def test_a_rerun_keeps_the_tuned_settings(self):
         ram, found = PROFILES["128GB-1x24GB"]
         cal = {"settings": {"--pcie-frac": "0.35", "--pool-workers": "6"}, "date": "2026-10-01"}
-        code, out, cfg, _ = run(ram, found, ["--family", "orca-nvfp4", "--no-start"],
+        code, out, cfg, _ = run(ram, found, ["--family", "qwen-nvfp4-gptq", "--no-start"],
                                 extra=[mock.patch.object(setup, "saved_calibration", lambda c: cal)])
         self.assertEqual(code, 0, out[-3000:])
         self.assertEqual((arg(cfg, "--pcie-frac"), arg(cfg, "--pool-workers")), ("0.35", "6"))
@@ -540,11 +543,11 @@ class DryRun(unittest.TestCase):
             other = Path(d) / "Strata-old"
             (other / "models").mkdir(parents=True)
             (other / "setup.py").write_text("")
-            prev = other / "strata-orca-nvfp4.json"
+            prev = other / "strata-qwen-gptq-nvfp4.json"
             prev.write_text(json.dumps({"exe": "x", "args": ["--max-context", "65536", "--kv", "int8"],
-                                        "model_name": "orcarouter-qwen3.8-flash-next-uncensored-nvfp4"}))
-            m = other / "models" / setup.repo_dir(ORCA)
-            for path, (size, digest) in FILLED[ORCA]["pack"].items():
+                                        "model_name": "qwen3.8-flash-next-gptq-nvfp4"}))
+            m = other / "models" / setup.repo_dir(QG)
+            for path, (size, digest) in FILLED[QG]["pack"].items():
                 (m / path).parent.mkdir(parents=True, exist_ok=True)
                 (m / path).write_bytes(b"")
                 setup.mark(m / path, f"sha256 {digest}")
@@ -554,7 +557,7 @@ class DryRun(unittest.TestCase):
                 mock.patch.object(setup, "other_installs", lambda s: [other])])
         self.assertEqual(code, 0, out[-3000:])
         self.assertIn("Found your earlier install", out)
-        self.assertIn("[ok] model: OrcaRouter Qwen3.8-Flash-Next Uncensored (NVFP4)", out)
+        self.assertIn("[ok] model: Qwen3.8-Flash-Next (NVFP4, GPTQ)", out)
         self.assertIn("pack     9 file(s), 69.5 GB", out)
         self.assertIn("(9 already here)", out)             # found in the other folder's models
         self.assertIn("--max-context 65536", " ".join(out.split()))
@@ -566,7 +569,7 @@ class DryRun(unittest.TestCase):
             (m / "ple-fp8-e4m3.gguf").parent.mkdir(parents=True, exist_ok=True)
             (m / "ple-fp8-e4m3.gguf").write_bytes(b"")
             setup.mark(m / "ple-fp8-e4m3.gguf", f"sha256 {sha('ple')}")
-            code, out, _, _ = run(ram, found, ["--family", "orca-nvfp4", "--dry-run", "--models-dir", d],
+            code, out, _, _ = run(ram, found, ["--family", "qwen-nvfp4-gptq", "--dry-run", "--models-dir", d],
                                   extra=[mock.patch.object(setup, "NVFP4_WITHDRAWN", WITHDRAWN)])
         self.assertEqual(code, 0, out[-3000:])
         self.assertIn("ple      1 file(s), 51.2 GB", out)
@@ -585,9 +588,9 @@ class Check(unittest.TestCase):
         ram, found = PROFILES["64GB-1x32GB"]
         code, out, _, _ = run(ram, found, ["--check"])
         self.assertEqual(code, 0, out[-3000:])
-        self.assertIn("orca-nvfp4 fits in the engine's low-RAM mode", " ".join(out.split()))
+        self.assertIn("qwen-nvfp4-gptq fits in the engine's low-RAM mode", " ".join(out.split()))
         code, out, _, _ = run(ram, found, ["--check"], repos=EMPTY)
-        self.assertIn("orca-nvfp4 not offered: not published yet", " ".join(out.split()))
+        self.assertIn("qwen-nvfp4-gptq not offered: not published yet", " ".join(out.split()))
 
 
 class RamRule(unittest.TestCase):
@@ -604,15 +607,15 @@ class RamRule(unittest.TestCase):
         found = [card(0, "NVIDIA GeForce RTX 5090", 31.8, "120")]
         code, out, _, _ = run(95.6, found, ["--check"])
         self.assertEqual(code, 0, out[-3000:])
-        line = next(x for x in out.splitlines() if x.strip().startswith("orca-nvfp4"))
+        line = next(x for x in out.splitlines() if x.strip().startswith("qwen-nvfp4-gptq"))
         self.assertEqual(line.split(None, 1)[1], "fits (all 63 GiB of experts in RAM)")
-        code, out, cfg, _ = run(95.6, found, ["--family", "orca-nvfp4", "--no-start"])
+        code, out, cfg, _ = run(95.6, found, ["--family", "qwen-nvfp4-gptq", "--no-start"])
         self.assertEqual(code, 0, out[-3000:])
         self.assertIn("RAM: 95.6 GiB - all 63 GiB of experts are loaded into RAM", out)
         for flag in ("--low-ram", "--no-low-ram", "--mmap-experts", "--resident-experts", "--ram-budget"):
             self.assertNotIn(flag, cfg["args"])                              # the engine decides the same way
         code, out, _, _ = run(63.7, found, ["--check"])
-        self.assertIn("orca-nvfp4 fits in the engine's low-RAM mode (below 92 GiB", " ".join(out.split()))
+        self.assertIn("qwen-nvfp4-gptq fits in the engine's low-RAM mode (below 92 GiB", " ".join(out.split()))
 
 
 def page_file_os(paging, existing=("\\??\\C:\\pagefile.sys",), volumes=None):
@@ -714,7 +717,7 @@ class PageFile(unittest.TestCase):
         self.assertIn("[!]  WARNING: the page file is too small - INCREASE it to 64000 MB", out)
         tail = out[out.index("This PC can run Strata"):]
         self.assertIn("WARNING: the page file is too small (16000 MB for sure): INCREASE it to 64000 MB, a fixed size", tail)
-        for argv in (["--family", "orca-nvfp4", "--no-start"], ["--family", "orca-nvfp4", "--dry-run"]):
+        for argv in (["--family", "qwen-nvfp4-gptq", "--no-start"], ["--family", "qwen-nvfp4-gptq", "--dry-run"]):
             with self.subTest(argv):
                 code, out, _, _ = run(95.6, found, argv, extra=small)
                 self.assertEqual(code, 0, out[-3000:])
@@ -733,7 +736,8 @@ class PageFile(unittest.TestCase):
 
 class Withdrawn(unittest.TestCase):
     """0.1.41-nvfp4.3: huihui-nvfp4 is not offered any more (it loops in long thinking); an install of it keeps working,
-    every run says so once and names orca-nvfp4, and nothing of it is deleted."""
+    every run says so once and names the replacement (qwen-nvfp4-gptq --uncensored on), and nothing of it is
+    deleted."""
     HCFG = {"exe": "<engine>", "args": ["--pack", "M/huihui/pack", "--max-context", "262144", "--kv", "int8"],
             "model_name": "huihui-qwen3.8-flash-next-abliterated-nvfp4", "port": 8080}
 
@@ -742,7 +746,7 @@ class Withdrawn(unittest.TestCase):
         code, out, cfg, _ = run(ram, found, ["--family", "huihui-nvfp4", "--no-start"])
         self.assertEqual((code, cfg), (1, None))
         self.assertIn("huihui-nvfp4 was withdrawn: it often loops in long thinking", out)
-        self.assertIn("--family orca-nvfp4", out)
+        self.assertIn("--family qwen-nvfp4-gptq", out)
         self.assertNotIn("huihui-nvfp4", " ".join(setup.NVFP4_FAMILIES))
         self.assertNotIn(HUIHUI, setup.NVFP4_REPOS)
 
@@ -755,7 +759,7 @@ class Withdrawn(unittest.TestCase):
         self.assertEqual(started.call_args[0][0].name, "strata-huihui-nvfp4.json")   # its own config, as it was
         self.assertEqual(out.count("huihui-nvfp4 was withdrawn"), 1)
         self.assertIn("keeps working as it is and nothing is deleted", out)
-        self.assertIn("--family orca-nvfp4", out)
+        self.assertIn("--family qwen-nvfp4-gptq", out)
         self.assertEqual(cfg["args"], self.HCFG["args"])
 
     def test_update_keeps_it(self):
@@ -767,13 +771,13 @@ class Withdrawn(unittest.TestCase):
         self.assertEqual(cfg["model_name"], self.HCFG["model_name"])
         self.assertEqual(cfg["args"], self.HCFG["args"])
 
-    def test_a_rerun_offers_orca(self):
-        # --setup on a folder with huihui installed: the default is orca-nvfp4, not upstream's GGUF default
+    def test_a_rerun_offers_the_default(self):
+        # --setup on a folder with huihui installed: the default is qwen-nvfp4-gptq, not upstream's GGUF default
         ram, found = PROFILES["128GB-1x24GB"]
         code, out, cfg, _ = install_with(ram, found, ["--setup", "--no-start"],
                                          configs=[("strata-huihui-nvfp4.json", self.HCFG)])
         self.assertEqual(code, 0, out[-3000:])
-        self.assertEqual(cfg["model_name"], "orcarouter-qwen3.8-flash-next-uncensored-nvfp4")
+        self.assertEqual(cfg["model_name"], "qwen3.8-flash-next-gptq-nvfp4")
 
     def test_it_is_read_back_as_itself(self):
         with tempfile.TemporaryDirectory() as d:
@@ -782,10 +786,10 @@ class Withdrawn(unittest.TestCase):
             ch = setup.choices_from_config(p)
             self.assertEqual((ch["family"], ch["model"]), ("huihui-nvfp4", "NVFP4"))
             self.assertEqual(setup.withdrawn_family(p), "huihui-nvfp4")
-            self.assertIsNone(setup.withdrawn_family(Path(d) / "strata-orca-nvfp4.json"))
+            self.assertIsNone(setup.withdrawn_family(Path(d) / "strata-qwen-gptq-nvfp4.json"))
 
     def test_a_new_copy_is_not_set_up_like_it(self):
-        # an earlier install of huihui in another folder: said, and this copy is set up anew (orca, the default)
+        # an earlier install of huihui in another folder: said, and this copy is set up anew (qwen-nvfp4-gptq, the default)
         ram, found = PROFILES["128GB-1x24GB"]
         with tempfile.TemporaryDirectory() as d:
             other = Path(d) / "Strata-old"
@@ -801,9 +805,9 @@ class Withdrawn(unittest.TestCase):
         self.assertEqual(code, 0, out[-3000:])
         self.assertNotIn("Found your earlier install", out)
         self.assertIn("Your earlier install of it keeps working there", out)
-        self.assertEqual(cfg["model_name"], "orcarouter-qwen3.8-flash-next-uncensored-nvfp4")
+        self.assertEqual(cfg["model_name"], "qwen3.8-flash-next-gptq-nvfp4")
 
-    def test_orca_links_its_ple_table(self):
+    def test_a_withdrawn_install_s_copy_is_linked(self):
         # switching: the PLE table is the same file in both repositories - linked from the huihui install, not fetched
         ram, found = PROFILES["128GB-1x24GB"]
         with tempfile.TemporaryDirectory() as d:
@@ -812,18 +816,159 @@ class Withdrawn(unittest.TestCase):
             (m / "ple-fp8-e4m3.gguf").write_bytes(b"")
             setup.mark(m / "ple-fp8-e4m3.gguf", f"sha256 {sha('ple')}")
             got = []
-            code, out, cfg, _ = run(ram, found, ["--family", "orca-nvfp4", "--no-start", "--models-dir", d],
+            code, out, cfg, _ = run(ram, found, ["--family", "qwen-nvfp4-gptq", "--no-start", "--models-dir", d],
                                     downloads=got, extra=[mock.patch.object(setup, "NVFP4_WITHDRAWN", WITHDRAWN)])
             self.assertTrue((m / "ple-fp8-e4m3.gguf").is_file())                     # the huihui copy stays
         self.assertEqual(code, 0, out[-3000:])
         self.assertIn("ple-fp8-e4m3.gguf: the same file as", out)
         self.assertFalse(any(u.endswith("/ple-fp8-e4m3.gguf") for u in got), got)
-        self.assertIn(f"https://huggingface.co/{ORCA}/resolve/{FILLED[ORCA]['revision']}/pack/experts.bin", got)
+        self.assertIn(f"https://huggingface.co/{QG}/resolve/{FILLED[QG]['revision']}/pack/experts.bin", got)
 
-    def test_the_real_copy_is_the_orca_table_s_ple(self):
-        # the shared file named in NVFP4_WITHDRAWN is the one orca's table pins (the same SHA-256 on the Hub)
-        copy = setup.NVFP4_WITHDRAWN["huihui-nvfp4"]["copies"][HUIHUI]["ple-fp8.gguf"]
-        self.assertEqual(setup.NVFP4_REPOS[ORCA]["ple"]["ple-fp8.gguf"][1], copy)
+
+
+class OrcaWithdrawn(unittest.TestCase):
+    """0.1.41-nvfp4.5: OrcaRouter's abliteration made a much weaker agent; setup no longer offers it, an install of it
+    keeps working and is told why, and the replacement is the original Qwen with --uncensored on."""
+    OCFG = {"exe": "<engine>", "args": ["--pack", "M/orca/pack", "--max-context", "262144", "--kv", "int8"],
+            "model_name": "orcarouter-qwen3.8-flash-next-uncensored-nvfp4", "port": 8080}
+
+    def test_not_offered_and_the_flag_names_the_replacement(self):
+        self.assertNotIn("orca-nvfp4", setup.NVFP4_FAMILIES)
+        self.assertNotIn(ORCA, setup.NVFP4_REPOS)
+        self.assertEqual(setup.NVFP4_DEFAULT, "qwen-nvfp4-gptq")
+        ram, found = PROFILES["128GB-1x24GB"]
+        code, out, cfg, _ = run(ram, found, ["--family", "orca-nvfp4", "--no-start"])
+        self.assertEqual((code, cfg), (1, None))
+        flat = " ".join(out.split())
+        self.assertIn("orca-nvfp4 was withdrawn: its abliteration", flat)
+        self.assertIn("10-70 steps against the original Qwen's 175", flat)
+        self.assertIn("--family qwen-nvfp4-gptq --uncensored on", flat)
+
+    def test_an_install_of_it_keeps_starting(self):
+        ram, found = PROFILES["128GB-1x24GB"]
+        started = mock.Mock(return_value=0)
+        code, out, cfg, _ = install(ram, found, [], configs=[("strata-orca-nvfp4.json", self.OCFG)],
+                                    extra=[mock.patch.object(setup, "start", started)])
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertEqual(started.call_args[0][0].name, "strata-orca-nvfp4.json")
+        self.assertEqual(out.count("orca-nvfp4 was withdrawn"), 1)
+        self.assertIn("keeps working as it is and nothing is deleted", out)
+        self.assertEqual(cfg["args"], self.OCFG["args"])
+
+    def test_a_rerun_offers_the_original(self):
+        ram, found = PROFILES["128GB-1x24GB"]
+        code, out, cfg, _ = install_with(ram, found, ["--setup", "--no-start"],
+                                         configs=[("strata-orca-nvfp4.json", self.OCFG)])
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertEqual(cfg["model_name"], "qwen3.8-flash-next-gptq-nvfp4")
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "strata-orca-nvfp4.json"
+            p.write_text(json.dumps(self.OCFG))
+            self.assertEqual(setup.choices_from_config(p)["family"], "orca-nvfp4")
+            self.assertEqual(setup.withdrawn_family(p), "orca-nvfp4")
+
+
+class Uncensored(unittest.TestCase):
+    """--uncensored on|off: this fork's refusal-direction projection (data/uncensor), off by default, offered for
+    UNCENSOR_FAMILIES only; never for NVIDIA's model.  Upstream's --experimental-speed-projection on|off is its alias
+    for the NVFP4 models."""
+    FLAGS = ["--control-vector-scaled", "--control-vector-layer-range", "--cvec-mode", "--cvec-dir"]
+
+    def cvec(self, cfg):
+        a = cfg["args"]
+        if "--control-vector-scaled" not in a:
+            return None
+        i = a.index("--control-vector-scaled")
+        return a[i:i + 8]
+
+    def test_the_vector_is_shipped(self):
+        self.assertTrue(setup.UNCENSOR_VECTOR.is_file(), setup.UNCENSOR_VECTOR)
+        self.assertEqual(setup.UNCENSOR_VECTOR.parent.name, "uncensor")
+        self.assertTrue((setup.UNCENSOR_VECTOR.parent / "README.md").is_file())
+        self.assertEqual(setup.UNCENSOR_LAYERS, (8, 33))
+        self.assertEqual(setup.UNCENSOR_FAMILIES, ("qwen-nvfp4-gptq",))
+        self.assertIn("qwen-nvidia-nvfp4", setup.UNCENSOR_REFUSED)
+
+    def test_off_by_default(self):
+        ram, found = PROFILES["128GB-1x24GB"]
+        code, out, cfg, asked = run(ram, found, ["--no-start"], answers="")       # Enter on every question
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertTrue(any("Disable censorship? [n]" in q for q in asked), asked)
+        self.assertIsNone(self.cvec(cfg))
+        self.assertNotIn("uncensored", cfg)
+        self.assertIn("censorship: on (the original model)", out)
+        code, out, cfg, _ = run(ram, found, ["--no-start"])                        # --yes: the same
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertIsNone(self.cvec(cfg))
+
+    def test_on_writes_the_flags_and_the_request_default(self):
+        ram, found = PROFILES["128GB-1x24GB"]
+        for argv, answers in ((["--uncensored", "on", "--no-start"], None),
+                              (["--no-start"], {"Disable censorship": "y"}),
+                              (["--experimental-speed-projection", "on", "--no-start"], None)):   # upstream's name
+            with self.subTest(argv=argv, answers=answers):
+                code, out, cfg, _ = run(ram, found, argv, answers=answers)
+                self.assertEqual(code, 0, out[-3000:])
+                self.assertEqual(cfg["model_name"], "qwen3.8-flash-next-gptq-nvfp4")
+                self.assertEqual(self.cvec(cfg), [
+                    "--control-vector-scaled", str(setup.UNCENSOR_VECTOR).replace(chr(92), "/") + ":1.0",
+                    "--control-vector-layer-range", "8", "33", "--cvec-mode", "project", "--cvec-dir"])
+                self.assertEqual(cfg["args"][cfg["args"].index("--cvec-dir") + 1], "per-layer")
+                self.assertIs(cfg["uncensored"], True)
+                self.assertIn("censorship: off (--uncensored on", out)
+        code, out, cfg, _ = run(ram, found, ["--uncensored", "off", "--no-start"])
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertIsNone(self.cvec(cfg))
+
+    def test_the_dry_run_shows_it(self):
+        ram, found = PROFILES["128GB-1x24GB"]
+        code, out, cfg, _ = run(ram, found, ["--family", "qwen-nvfp4-gptq", "--uncensored", "on", "--dry-run"])
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertIn("--cvec-mode project", " ".join(out.split()))
+
+    def test_never_for_nvidia_s_model(self):
+        ram, found = PROFILES["128GB-1x24GB"]
+        for flag in ("--uncensored", "--experimental-speed-projection"):
+            with self.subTest(flag):
+                code, out, cfg, _ = run(ram, found, ["--family", "qwen-nvidia-nvfp4", flag, "on", "--no-start"])
+                self.assertEqual((code, cfg), (1, None))
+                flat = " ".join(out.split())
+                self.assertIn("--uncensored is not available for qwen-nvidia-nvfp4: the NVIDIA Open Model License does "
+                              "not allow bypassing the model's safety guardrails", flat)
+                self.assertIn("--family qwen-nvfp4-gptq --uncensored on", flat)
+        code, out, cfg, asked = run(ram, found, ["--family", "qwen-nvidia-nvfp4", "--no-start"], answers="")
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertFalse(any("censorship" in q for q in asked), asked)         # not even asked
+        self.assertNotIn("--control-vector-scaled", cfg["args"])
+
+    def test_not_for_the_other_weights_or_the_gguf_models(self):
+        ram, found = PROFILES["128GB-1x24GB"]
+        for family, why in (("swift", "Swift 1.5 has other weights"), ("coder", "the Coder has other weights"),
+                            ("qwen", "measured on qwen-nvfp4-gptq only so far")):
+            with self.subTest(family):
+                code, out, cfg, _ = install_with(ram, found, ["--family", family, "--uncensored", "on", "--no-start"])
+                self.assertEqual((code, cfg), (1, None))
+                self.assertIn(f"--uncensored is not available for {family}", out)
+                self.assertIn(why, " ".join(out.split()))
+
+    def test_a_new_copy_keeps_it(self):
+        ram, found = PROFILES["128GB-1x24GB"]
+        with tempfile.TemporaryDirectory() as d:
+            other = Path(d) / "Strata-old"
+            other.mkdir()
+            (other / "setup.py").write_text("")
+            vec = str(other / "data" / "uncensor" / setup.UNCENSOR_VECTOR.name)
+            (other / "strata-qwen-gptq-nvfp4.json").write_text(json.dumps({
+                "exe": "x", "args": ["--max-context", "131072", "--kv", "int8", *setup.uncensor_args(Path(vec))],
+                "uncensored": True}))
+            ch = setup.choices_from_config(other / "strata-qwen-gptq-nvfp4.json")
+            self.assertEqual((ch["family"], ch["uncensored"], ch["esp"]), ("qwen-nvfp4-gptq", "on", "off"))
+            code, out, cfg, _ = run(ram, found, ["--dry-run"], extra=[
+                mock.patch.object(setup, "load_settings", lambda: {"installs": [str(other)]}),
+                mock.patch.object(setup, "other_installs", lambda s: [other])])
+        self.assertEqual(code, 0, out[-3000:])
+        self.assertIn("Found your earlier install", out)
+        self.assertIn("censorship: off (--uncensored on", out)
 
 
 if __name__ == "__main__":

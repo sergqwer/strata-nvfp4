@@ -3629,6 +3629,7 @@ class Service:
     def _run(self, ids, thinking, tools, max_new, sampling, cancel, force=None) -> Iterator[tuple[str, object]]:
         """Yields ("event", Event) as text arrives, then ("done", {"finish": .., "completion_tokens": ..}).
         `force` (forced_call): the opening of the call the reply must make - see prepare()."""
+        sampling = uncensored_alias(sampling)            # "uncensored": the projection's honest name
         defaults = {**self.sampling_defaults, **self.shared}   # the config's, then the Chat settings shared with apps
         if defaults:                   # the request's own fields win (explicit 0 stays greedy)
             req_values = {k: v for k, v in (sampling or {}).items() if v is not None}
@@ -5820,12 +5821,25 @@ SHARED_KEYS = ("reasoning_effort", "reasoning_budget_tokens", "temperature", "to
                "experimental_speed_projection")
 
 
+def uncensored_alias(d):
+    """This fork: `"uncensored": true|false` is the same switch as upstream's `experimental_speed_projection` (the
+    engine's control vector - this fork's refusal-direction projection, setup --uncensored on); the explicit upstream
+    key wins when both are given.  Anything but a bool is left for the key's own check."""
+    if isinstance(d, dict) and isinstance(d.get("uncensored"), bool) and "experimental_speed_projection" not in d:
+        d = {**d, "experimental_speed_projection": d["uncensored"]}
+    return d
+
+
 def clean_shared_defaults(d) -> dict:
     """The Chat settings other apps get (POST /settings): only known keys, each checked; ValueError names a bad one."""
     if d is None:
         return {}
     if not isinstance(d, dict):
         raise ValueError("defaults must be an object")
+    if "uncensored" in d:                                # this fork's name of the projection switch
+        if d["uncensored"] is not None and not isinstance(d["uncensored"], bool):
+            raise ValueError("uncensored: true or false")
+        d = {k: v for k, v in uncensored_alias(d).items() if k != "uncensored"}
     out = {}
     for key, value in d.items():
         if value is None or value == "":
@@ -5910,6 +5924,13 @@ def sampling_defaults_from_config(cfg: dict) -> dict:
                 raise SystemExit(f"[strata] config sampling: both {alias!r} and {canon!r} are set; they are the same "
                                  f"setting, keep one")
             block[canon] = block.pop(alias)
+    if "uncensored" in cfg and "uncensored" not in block:   # this fork: setup --uncensored on writes it here
+        block["uncensored"] = cfg["uncensored"]
+    if "uncensored" in block:
+        if block["uncensored"] is not None and not isinstance(block["uncensored"], bool):
+            raise SystemExit(f"[strata] config uncensored={block['uncensored']!r}: expected true or false (the default "
+                             "for requests that leave it out, when the engine has the projection's vector)")
+        block = {k: v for k, v in uncensored_alias(block).items() if k != "uncensored"}
     for key, value in block.items():
         if value is None:
             continue
