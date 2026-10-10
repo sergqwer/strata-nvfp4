@@ -384,8 +384,10 @@ Tried and dropped:
   original's 1,699. Teacher-forced KL to the original 0.047. Setup no longer offers it; `qwen-nvfp4-gptq` is the
   default, and an install of orca keeps working and is told why on each run (`NVFP4_WITHDRAWN`, the replacement
   `--family qwen-nvfp4-gptq --uncensored on`).
-- **The switch: `--uncensored on`** (off by default; setup asks "Disable censorship?", default no). The engine
-  removes a per-layer refusal direction from every hyper-connection residual stream after layers 8-33
+- **The switch** (off by default). For `qwen-nvfp4-gptq` setup always loads the vector and writes `"uncensored":
+  false` into `strata-<model>.json`; the question "Disable censorship?" (default no; `--uncensored on|off`) only
+  sets that default, so the web app's switch works without running setup again. On, the engine removes a
+  per-layer refusal direction from every hyper-connection residual stream after layers 8-33
   (`--control-vector-scaled data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0 --control-vector-layer-range 8 33
   --cvec-mode project --cvec-dir per-layer`): upstream's experimental speed projection mechanism, with this fork's
   vector. The engine is unchanged. The vector is the difference of the residual means of 320 harmful and 320
@@ -408,13 +410,26 @@ Tried and dropped:
   safety guardrails, so setup refuses `--uncensored on` there with that reason (`UNCENSOR_REFUSED`), and not Swift
   1.5 or the Coder, which have other weights. Upstream's `--experimental-speed-projection on|off` is an alias for the
   NVFP4 models; for the GGUF Qwen models it stays upstream's own option with upstream's vector.
-- **Per request:** setup writes `"uncensored": true` into `strata-<model>.json` beside the flags, the default for
-  requests. The server reads `"uncensored": true|false` per request, in the config (top level or the sampling block)
-  and in the Chat settings shared with apps, as upstream's `experimental_speed_projection` (which wins when both are
-  given). The web app's switch is "Disable censorship" in Sampling, and the About tab says the projection is loaded.
-- **Checks:** the engine is 0.1.41-nvfp4.3's (1217e500). Tests: setup's and the table's 506 OK (orca withdrawn, the
-  default, the switch for each family, the read-back of an install), the server's 605 OK (13 skipped; the
-  `uncensored` alias's 4 among them).
+- **Per request:** the server reads `"uncensored": true|false` per request, in the config (top level, as setup
+  writes it, or the sampling block) and in the Chat settings shared with apps, as upstream's
+  `experimental_speed_projection` (which wins when both are given), and reports the default in `/metrics`
+  (`engine.uncensored_default`). The web app's switch is "Disable censorship" in Sampling; it starts at that
+  default (upstream's started on whenever a vector was loaded) and sends the field only once you pick a side. The
+  About tab says the projection is loaded.
+- **Off costs nothing measurable and changes no bit.** A request sends `cvec=0`; the kernel then skips the
+  projection (`steer` false: no dot product, no reduction, no update) and only applies the layer's pending residual
+  write, with the fused read's own arithmetic, so the result is the engine's without a vector, bit for bit
+  (`cvec_parity`). The covered layers keep that write in this one kernel instead of the next layer's fused read: 26
+  small launches a window. With it on, the same tokens cost 0.2-0.4% (upstream's measurement of its vector).
+- **The Windows bundle** downloads `qwen-nvfp4-gptq` ready-made instead of converting orca's ModelOpt checkpoint:
+  `prepare-model.cmd` runs `tools/bundle_model.py`, which fetches the files `model-files.json` lists (made from
+  setup.py's table, the same repository, revision and SHA-256s, and the image encoder) and checks each one. Its
+  config loads the vector off (`"uncensored": false`). A bundle from before keeps starting orca from its own config
+  until the new model is downloaded.
+- **Checks:** the engine is 0.1.41-nvfp4.3's (1217e500). Tests: setup's and the table's 507 OK (orca withdrawn,
+  the default, the switch loaded and off for qwen-nvfp4-gptq, none for the refused families, the read-back of an
+  install), the bundle's 21 OK (`model-files.json` = setup's table, the config, the download), the server's 606 OK
+  (13 skipped; the `uncensored` alias and its default among them).
 
 ### The original Qwen in NVFP4 (2026-10-09, release 0.1.41-nvfp4.4)
 

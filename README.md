@@ -8,7 +8,7 @@ models are still offered.
 
 **The models on Hugging Face** (setup downloads them; each card has the measurements and how to run the files by hand):
 - [Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata):
-  the original Qwen, our GPTQ (`--family qwen-nvfp4-gptq`, the default; `--uncensored on` turns its censorship off)
+  the original Qwen, our GPTQ (`--family qwen-nvfp4-gptq`, the default; with a switch that turns its censorship off)
 - [Maximilian228/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Strata):
   the original Qwen, censored, NVIDIA's NVFP4 converted (`--family qwen-nvidia-nvfp4`)
 
@@ -44,21 +44,24 @@ page).
   ([The original Qwen in NVFP4](docs/NVFP4.md#the-original-qwen-in-nvfp4-2026-10-09-release-0141-nvfp44)).
 - **`qwen-nvfp4-gptq` is the default** where the PC meets the [requirements](#requirements); a PC below them gets a
   GGUF model as the default, and `--family qwen-nvfp4-gptq --yes` installs it anyway.
-- **Disable censorship (`--uncensored on`, off by default):** for `qwen-nvfp4-gptq` setup asks "Disable
-  censorship?" (default no). On, the engine removes the model's refusal direction from its residual stream after
-  layers 8-33, with this fork's control vector ([data/uncensor](data/uncensor/README.md)): with thinking on, 0 of 104
+- **Disable censorship (off by default):** for `qwen-nvfp4-gptq` setup always loads this fork's refusal-direction
+  projection ([data/uncensor](data/uncensor/README.md)) and leaves it off: the web app's "Disable censorship"
+  switch (Sampling) and the API field `"uncensored": true` turn it on for a request, and setup's question "Disable
+  censorship?" (default no; `--uncensored on|off`) sets the default, `"uncensored"` in `strata-<model>.json`. Off,
+  a request runs the original model. On, the engine removes the model's refusal direction from its residual stream
+  after layers 8-33: with thinking on, 0 of 104
   English and 0 of 30 Ukrainian held-out harmful requests refused (the original refuses almost all), KL 0.026 to the
   original, and its thinking as long as the original's (1,947 against 1,699 tokens on a long Claude Code request,
-  log p(`</think>`) +0.019 nats). The web app's "Disable censorship" switch and the API field `"uncensored": false`
-  turn it off for a request (upstream's `experimental_speed_projection` is the same switch). Never for
-  `qwen-nvidia-nvfp4`: the NVIDIA Open Model License does not allow bypassing its safety guardrails. The vector is
+  log p(`</think>`) +0.019 nats). Upstream's `experimental_speed_projection` is the same switch. Never for
+  `qwen-nvidia-nvfp4`, where nothing is loaded: the NVIDIA Open Model License does not allow bypassing its safety
+  guardrails. The vector is
   under the Qwen Community License 1.0; removing refusals removes a safety behaviour, and what the model writes with
   it on is your responsibility.
 - **`orca-nvfp4` was withdrawn in 0.1.41-nvfp4.5: a much weaker agent.** OrcaRouter's abliteration edits all 149
   residual writers of the model. On the same Claude Code task it ran 10-70 steps against the original Qwen's 175,
   with a clearly worse result, and it ends its thinking sooner (log p(`</think>`) +0.119 nats; ~1,000-1,150 thinking
-  tokens on the long request against the original's ~1,700). `--uncensored on` gets the uncensored model with the
-  original's weights instead. An install of `orca-nvfp4` keeps working and nothing of it is deleted; setup says so
+  tokens on the long request against the original's ~1,700). `qwen-nvfp4-gptq` with its censorship switch on is
+  the uncensored model with the original's weights instead. An install of `orca-nvfp4` keeps working and nothing of it is deleted; setup says so
   on each run.
 - **`huihui-nvfp4` was withdrawn in 0.1.41-nvfp4.3: it often loops in long thinking** (9 of 10 greedy replays of a
   real 72K-token Claude Code request, on this engine and on 0.1.40.3's; the other models none of 5). An install of it
@@ -70,13 +73,13 @@ page).
   setup compiles one on Linux; on Windows build it first with `tools\hip\build_windows.bat`, then run
   `START-HERE.bat --backend hip --prebuilt <its dist folder>` ([docs/AMD_HIP.md](docs/AMD_HIP.md)).
 - **Options:** `--family qwen-nvidia-nvfp4` picks a model without the menu, `--uncensored on|off` answers the
-  censorship question, `--check` says what fits this PC, `--dry-run`
+  censorship question (the switch's default), `--check` says what fits this PC, `--dry-run`
   shows what setup would download, install and write for an NVFP4 model (the engine's arguments too) and changes
   nothing.
 - **Updates:** `UPDATE.bat` (`./update.sh`) runs `git pull`, then installs the engine the new version needs; the
   model files stay. The release also has a stand-alone Windows bundle (`strata-nvfp4-v<version>-windows-x64.zip`) that
-  updates itself with `update.cmd`; its `prepare-model.cmd` converts jpezzulli's ModelOpt checkpoint on the PC
-  instead of installing the GPTQ packs.
+  updates itself with `update.cmd`; its `prepare-model.cmd` downloads `qwen-nvfp4-gptq` ready-made, the files and
+  revision setup pins, with the same censorship switch, off by default.
 
 ## Requirements
 
