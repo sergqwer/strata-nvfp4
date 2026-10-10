@@ -336,7 +336,7 @@ function renderMonitor(live, hw, st, eng, h, last, requests, totals, kept) {
     body.innerHTML = requests.slice(0, reqShowAll ? requests.length : 12).map((r) => {
       const [cls, text] = badge[r.finish] || ["", r.finish || "–"];
       const t = new Date(r.time * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
-      const proj = r.projection == null ? "" : ` <span class="st-badge${r.projection ? " st-badge--reading" : ""}" title="experimental speed projection ${r.projection ? "on" : "off"}">${r.projection ? "ESP" : "stock"}</span>`;
+      const proj = r.projection == null ? "" : ` <span class="st-badge${r.projection ? " st-badge--reading" : ""}" title="censorship ${r.projection ? "off (the refusal-direction projection)" : "on (the original model)"}">${r.projection ? "uncensored" : "stock"}</span>`;
       // #588: the VRAM share; the PCIe share (--pcie-frac) beside it when there is one
       const hit = r.hit_rate == null ? "–" : `${(r.hit_rate * 100).toFixed(1)}%` +
         (r.pcie_share ? ` <span class="muted" title="routed experts the GPU read over PCIe (--pcie-frac) or another GPU computed">+${(r.pcie_share * 100).toFixed(1)}% PCIe</span>` : "");
@@ -366,8 +366,8 @@ function projectionText(c) {
   const [mode, range, single] = String(c).split(":");
   const [a, b] = (range || "").split("-");
   return `${mode === "project" ? "Projection" : "Additive"} control vector on layers ${a}–${b}` +
-         `${single ? ` (layer ${single.replace("single", "")}'s direction)` : ""}. Per chat in Sampling. Its package ` +
-         "describes the vector as a refusal-direction projection; measure the speed yourself";
+         `${single ? ` (layer ${single.replace("single", "")}'s direction)` : ""}: a refusal-direction projection, so ` +
+         "censorship is off while it is on. Per chat in Sampling (Disable censorship); the API field is \"uncensored\"";
 }
 function renderAbout(eng, hw, st) {
   const kv = {int8: "8-bit", q4_0: "4-bit (Hadamard-rotated)", fp16: "16-bit"}[eng.kv] || eng.kv;
@@ -379,7 +379,7 @@ function renderAbout(eng, hw, st) {
     ["Experts in VRAM", eng.expert_slots ? `${fmt(eng.expert_slots)} (${gb((eng.expert_cache_mib || 0) * 1048576)} GB)` : null],
     ["Speculation", eng.spec ? `MTP drafts up to ${Math.max(0, (eng.mtp_max || eng.spec) - 1)} tokens${eng.lookup ? ", prompt lookup on" : ""}` : null],
     ["Images", eng.images ? "on" : "off"],
-    ["Experimental speed projection", projectionText(eng.cvec)],
+    ["Disable censorship", projectionText(eng.cvec)],
   ]);
   facts($("facts-hw"), [
     ["GPU", st.gpu_name ? `${st.gpu_name}${hw.gpu_mem_total ? `, ${gb(hw.gpu_mem_total, 0)} GB` : ""}` : (st.gpu_note || "not readable (NVML)")],
@@ -852,7 +852,7 @@ async function send() {
   if (n && firstAt) {
     const secs = (performance.now() - firstAt) / 1000;
     m.meta = `${fmt(n)} tokens${secs > 0.25 ? ` · ${fmt(n / secs, 1)} tok/s` : ""}${m.stopped ? " · stopped" : ""}` +
-             (projectionLoaded() ? (settings.esp ? " · projection on" : " · projection off") : "");
+             (projectionLoaded() ? (settings.esp ? " · uncensored" : " · censored") : "");
   } else if (m.stopped) {
     m.meta = "Stopped";
   }
