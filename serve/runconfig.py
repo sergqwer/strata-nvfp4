@@ -22,6 +22,11 @@ EDITABLE = [
     ("sampling.top_p", ("sampling", "0<x<=1"), "Default top_p for requests that send none"),
     ("sampling.top_k", ("sampling", "1..64"), "Default top_k for requests that send none (1-64)"),
     ("sampling.min_p", ("sampling", "0<=x<=1"), "Default min_p for requests that send none"),
+    # this fork: the censorship switch's default (setup writes it beside the refusal projection it loads)
+    ("uncensored", "bool",
+     "Disable censorship by default: the refusal projection (layers 8-33) on for requests that do not say; a chat's "
+     "Disable censorship switch or the API field \"uncensored\" still decide per request. Only where setup loaded "
+     "it (the original Qwen), never for NVIDIA's model"),
     ("reasoning_budget_tokens", "int>=0", "Cap the thinking of every request at this many tokens (0 or empty: no cap)"),
     ("fit_max_tokens", "bool", "Shorten a max_tokens that does not fit the context instead of answering 400"),
     ("anthropic_thinking", ("enum", ["model", "on_request"]),
@@ -38,6 +43,15 @@ EDITABLE = [
      "VRAM in MiB the engine leaves free for other programs (engine default 700)"),
 ]
 SPEC = {k: kind for k, kind, _ in EDITABLE}
+NO_PROJECTION = ("this model loads no refusal projection (--control-vector-scaled): setup loads it for the original "
+                 "Qwen's families only, never for NVIDIA's model (its license does not allow bypassing the model's "
+                 "safety guardrails), nor for Swift 1.5 or the Coder")
+
+
+def has_projection(cfg: dict) -> bool:
+    """The engine is started with a control vector (the censorship switch's refusal projection)."""
+    a = cfg.get("args") if isinstance(cfg.get("args"), list) else []
+    return any(str(x) in ("--control-vector-scaled", "--control-vector") for x in a)
 
 
 def _arg(cfg: dict, flag: str):
@@ -63,9 +77,11 @@ def view(cfg: dict, path: str | Path) -> dict:
     out = []
     for key, kind, help_ in EDITABLE:
         k = kind[0] if isinstance(kind, tuple) else kind
-        out.append({"key": key, "value": value_of(cfg, key), "help": help_,
+        off = key == "uncensored" and not has_projection(cfg)   # nothing to switch: shown, not settable
+        out.append({"key": key, "value": value_of(cfg, key), "help": help_ + (f" - not available: {NO_PROJECTION}"
+                                                                                 if off else ""),
                     "kind": "number" if k in ("sampling", "arg", "int>=0", "num>=0") else k,
-                    **({"choices": kind[1]} if k == "enum" else {})})
+                    **({"choices": kind[1]} if k == "enum" else {}), **({"available": False} if off else {})})
     return {"file": Path(path).name, "keys": out,
             "note": "Saved to the run config; used from the next start of the model."}
 
@@ -91,6 +107,8 @@ def check(key: str, v, cfg: dict):
             raise ValueError(f"{key}: expected true or false, not {v!r}")
         if key == "lazy_load" and v and cfg.get("vision"):
             raise ValueError("lazy_load: lazy loading is text-only, and this model reads images (\"vision\")")
+        if key == "uncensored" and v and not has_projection(cfg):
+            raise ValueError(f"uncensored: {NO_PROJECTION}")
         return v
     if k == "enum":
         if v not in kind[1]:
