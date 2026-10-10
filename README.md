@@ -54,8 +54,9 @@ page).
   English and 0 of 30 Ukrainian held-out harmful requests refused (the original refuses almost all), KL 0.026 to the
   original, and its thinking as long as the original's (1,947 against 1,699 tokens on a long Claude Code request,
   log p(`</think>`) +0.019 nats). On the GGUFs, against each quant's own stock model (measured on Q2_0, IQ2_XS and
-  UD-Q4_K_XL): thinking-on refusals 1, 0 and 0 of 104, KL 0.016-0.017 (Q2_0, IQ2_XS), log p(`</think>`) +0.027 to
-  +0.040 on Q2_0 (upstream's vector +0.087 to +0.149); it replaces upstream's speed projection there. IQ2_XS loops
+  UD-Q4_K_XL): thinking-on refusals 1, 0 and 0 of 104, KL 0.016, 0.017 and 0.028, log p(`</think>`) +0.027 to
+  +0.040 on Q2_0 and +0.050 on UD-Q4_K_XL's thinking (upstream's vector +0.087 to +0.149 and +0.163); the same
+  vector, unchanged, on all three. It replaces upstream's speed projection there. IQ2_XS loops
   in long greedy agentic thinking by itself (3 of 3 replays of the long request, with the switch on or off): choose
   another size for agents. Upstream's `experimental_speed_projection` is the same switch. Never for
   `qwen-nvidia-nvfp4`, where nothing is loaded: the NVIDIA Open Model License does not allow bypassing its safety
