@@ -74,6 +74,8 @@ class Case(unittest.TestCase):
                 mock.patch.object(setup, "download", download),
                 mock.patch.object(setup, "engine_digest", lambda asset, base: None),
                 mock.patch.object(setup, "gpu_info", lambda *a: {"arch": self.arch, "name": "X", "vram_gb": 24.0}),
+                # 0.1.42 (#1485): an update picks its card from gpus() (the installed models' cards first)
+                mock.patch.object(setup, "gpus", lambda *a: [{"index": 0, "arch": self.arch, "name": "X", "vram_gb": 24.0}]),
                 mock.patch.object(setup, "pip_cuda_libs", lambda tk=13: self.pip.append(tk))]
 
     def starts(self, n=3, toolkit=None) -> str:
