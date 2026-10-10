@@ -2,15 +2,13 @@
 
 **Qwen3.8-Flash-Next (125B hybrid MoE) with NVFP4 experts on one RTX 20, 30, 40 or 50 card (12 GB of VRAM or more)
 and 64 GB of RAM or more, text and pictures.** A fork of [Niko1221/Strata](https://github.com/Niko1221/Strata), on
-upstream 0.1.41. Setup installs, ready-made from Hugging Face, our GPTQ NVFP4 quant of OrcaRouter's abliterated
-Flash-Next and the original, censored Qwen in NVFP4 (NVIDIA's checkpoint converted, or our GPTQ); upstream's GGUF
+upstream 0.1.41. Setup installs, ready-made from Hugging Face, the original Qwen in NVFP4 (our GPTQ, or NVIDIA's
+checkpoint converted), censored as Qwen ships it; on ours an opt-in switch turns the censorship off. Upstream's GGUF
 models are still offered.
 
 **The models on Hugging Face** (setup downloads them; each card has the measurements and how to run the files by hand):
-- [Maximilian228/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-NVFP4-GPTQ-Strata](https://huggingface.co/Maximilian228/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-NVFP4-GPTQ-Strata):
-  uncensored, our GPTQ (`--family orca-nvfp4`, the default)
 - [Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata):
-  the original Qwen, censored, our GPTQ (`--family qwen-nvfp4-gptq`)
+  the original Qwen, our GPTQ (`--family qwen-nvfp4-gptq`, the default; `--uncensored on` turns its censorship off)
 - [Maximilian228/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Strata):
   the original Qwen, censored, NVIDIA's NVFP4 converted (`--family qwen-nvidia-nvfp4`)
 
@@ -33,38 +31,46 @@ page).
 
 | `--family` | the model | license |
 | --- | --- | --- |
-| `orca-nvfp4` (the default) | [OrcaRouter's uncensored Qwen3.8-Flash-Next](https://huggingface.co/OrcaRouter/Qwen3.8-Flash-Next-Uncensored), every expert NVFP4 by GPTQ: [Maximilian228/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-NVFP4-GPTQ-Strata](https://huggingface.co/Maximilian228/OrcaRouter-Qwen3.8-Flash-Next-Uncensored-NVFP4-GPTQ-Strata) | Qwen Community License 1.0 (the LICENSE OrcaRouter ships; its card says Apache 2.0) |
+| `qwen-nvfp4-gptq` (the default) | the original [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next), every expert NVFP4 by our GPTQ; censored unless `--uncensored on`: [Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata) | Qwen Community License 1.0 |
 | `qwen-nvidia-nvfp4` | **NVIDIA's** NVFP4 of the original, censored Qwen3.8-Flash-Next ([nvidia/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4), ModelOpt), converted for Strata with its experts bit for bit: [Maximilian228/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Strata) | NVIDIA Open Model License and the Qwen Community License 1.0 |
-| `qwen-nvfp4-gptq` | the original, censored [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next), every expert NVFP4 by our GPTQ: [Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata) | Qwen Community License 1.0 |
 | `qwen`, `swift`, `coder`, `unsloth` | upstream Strata's GGUF models: ISTA-DASLab's GSQ-RCO quants of Qwen3.8-Flash-Next, Swift 1.5 and the Coder, Unsloth's ~4-bit files | as upstream lists them |
 
-- **The NVFP4 model comes ready-made:** the expert pack, the dense GGUF, the FP8 n-gram table, the BF16 embedding
-  and the fine-tune's own MTP draft head are downloaded at a pinned revision and checked against their SHA-256;
-  nothing is converted on your PC. Every routed expert is NVFP4, re-quantized from the BF16 checkpoint by GPTQ: as
-  large and as fast as plain rounding to the nearest value (ModelOpt's NVFP4), with about 33% of its error
-  ([Re-quantized from BF16](docs/NVFP4.md#re-quantized-from-bf16-2026-10-02-release-0132-nvfp42), and its model
-  card).
-- **`orca-nvfp4` is the default** where the PC meets the [requirements](#requirements); a PC below them gets a GGUF
-  model as the default, and `--family orca-nvfp4 --yes` installs it anyway.
-- **The original Qwen, censored (0.1.41-nvfp4.4):** `qwen-nvidia-nvfp4` is NVIDIA's own NVFP4 checkpoint, quantized
-  by NVIDIA and only converted here; its license does not allow bypassing its safety guardrails. `qwen-nvfp4-gptq` is
-  our GPTQ of Qwen's BF16: 33.3% of plain rounding's error and 44.8% of NVIDIA's (NVIDIA's own is 74.4% of plain
-  rounding's), lower in all 48 layers, at the same size and speed (179 against 175 tokens/s). They share the n-gram table, the embedding and the
-  draft head: the second one links them instead of downloading them again
+- **The NVFP4 models come ready-made:** the expert pack, the dense GGUF, the FP8 n-gram table, the BF16 embedding
+  and the MTP draft head are downloaded at a pinned revision and checked against their SHA-256; nothing is converted
+  on your PC. `qwen-nvfp4-gptq`'s routed experts are NVFP4 by our GPTQ from Qwen's BF16: 33.3% of plain rounding's
+  error and 44.8% of NVIDIA's (NVIDIA's own is 74.4% of plain rounding's), lower in all 48 layers, at the same size
+  and speed (179 against 175 tokens/s). `qwen-nvidia-nvfp4` is NVIDIA's own checkpoint, quantized by NVIDIA and only
+  converted here. The two share the n-gram table, the embedding and the draft head: the second one links them
   ([The original Qwen in NVFP4](docs/NVFP4.md#the-original-qwen-in-nvfp4-2026-10-09-release-0141-nvfp44)).
-- **`huihui-nvfp4` was withdrawn in 0.1.41-nvfp4.3: it often loops in long thinking.** A real Claude Code request
-  (a 72K-token prompt, adaptive thinking at effort xhigh), replayed greedy, looped in its thinking in 9 of 10 runs, on
-  this engine and on 0.1.40.3's, and in 2 of 5 with Qwen's sampling; `orca-nvfp4` (the GPTQ pack setup installs)
-  and our Q8_0-down orca pack looped in none of 5 each. So it is the model, not the engine. An install of
-  `huihui-nvfp4` keeps working and nothing of it is deleted; setup says so on each run and names
-  `--family orca-nvfp4` (which links the PLE table it shares instead of downloading it again).
+- **`qwen-nvfp4-gptq` is the default** where the PC meets the [requirements](#requirements); a PC below them gets a
+  GGUF model as the default, and `--family qwen-nvfp4-gptq --yes` installs it anyway.
+- **Disable censorship (`--uncensored on`, off by default):** for `qwen-nvfp4-gptq` setup asks "Disable
+  censorship?" (default no). On, the engine removes the model's refusal direction from its residual stream after
+  layers 8-33, with this fork's control vector ([data/uncensor](data/uncensor/README.md)): with thinking on, 0 of 104
+  English and 0 of 30 Ukrainian held-out harmful requests refused (the original refuses almost all), KL 0.026 to the
+  original, and its thinking as long as the original's (1,947 against 1,699 tokens on a long Claude Code request,
+  log p(`</think>`) +0.019 nats). The web app's "Disable censorship" switch and the API field `"uncensored": false`
+  turn it off for a request (upstream's `experimental_speed_projection` is the same switch). Never for
+  `qwen-nvidia-nvfp4`: the NVIDIA Open Model License does not allow bypassing its safety guardrails. The vector is
+  under the Qwen Community License 1.0; removing refusals removes a safety behaviour, and what the model writes with
+  it on is your responsibility.
+- **`orca-nvfp4` was withdrawn in 0.1.41-nvfp4.5: a much weaker agent.** OrcaRouter's abliteration edits all 149
+  residual writers of the model. On the same Claude Code task it ran 10-70 steps against the original Qwen's 175,
+  with a clearly worse result, and it ends its thinking sooner (log p(`</think>`) +0.119 nats; ~1,000-1,150 thinking
+  tokens on the long request against the original's ~1,700). `--uncensored on` gets the uncensored model with the
+  original's weights instead. An install of `orca-nvfp4` keeps working and nothing of it is deleted; setup says so
+  on each run.
+- **`huihui-nvfp4` was withdrawn in 0.1.41-nvfp4.3: it often loops in long thinking** (9 of 10 greedy replays of a
+  real 72K-token Claude Code request, on this engine and on 0.1.40.3's; the other models none of 5). An install of it
+  keeps working too.
 - **The engine is always this fork's:** on Windows the ready-made one from this repository's releases
   (`strata-windows-x64.zip`, checked against GitHub's SHA-256), on Linux compiled from this source. Upstream's engine
   has no NVFP4 path, so setup never installs it and replaces one an older setup installed.
-- **AMD cards:** the NVFP4 model runs on NVIDIA cards only, and this fork publishes no AMD engine. For the GGUF models
+- **AMD cards:** the NVFP4 models run on NVIDIA cards only, and this fork publishes no AMD engine. For the GGUF models
   setup compiles one on Linux; on Windows build it first with `tools\hip\build_windows.bat`, then run
   `START-HERE.bat --backend hip --prebuilt <its dist folder>` ([docs/AMD_HIP.md](docs/AMD_HIP.md)).
-- **Options:** `--family orca-nvfp4` picks a model without the menu, `--check` says what fits this PC, `--dry-run`
+- **Options:** `--family qwen-nvidia-nvfp4` picks a model without the menu, `--uncensored on|off` answers the
+  censorship question, `--check` says what fits this PC, `--dry-run`
   shows what setup would download, install and write for an NVFP4 model (the engine's arguments too) and changes
   nothing.
 - **Updates:** `UPDATE.bat` (`./update.sh`) runs `git pull`, then installs the engine the new version needs; the
@@ -120,7 +126,7 @@ page).
 ## Speed
 
 RTX 5090 (32 GB, PCIe 5 x16), Ryzen 9 9950X3D, DDR5-5600, Samsung 9100 PRO, Windows 11. Measured with `huihui-nvfp4`
-(withdrawn since; `orca-nvfp4` has the same format and size) and the arguments setup writes (262K context, int8 K/V,
+(withdrawn since; the original Qwen's packs have the same format and size) and the arguments setup writes (262K context, int8 K/V,
 images on). The card also drives the desktop, so runs vary by a few
 percent.
 
@@ -180,9 +186,9 @@ Each change was measured (first-token KL against a reference, interleaved speed 
 ## Run
 
 Setup writes `strata-<family>.json` (the server's config: the engine and its arguments) and `run-<family>.bat`
-(`.sh`) next to `setup.py`. `START-HERE.bat` starts the installed model again without questions; `run-orca-nvfp4.bat`
+(`.sh`) next to `setup.py`. `START-HERE.bat` starts the installed model again without questions; `run-qwen-gptq-nvfp4.bat`
 starts the server with that config without setup's checks (`serve/server.py --engine strata --config
-strata-orca-nvfp4.json --port 8080`). A key or an `"env"` entry you add to the config stays when setup runs again;
+strata-qwen-gptq-nvfp4.json --port 8080`). A key or an `"env"` entry you add to the config stays when setup runs again;
 engine flags added to its `"args"` by hand do not.
 
 **Images:** answer yes to setup's question (or `--vision yes`). The image encoder runs on the CPU while the engine
