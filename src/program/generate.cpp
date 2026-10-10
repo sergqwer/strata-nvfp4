@@ -9572,6 +9572,14 @@ int main(int argc, char** argv) {
                 continue;
             }
             const int64_t n = (int64_t) ids.size();
+            if (strata::core::resid_dump_enabled()) {   // STRATA_RESID_DUMP: this request's last prompt positions
+                static int32_t rd_req = 0;
+                static const int64_t rd_last = [] {
+                    const char* e = std::getenv("STRATA_RESID_DUMP_LAST");
+                    return e != nullptr ? std::max<int64_t>(1, std::atoll(e)) : (int64_t) 8;
+                }();
+                strata::core::resid_dump_range(n - rd_last, n, rd_req++);
+            }
             req_imgs.clear();
             if (geni && !o.vision) { std::printf("ERR this engine was started without --vision\n"); continue; }
             if (geni || !mrope_identity) {

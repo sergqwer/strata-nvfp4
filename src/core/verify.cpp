@@ -224,6 +224,25 @@ bool native_of(const WeightRef* w, const std::string& name, std::string& err) {
 
 }  // namespace
 
+// STRATA_RESID_DUMP (see verify.hpp): the file and the position range of the current request
+namespace {
+std::FILE* rdump_file() {
+    static std::FILE* f = [] {
+        const char* p = std::getenv("STRATA_RESID_DUMP");
+        return p != nullptr && p[0] != '\0' ? std::fopen(p, "ab") : nullptr;
+    }();
+    return f;
+}
+std::atomic<int64_t> g_rdump_lo{0}, g_rdump_hi{0};
+std::atomic<int32_t> g_rdump_req{-1};
+}  // namespace
+bool resid_dump_enabled() { return rdump_file() != nullptr; }
+void resid_dump_range(int64_t lo, int64_t hi, int32_t req) {
+    g_rdump_lo.store(lo);
+    g_rdump_hi.store(hi);
+    g_rdump_req.store(req);
+}
+
 namespace {
 std::atomic<const Verifier*> g_diag_verifier{nullptr};
 void diag_active_verifier(std::FILE* f) {
@@ -688,6 +707,15 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
                              cudaMemcpyHostToDevice) == cudaSuccess;
         }
         if (!ok2) { cudaGetLastError(); all_resident_ = false; device_plan_ = false; }
+    }
+    if (resid_dump_enabled() && le_ == g.n_layers && lb_ == 0) {   // STRATA_RESID_DUMP: one GPU, the whole model
+        const size_t fl = (size_t) g.n_layers * (size_t) max_t * HC * N;
+        if (cudaMalloc((void**) &rdump_, fl * sizeof(float)) != cudaSuccess ||
+            cudaMemset(rdump_, 0xff, fl * sizeof(float)) != cudaSuccess) {   // 0xffffffff: NaN, a layer never copied
+            err = "verify: STRATA_RESID_DUMP buffer";
+            return false;
+        }
+        std::fprintf(stderr, "strata verify: STRATA_RESID_DUMP on (%.1f MiB)\n", (double) (fl * sizeof(float)) / 1048576.0);
     }
     std::fprintf(stderr, "strata verify: window up to %d tokens, %.1f MiB of device buffers%s\n", max_t,
                  (double) count.used / 1048576.0,
@@ -1549,6 +1577,10 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
         } else if (cvec().covers(l)) {
             cvec_apply(Rt(tb), l, n, HC * N, bo_ + tb * N, N, inj2_ + tb * HC, HC, true, cs);
         }
+        // STRATA_RESID_DUMP: R holds this layer's output (after the vector) only where the write was not deferred
+        if (rdump_ != nullptr && (l == g.n_layers - 1 ? !fuse_head_gr : cvec().covers(l)))
+            cudaMemcpyAsync(rdump_ + ((size_t) l * (size_t) max_t_ + (size_t) tb) * (size_t) (HC * N), Rt(tb),
+                            (size_t) n * (size_t) (HC * N) * sizeof(float), cudaMemcpyDeviceToDevice, cs);
         return true;
     };
 
@@ -2150,6 +2182,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
             return false;
         }
     }
+    if (rdump_ != nullptr) resid_dump_window(T, tokens, pos0);
     for (int t = 0; t < T; ++t) out[t] = ((volatile int32_t*) h_out_)[t];
     // debug: the first non-finite head (STRATA_DBG_NAN_VERIFY: this check alone, without the prompt path's)
     static const bool dbg = std::getenv("STRATA_DBG_NAN") != nullptr || std::getenv("STRATA_DBG_NAN_VERIFY") != nullptr;
@@ -2938,6 +2971,29 @@ int Verifier::batch_poll(PoolMultiFn pool, void* user, std::string& err) {
     b_running_ = false;
     progress_beat();
     return 1;
+}
+
+// STRATA_RESID_DUMP: a record per row at a position in [lo, hi): int32 {0x504d4452 'RDMP', req, pos, token,
+// n_layers, hc, n_embd, 0}, then n_layers x hc x n_embd f32 (NaN rows: layers whose output R does not hold)
+void Verifier::resid_dump_window(int T, const int32_t* tokens, int64_t pos0) {
+    std::FILE* f = rdump_file();
+    const int64_t lo = g_rdump_lo.load(), hi = g_rdump_hi.load();
+    if (f == nullptr || pos0 >= hi || pos0 + T <= lo) return;
+    const ModelGeometry& g = *g_;
+    const size_t row = (size_t) g.hc * (size_t) g.n_embd;
+    std::vector<float> h((size_t) g.n_layers * row);
+    for (int t = 0; t < T; ++t) {
+        const int64_t pos = pos0 + t;
+        if (pos < lo || pos >= hi) continue;
+        for (int64_t l = 0; l < g.n_layers; ++l)
+            cudaMemcpy(h.data() + (size_t) l * row, rdump_ + ((size_t) l * (size_t) max_t_ + (size_t) t) * row,
+                       row * sizeof(float), cudaMemcpyDeviceToHost);
+        const int32_t hdr[8] = {0x504d4452, g_rdump_req.load(), (int32_t) pos, tokens[t], (int32_t) g.n_layers,
+                                (int32_t) g.hc, (int32_t) g.n_embd, 0};
+        std::fwrite(hdr, sizeof hdr, 1, f);
+        std::fwrite(h.data(), sizeof(float), h.size(), f);
+    }
+    std::fflush(f);
 }
 
 bool Verifier::copy_logits(int t, float* host) const {

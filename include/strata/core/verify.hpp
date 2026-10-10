@@ -502,6 +502,15 @@ private:
     float *sh_gate_ = nullptr, *sh_up_ = nullptr, *sh_g_ = nullptr;
     float* hist_snap_ = nullptr;                              // T * NG_HIST * NG_HC_DIM
     int64_t cap_ = 0, max_blocks_ = 0, attn_scratch_floats_ = 0;
+    float* rdump_ = nullptr;   ///< STRATA_RESID_DUMP: n_layers * max_t rows of (hc, n_embd), see resid_dump_range
+    void resid_dump_window(int T, const int32_t* tokens, int64_t pos0);
 };
+
+/// Diagnostic (STRATA_RESID_DUMP=<path>, off by default): a verify window appends R after every layer whose output R
+/// holds - a control-vector layer (after the vector) and the last layer - for its rows at positions [lo, hi), the
+/// request's `req` in each record.  The serve loop sets the range per request (STRATA_RESID_DUMP_LAST, default 8:
+/// the last prompt tokens).
+void resid_dump_range(int64_t lo, int64_t hi, int32_t req);
+bool resid_dump_enabled();
 
 }  // namespace strata::core
