@@ -373,7 +373,7 @@ class Merge(unittest.TestCase):
 
     def test_the_manifest_and_git_s_versions(self):
         repo = Path(__file__).resolve().parents[1]
-        for path in ("data/expert-profile.bin", "release/windows/config/strata-nvfp4.json"):
+        for path in ("data/expert-profile.bin", "release/windows/config/strata-qwen-nvfp4-gptq.json"):
             with self.subTest(path):
                 versions = U.git_versions(repo, path)
                 if U.subprocess.run(["git", "-C", str(repo), "diff", "--quiet", "HEAD", "--", path]).returncode:
