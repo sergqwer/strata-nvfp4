@@ -212,7 +212,11 @@ class EngineArgs(unittest.TestCase):
             "--ple-gguf", f"{m}/ple-fp8-e4m3.gguf", "--embd-gguf", f"{m}/token-embd-bf16.gguf",
             "--expert-profile", "<T>/data/expert-profile.bin", "--expert-cache", "auto", "--prefill", "auto",
             "--spec", "6", "--spec-min-p", "0.7", "--mtp", f"{m}/mtp/rt", "--max-context", "262144", "--kv", "int8",
+            # the censorship switch: loaded, off by default ("uncensored": false)
+            "--control-vector-scaled", str(setup.UNCENSOR_VECTOR).replace(chr(92), "/") + ":1.0",
+            "--control-vector-layer-range", "8", "33", "--cvec-mode", "project", "--cvec-dir", "per-layer",
             "--vision"])
+        self.assertIs(cfg["uncensored"], False)
         self.assertEqual(cfg["tokenizer"], f"{m}/pack/tokenizer")
         self.assertEqual(cfg["vision"], {"exe": "<T>/engine/strata-vision" + (".exe" if setup.WIN else ""),
                                          "mmproj": f"<T>/models/{setup.MMPROJ}", "model": f"{m}/dense-q8_0.gguf",
@@ -522,7 +526,8 @@ class DryRun(unittest.TestCase):
                     self.assertIn(line, out)
                 flat = " ".join(out.split())
                 for words in ("--native-dense-gguf", "--spec 6 --spec-min-p 0.7", "--max-context 131072 --kv int8 "
-                              "--vision"):
+                              + ("--control-vector-scaled" if family in setup.UNCENSOR_FAMILIES else "--vision"),
+                              "per-layer --vision" if family in setup.UNCENSOR_FAMILIES else "--vision"):
                     self.assertIn(words, flat)
 
     def test_never_with_update_rollback_or_calibrate(self):
@@ -869,9 +874,10 @@ class OrcaWithdrawn(unittest.TestCase):
 
 
 class Uncensored(unittest.TestCase):
-    """--uncensored on|off: this fork's refusal-direction projection (data/uncensor), off by default, offered for
-    UNCENSOR_FAMILIES only; never for NVIDIA's model.  Upstream's --experimental-speed-projection on|off is its alias
-    for the NVFP4 models."""
+    """The censorship switch: this fork's refusal-direction projection (data/uncensor), always loaded for
+    UNCENSOR_FAMILIES so the web app and the API can switch it; --uncensored on|off (upstream's
+    --experimental-speed-projection on|off, its alias for the NVFP4 models) only sets the default for requests, off
+    unless chosen.  Never loaded for NVIDIA's model or the other weights."""
     FLAGS = ["--control-vector-scaled", "--control-vector-layer-range", "--cvec-mode", "--cvec-dir"]
 
     def cvec(self, cfg):
@@ -889,17 +895,34 @@ class Uncensored(unittest.TestCase):
         self.assertEqual(setup.UNCENSOR_FAMILIES, ("qwen-nvfp4-gptq",))
         self.assertIn("qwen-nvidia-nvfp4", setup.UNCENSOR_REFUSED)
 
-    def test_off_by_default(self):
+    def want(self):
+        return ["--control-vector-scaled", str(setup.UNCENSOR_VECTOR).replace(chr(92), "/") + ":1.0",
+                "--control-vector-layer-range", "8", "33", "--cvec-mode", "project", "--cvec-dir"]
+
+    def test_off_by_default_with_the_vector_loaded(self):
         ram, found = PROFILES["128GB-1x24GB"]
-        code, out, cfg, asked = run(ram, found, ["--no-start"], answers="")       # Enter on every question
-        self.assertEqual(code, 0, out[-3000:])
-        self.assertTrue(any("Disable censorship? [n]" in q for q in asked), asked)
-        self.assertIsNone(self.cvec(cfg))
-        self.assertNotIn("uncensored", cfg)
-        self.assertIn("censorship: on (the original model)", out)
-        code, out, cfg, _ = run(ram, found, ["--no-start"])                        # --yes: the same
-        self.assertEqual(code, 0, out[-3000:])
-        self.assertIsNone(self.cvec(cfg))
+        for argv, answers in ((["--no-start"], ""),                       # Enter on every question
+                              (["--no-start"], None),                     # --yes
+                              (["--uncensored", "off", "--no-start"], None),
+                              (["--experimental-speed-projection", "off", "--no-start"], None)):
+            with self.subTest(argv=argv, answers=answers):
+                code, out, cfg, asked = run(ram, found, argv, answers=answers)
+                self.assertEqual(code, 0, out[-3000:])
+                if answers == "":
+                    self.assertTrue(any("Disable censorship? [n]" in q for q in asked), asked)
+                self.assertEqual(self.cvec(cfg), self.want())              # loaded: the switch has something to switch
+                self.assertIs(cfg["uncensored"], False)                    # censored unless a request says otherwise
+                self.assertIn("censorship: on by default - the refusal-direction projection is loaded", out)
+
+    def test_the_server_reads_that_default(self):
+        sys.path.insert(0, str(ROOT))
+        from serve.server import sampling_defaults_from_config
+        ram, found = PROFILES["128GB-1x24GB"]
+        for argv, on in ((["--no-start"], False), (["--uncensored", "on", "--no-start"], True)):
+            with self.subTest(argv=argv):
+                code, out, cfg, _ = run(ram, found, argv)
+                self.assertEqual(code, 0, out[-3000:])
+                self.assertEqual(sampling_defaults_from_config(cfg), {"experimental_speed_projection": on})
 
     def test_on_writes_the_flags_and_the_request_default(self):
         ram, found = PROFILES["128GB-1x24GB"]
@@ -910,15 +933,10 @@ class Uncensored(unittest.TestCase):
                 code, out, cfg, _ = run(ram, found, argv, answers=answers)
                 self.assertEqual(code, 0, out[-3000:])
                 self.assertEqual(cfg["model_name"], "qwen3.8-flash-next-gptq-nvfp4")
-                self.assertEqual(self.cvec(cfg), [
-                    "--control-vector-scaled", str(setup.UNCENSOR_VECTOR).replace(chr(92), "/") + ":1.0",
-                    "--control-vector-layer-range", "8", "33", "--cvec-mode", "project", "--cvec-dir"])
+                self.assertEqual(self.cvec(cfg), self.want())
                 self.assertEqual(cfg["args"][cfg["args"].index("--cvec-dir") + 1], "per-layer")
                 self.assertIs(cfg["uncensored"], True)
-                self.assertIn("censorship: off (--uncensored on", out)
-        code, out, cfg, _ = run(ram, found, ["--uncensored", "off", "--no-start"])
-        self.assertEqual(code, 0, out[-3000:])
-        self.assertIsNone(self.cvec(cfg))
+                self.assertIn("censorship: off by default (--uncensored on)", out)
 
     def test_the_dry_run_shows_it(self):
         ram, found = PROFILES["128GB-1x24GB"]
@@ -939,10 +957,17 @@ class Uncensored(unittest.TestCase):
         code, out, cfg, asked = run(ram, found, ["--family", "qwen-nvidia-nvfp4", "--no-start"], answers="")
         self.assertEqual(code, 0, out[-3000:])
         self.assertFalse(any("censorship" in q for q in asked), asked)         # not even asked
-        self.assertNotIn("--control-vector-scaled", cfg["args"])
+        self.assertNotIn("--control-vector-scaled", cfg["args"])                # no vector at all
+        self.assertNotIn("uncensored", cfg)
 
     def test_not_for_the_other_weights_or_the_gguf_models(self):
         ram, found = PROFILES["128GB-1x24GB"]
+        for family in ("swift", "coder"):                                      # no vector without the flag either
+            with self.subTest(family, flag=False):
+                code, out, cfg, _ = install_with(ram, found, ["--family", family, "--no-start"])
+                self.assertEqual(code, 0, out[-3000:])
+                self.assertFalse(any("uncensor" in str(x) for x in cfg["args"]), cfg["args"])
+                self.assertNotIn("uncensored", cfg)
         for family, why in (("swift", "Swift 1.5 has other weights"), ("coder", "the Coder has other weights"),
                             ("qwen", "measured on qwen-nvfp4-gptq only so far")):
             with self.subTest(family):
@@ -968,7 +993,7 @@ class Uncensored(unittest.TestCase):
                 mock.patch.object(setup, "other_installs", lambda s: [other])])
         self.assertEqual(code, 0, out[-3000:])
         self.assertIn("Found your earlier install", out)
-        self.assertIn("censorship: off (--uncensored on", out)
+        self.assertIn("censorship: off by default (--uncensored on)", out)
 
 
 if __name__ == "__main__":
