@@ -374,6 +374,25 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### The model's recommended sampling (2026-10-10, release 0.1.41-nvfp4.6)
+
+Setup writes each model's recommended sampling into the run config it builds: `"sampling": {"temperature": 1.0,
+"top_p": 0.95, "top_k": 20}`, the server's default for a request that sends none. A request's own values win, and
+temperature 0 means greedy. Before, a client that sent no temperature, Claude Code among them, decoded greedy,
+which Qwen advises against with thinking; in the loop study, huihui-nvfp4 looped in 9 of 10 greedy runs and 2 of 5
+sampled ones. The tray has run with this block since 2026-10-09.
+
+- **The values** (`FAMILY_SAMPLING` in setup.py) come from each family's `generation_config.json` (`do_sample`
+  true): Qwen/Qwen3.8-Flash-Next's for its quants (ISTA's, Unsloth's, this fork's GPTQ); nvidia/Qwen3.8-Flash-Next-NVFP4
+  has the same. Swift 1.5's GGUF repository has none, and its base ukisai/Swift-Qwen3.8-Flash-Next has the same
+  values. The Coder's GGUF repository has none and names Qwen/Qwen3.8-Flash-Next as its base, so it gets Qwen's.
+- **A setup run again** keeps the values the user changed in the block and adds only the keys it lacks. `--update`
+  (`UPDATE.bat`) adds the block to a config that has none, so older installs get it too; a block the user wrote is
+  left as it is. The Windows bundle's config has it too. The censorship switch's default (`"uncensored"`) stays a key
+  of its own.
+- **Tests:** the golden configs changed only by this block (checked case by case before the baseline was
+  regenerated); a re-run keeps a user's temperature; `--update` adds the block and leaves a user's one alone.
+
 ### orca-nvfp4 withdrawn, censorship off by a switch (2026-10-10, release 0.1.41-nvfp4.5)
 
 - **orca-nvfp4 is a much weaker agent.** OrcaRouter's abliteration orthogonalizes a refusal direction out of all 149
