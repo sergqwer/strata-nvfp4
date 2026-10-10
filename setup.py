@@ -311,6 +311,18 @@ FAMILIES = {
                 "vision": False, "pack_args": ["--compat-bf16"],
                 "sha256": {**UNSLOTH_SHARDS, **UNSLOTH_IQ4_XS_SHARDS}},
 }
+# The model's recommended sampling (0.1.41-nvfp4.6): setup writes it as the config's "sampling" block, the server's
+# default for a request that sends none (a request's own values win; temperature 0 = greedy).  Without it a client
+# that sends no temperature (Claude Code) decoded greedy, which Qwen advises against with thinking (greedy, huihui
+# looped 9 of 10 times on a long agentic request, sampled 2 of 5).  From each family's generation_config.json
+# (do_sample true): Qwen/Qwen3.8-Flash-Next's (de4b8e4d) for its quants (ISTA's, Unsloth's, this fork's GPTQ) and
+# for nvidia/Qwen3.8-Flash-Next-NVFP4 (fc694b54, the same values); Swift 1.5's GGUF repository has none, its base
+# ukisai/Swift-Qwen3.8-Flash-Next (0bd4fe22) the same values; the Coder's GGUF repository has none and names
+# Qwen/Qwen3.8-Flash-Next as its base: Qwen's.  The withdrawn fine-tunes (an install of one is updated too):
+# huihui-ai's (298f9463) the same values; OrcaRouter's repository is gated now: Qwen's, which it fine-tunes.
+QWEN_SAMPLING = {"temperature": 1.0, "top_p": 0.95, "top_k": 20}
+FAMILY_SAMPLING = {f: QWEN_SAMPLING for f in ("qwen-nvfp4-gptq", "qwen-nvidia-nvfp4", "qwen", "unsloth", "swift",
+                                              "coder", "huihui-nvfp4", "orca-nvfp4")}
 MMPROJ = "mmproj-Qwen3.8-Flash-Next-BF16.gguf"
 # EXPERIMENTAL, off by default (setup asks): a control vector shipped with the repository, see its README
 ESP_VECTOR = ROOT / "data" / "experimental-speed-projection" / "Qwen3.8-Flash-Next-experimental-speed-projection.gguf"
@@ -4033,11 +4045,13 @@ def write_config(path: Path, cfg: dict):
     os.replace(tmp, path)
 
 
-# #629: the run config's keys setup writes itself (and rewrites on every setup run); any other key is the user's - a
-# "sampling" or "mcp_servers" block, "allowed_hosts", "cors_origins", "open_browser" - and is kept when setup runs again
+# #629: the run config's keys setup writes itself (and rewrites on every setup run); any other key is the user's - an
+# "mcp_servers" block, "allowed_hosts", "cors_origins", "open_browser" - and is kept when setup runs again.  This fork:
+# "sampling" is written too (the model's recommended values, FAMILY_SAMPLING), and the user's own values in it win
+# (carry_over adds only the keys they did not set)
 SETUP_KEYS = frozenset({"exe", "args", "cwd", "tokenizer", "model_name", "log", "lib_dirs", "port", "backend", "env",
                         "gpu", "gpus_asked", "layer_split", "host", "api_key", "draft_vocab", "vision",
-                        "uncensored"})
+                        "uncensored", "sampling"})
 SETUP_ENV = frozenset({"STRATA_HIPBLASLT_TUNING", "STRATA_RESIDENT_PIN", "STRATA_NO_ARENA_THP"})   # the "env" entries setup writes
 SETUP_VISION = frozenset({"exe", "mmproj", "model", "gpu", "max_tokens", "threads"})
 
@@ -4053,6 +4067,10 @@ def carry_over(old: dict, cfg: dict) -> list[str]:
         if k not in SETUP_KEYS and k not in cfg:
             cfg[k] = v
             kept.append(k)
+    if isinstance(old.get("sampling"), dict) and old["sampling"]:   # the user's sampling values win; the
+        own = {k: v for k, v in old["sampling"].items() if (cfg.get("sampling") or {}).get(k) != v}   # recommended
+        cfg["sampling"] = {**(cfg.get("sampling") or {}), **old["sampling"]}   # ones fill only the missing keys
+        kept += [f"sampling {k}" for k in own]
     env = {k: v for k, v in (old.get("env") or {}).items() if k not in SETUP_ENV and k not in (cfg.get("env") or {})} \
         if isinstance(old.get("env"), dict) else {}
     if env:
@@ -4476,6 +4494,25 @@ def upgrade_config(cfg_path: Path, cfg: dict) -> dict:
     return cfg
 
 
+def add_sampling(cfg_path: Path, cfg: dict) -> dict:
+    """--update (0.1.41-nvfp4.6): a config with no \"sampling\" block gets its model's recommended one
+    (FAMILY_SAMPLING), as setup now writes it; one with a block, or a model setup has no values for, is left as it is."""
+    if "sampling" in cfg:
+        return cfg
+    try:
+        family = choices_from_config(cfg_path)["family"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return cfg
+    if family not in FAMILY_SAMPLING:
+        return cfg
+    cfg["sampling"] = dict(FAMILY_SAMPLING[family])
+    write_config(cfg_path, cfg)
+    ok(f"{cfg.get('model_name', cfg_path.stem)}: the model's recommended sampling ("
+       + ", ".join(f"{k} {v:g}" for k, v in cfg["sampling"].items())
+       + ") for requests that send none; a request's own values win, temperature 0 is greedy")
+    return cfg
+
+
 def update_install(have: list, a) -> int:
     """#475: `setup.py --update` (UPDATE.bat / update.sh, after their git pull): what a plain START-HERE.bat does to
     an install before it starts the model, without starting it - the Python packages, the ready-made engine when this
@@ -4493,6 +4530,7 @@ def update_install(have: list, a) -> int:
         update_installed_engine(a.prebuilt)
     for cfg_path in have:
         cfg = upgrade_config(cfg_path, json.loads(cfg_path.read_text(encoding="utf-8-sig")))
+        cfg = add_sampling(cfg_path, cfg)
         if "--mtp" in cfg["args"][:-1]:
             refresh_draft_vocab(Path(cfg["args"][cfg["args"].index("--mtp") + 1]), cfg.get("draft_vocab", "cjk"))
         if cfg.get("backend") == "hip" and WIN:
@@ -5733,6 +5771,8 @@ def nvfp4_install(a, family: str, gpu: dict, multi: list, cuda_tk: int, ram: flo
     cfg = {"exe": str(eng / EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(paths["pack"] / "tokenizer"),
            "model_name": f"{fam['name']}-{NVFP4_MODEL.lower()}", "log": str(ROOT / f"strata-{tag.lower()}.log"),
            "lib_dirs": lib_dirs, "port": port, "gpu": gpu["index"], "gpus_asked": True}   # one card, not asked again
+    if family in FAMILY_SAMPLING:                      # the model's recommended sampling (a request's own values win)
+        cfg["sampling"] = dict(FAMILY_SAMPLING[family])
     for k in ("host", "api_key"):
         if getattr(a, k):
             cfg[k] = getattr(a, k)
@@ -6781,6 +6821,8 @@ def main() -> int:
     cfg = {"exe": str(eng / EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
            "model_name": f"{fam['name']}-{model.lower()}", "log": str(ROOT / f"strata-{tag.lower()}.log"),
            "lib_dirs": lib_dirs, "port": port}
+    if family in FAMILY_SAMPLING:                      # the model's recommended sampling (a request's own values win)
+        cfg["sampling"] = dict(FAMILY_SAMPLING[family])
     if cuda_tk == 12:                                  # the experimental CUDA 12 engine (engine-cuda12/)
         cfg["cuda"] = 12
     if uncensored is not None:                         # the switch's default for requests ("uncensored")

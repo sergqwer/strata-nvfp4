@@ -923,7 +923,8 @@ class Uncensored(unittest.TestCase):
             with self.subTest(argv=argv):
                 code, out, cfg, _ = run(ram, found, argv)
                 self.assertEqual(code, 0, out[-3000:])
-                self.assertEqual(sampling_defaults_from_config(cfg), {"experimental_speed_projection": on})
+                self.assertEqual(sampling_defaults_from_config(cfg), {"experimental_speed_projection": on,
+                                                                      **setup.QWEN_SAMPLING})
 
     def test_on_writes_the_flags_and_the_request_default(self):
         ram, found = PROFILES["128GB-1x24GB"]
