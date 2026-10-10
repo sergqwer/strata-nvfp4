@@ -557,8 +557,10 @@ function markdown(text) {
 }
 
 // ------------------------------------------------------------------ Chat
-const DEFAULTS = {thinking: "high", temperature: 0.6, top_p: 0.95, top_k: 20, max: "", seed: "", show: true, esp: true, mcp: true};
-let settings = {...DEFAULTS, ...store.get("sampling", {})};
+// esp: the censorship switch - undefined follows the server's default (the config's "uncensored"), true/false is
+// the user's own pick.  espv 2: a pick saved by this version (an older one saved esp: true by itself)
+const DEFAULTS = {thinking: "high", temperature: 0.6, top_p: 0.95, top_k: 20, max: "", seed: "", show: true, esp: undefined, mcp: true};
+let settings = (() => { const s = store.get("sampling", {}); if (s.espv !== 2) delete s.esp; return {...DEFAULTS, ...s}; })();
 let messages = store.get("chat", []);
 let attachments = [];                 // {name, url}
 let busy = null;                      // {controller, msg}
@@ -794,7 +796,7 @@ async function send() {
   }
   if (settings.seed) body.seed = +settings.seed;
   if (settings.max) body.max_tokens = +settings.max;
-  if (projectionLoaded()) body.experimental_speed_projection = !!settings.esp;
+  if (projectionLoaded() && settings.esp != null) body.experimental_speed_projection = !!settings.esp;
   if (settings.mcp !== false && mcpInfo.tools > 0) body.strata_mcp = true;   // this server may run MCP tools for it
 
   let firstAt = null, thinkStart = null, usage = null, frame = 0;
@@ -852,7 +854,7 @@ async function send() {
   if (n && firstAt) {
     const secs = (performance.now() - firstAt) / 1000;
     m.meta = `${fmt(n)} tokens${secs > 0.25 ? ` · ${fmt(n / secs, 1)} tok/s` : ""}${m.stopped ? " · stopped" : ""}` +
-             (projectionLoaded() ? (settings.esp ? " · uncensored" : " · censored") : "");
+             (projectionLoaded() ? (espOn() ? " · uncensored" : " · censored") : "");
   } else if (m.stopped) {
     m.meta = "Stopped";
   }
@@ -992,7 +994,7 @@ function loadDrawer(s = settings) {
   $("s-temp").value = s.temperature; $("s-topp").value = s.top_p; $("s-topk").value = s.top_k;
   $("s-max").value = s.max; $("s-seed").value = s.seed;
   $("s-show").setAttribute("aria-checked", String(!!s.show));
-  $("s-esp").setAttribute("aria-checked", String(s.esp !== false));
+  $("s-esp").setAttribute("aria-checked", String(espOn(s)));
   $("esp-row").hidden = !projectionLoaded();
   $("s-mcp").setAttribute("aria-checked", String(s.mcp !== false));
   $("s-share").setAttribute("aria-checked", String(sharedOn));
@@ -1012,7 +1014,7 @@ function sharedDefaults(s) {
   if (+s.temperature > 0) Object.assign(d, {top_p: +s.top_p, top_k: +s.top_k});
   if (s.seed) d.seed = +s.seed;
   if (s.max) d.max_tokens = +s.max;
-  if (projectionLoaded()) d.experimental_speed_projection = s.esp !== false;
+  if (projectionLoaded() && s.esp != null) d.experimental_speed_projection = s.esp !== false;
   return d;
 }
 async function saveShared(on, s) {
@@ -1025,6 +1027,12 @@ async function saveShared(on, s) {
   }
   sharedOn = !!(await r.json()).shared;
 }
+// the switch's default for requests that leave it out (the server's config): censored unless it says otherwise
+function espDefault() {
+  const e = lastMetrics && lastMetrics.engine;
+  return e && typeof e.uncensored_default === "boolean" ? e.uncensored_default : true;   // an older server: on
+}
+function espOn(s = settings) { return s.esp == null ? espDefault() : s.esp !== false; }
 // the engine was started with the experimental-speed-projection control vector (INFO cvec=...)
 function projectionLoaded() {
   const c = lastMetrics && lastMetrics.engine ? lastMetrics.engine.cvec : 0;
@@ -1051,7 +1059,8 @@ $("s-apply").onclick = async () => {
   settings = {thinking: sel ? sel.dataset.v : "high", temperature: +$("s-temp").value, top_p: +$("s-topp").value,
               top_k: +$("s-topk").value, max: $("s-max").value.trim(), seed: $("s-seed").value.trim(),
               show: $("s-show").getAttribute("aria-checked") === "true",
-              esp: $("s-esp").getAttribute("aria-checked") === "true",
+              esp: (($("s-esp").getAttribute("aria-checked") === "true") === espDefault() ? undefined
+                    : $("s-esp").getAttribute("aria-checked") === "true"), espv: 2,
               mcp: $("s-mcp").getAttribute("aria-checked") === "true"};
   store.set("sampling", settings);
   const share = $("s-share").getAttribute("aria-checked") === "true";

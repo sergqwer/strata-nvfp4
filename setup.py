@@ -22,8 +22,9 @@ What the first run does (each step is skipped when it is already done):
 
 This fork (sergqwer/strata-nvfp4) also offers its NVFP4 models of the original, censored Qwen, ready-made on Hugging
 Face: qwen-nvfp4-gptq (every expert NVFP4 by GPTQ; the default where the PC meets its requirements) and
-qwen-nvidia-nvfp4 (NVIDIA's ModelOpt NVFP4 checkpoint, converted).  --uncensored on (qwen-nvfp4-gptq only, off by
-default) adds this fork's refusal-direction projection (data/uncensor).  Nothing is converted on the PC, and the
+qwen-nvidia-nvfp4 (NVIDIA's ModelOpt NVFP4 checkpoint, converted).  qwen-nvfp4-gptq loads this fork's
+refusal-direction projection (data/uncensor), off for requests by default: the web app's switch and the API field
+"uncensored" turn it on, and --uncensored on makes on the default.  Nothing is converted on the PC, and the
 engine is this fork's (its release's, or compiled from this source).  --dry-run shows what setup would do for them.
 Withdrawn, an install of either keeps working: huihui-nvfp4 (0.1.41-nvfp4.3, it often loops in long thinking) and
 orca-nvfp4 (0.1.41-nvfp4.5, its abliteration made it a much weaker agent).
@@ -313,10 +314,12 @@ FAMILIES = {
 MMPROJ = "mmproj-Qwen3.8-Flash-Next-BF16.gguf"
 # EXPERIMENTAL, off by default (setup asks): a control vector shipped with the repository, see its README
 ESP_VECTOR = ROOT / "data" / "experimental-speed-projection" / "Qwen3.8-Flash-Next-experimental-speed-projection.gguf"
-# --uncensored on (0.1.41-nvfp4.5, off by default): this fork's refusal-direction projection, made on qwen-nvfp4-gptq
-# (data/uncensor/README.md) and applied as upstream's speed projection is (--cvec-mode project), so the server's
-# per-request switch (experimental_speed_projection, alias "uncensored") turns it off for a request.  Offered only
-# for UNCENSOR_FAMILIES; never for NVIDIA's model (UNCENSOR_REFUSED: its license).
+# The uncensored switch (0.1.41-nvfp4.5): this fork's refusal-direction projection, made on qwen-nvfp4-gptq
+# (data/uncensor/README.md) and applied as upstream's speed projection is (--cvec-mode project).  For
+# UNCENSOR_FAMILIES setup always loads it, so the server's per-request switch (experimental_speed_projection, alias
+# "uncensored"; the web app's "Disable censorship") has something to switch; off, a request runs the stock model.
+# --uncensored on|off only sets the default for requests ("uncensored" in the config, off unless chosen).  Never
+# for NVIDIA's model (UNCENSOR_REFUSED: its license) and the other weights: no vector at all there.
 UNCENSOR_VECTOR = ROOT / "data" / "uncensor" / "qwen-nvfp4-gptq-uncensored.gguf"
 UNCENSOR_LAYERS = (8, 33)
 UNCENSOR_FAMILIES = ("qwen-nvfp4-gptq",)
@@ -4188,7 +4191,9 @@ def choices_from_config(cfg_path: Path) -> dict:
             "vision": ("gpu" if vis.get("gpu") else "cpu") if isinstance(vis, dict) else "none",
             "esp": ("on" if Path(esp_path).name == ESP_VECTOR.name else "off" if Path(esp_path).name ==
                     UNCENSOR_VECTOR.name else esp_path) if esp_path else "off",
-            "uncensored": "on" if esp_path and Path(esp_path).name == UNCENSOR_VECTOR.name else None,
+            # the switch's default: "uncensored" in the config (a vector without it was on for every request)
+            "uncensored": ("on" if cfg.get("uncensored", True) is True else "off")
+            if esp_path and Path(esp_path).name == UNCENSOR_VECTOR.name else None,
             "host": cfg.get("host"), "api_key": cfg.get("api_key"), "port": cfg.get("port"), "gpu": cfg.get("gpu"),
             "layer_split": cfg.get("layer_split"), "cuda": 12 if config_toolkit(cfg) == 12 else None,
             # #493: --vram-reserve-mib given at setup (images write the default 700 themselves)
@@ -4197,7 +4202,8 @@ def choices_from_config(cfg_path: Path) -> dict:
 
 
 def uncensor_args(vector: Path = None) -> list:
-    """The engine's flags for --uncensored on: the projection on UNCENSOR_LAYERS, upstream's control-vector flags."""
+    """The engine's flags for the uncensored switch: the projection on UNCENSOR_LAYERS, upstream's control-vector
+    flags.  Loaded either way for UNCENSOR_FAMILIES; a request switches it (cvec=0|1)."""
     first, last = UNCENSOR_LAYERS
     return ["--control-vector-scaled", f"{vector or UNCENSOR_VECTOR}:1.0", "--control-vector-layer-range", str(first),
             str(last), "--cvec-mode", "project", "--cvec-dir", "per-layer"]
@@ -5589,22 +5595,26 @@ def nvfp4_install(a, family: str, gpu: dict, multi: list, cuda_tk: int, ram: flo
         say("  VRAM for the experts.")
         vision = "cpu" if ask("Do you want images?", ["y", "n"], "n", a.yes) == "y" else "none"
     ok("images: " + {"none": "off", "gpu": "on (encoder on the GPU)", "cpu": "on (encoder on the CPU)"}[vision])
-    uncensored = False
+    uncensored = None                                  # None: no switch (no vector) for this family
     if family in UNCENSOR_FAMILIES:                   # the original Qwen, censored by default
         if unc is None:
             say()
-            say("  Censorship: the model declines what Qwen declines. Setup can turn that off with this fork's")
-            say("  refusal-direction projection (data/uncensor/README.md): 0 of 104 test requests refused, its")
-            say("  thinking as long as the original's. You are responsible for what it writes; the web app and the")
-            say("  API turn it off per request.")
+            say("  Censorship: the model declines what Qwen declines. This fork's refusal-direction projection")
+            say("  (data/uncensor/README.md) turns that off: 0 of 104 test requests refused, its thinking as long as")
+            say("  the original's. It is loaded either way; the web app's \"Disable censorship\" switch and the API")
+            say("  field \"uncensored\" turn it on or off per request. You are responsible for what it writes.")
             unc = "on" if ask("Disable censorship?", ["y", "n"], "n", a.yes) == "y" else "off"
         uncensored = unc == "on"
-        if uncensored and not UNCENSOR_VECTOR.is_file():
+        if UNCENSOR_VECTOR.is_file():
+            extra += uncensor_args()
+            ok("censorship: " + ("off by default (--uncensored on)" if uncensored else "on by default")
+               + f" - the refusal-direction projection is loaded (layers {UNCENSOR_LAYERS[0]}-{UNCENSOR_LAYERS[1]}): the "
+                 "web app's Disable censorship switch and the API's \"uncensored\" change it per request")
+        elif uncensored:
             fail(f"the uncensored projection's vector is missing: {UNCENSOR_VECTOR}", "use a full Strata checkout (git clone)")
-        ok("censorship: " + ("off (--uncensored on: the refusal-direction projection, layers "
-                              f"{UNCENSOR_LAYERS[0]}-{UNCENSOR_LAYERS[1]})" if uncensored else "on (the original model)"))
-    if uncensored:
-        extra += uncensor_args()
+        else:
+            warn(f"the uncensored projection's vector is missing ({UNCENSOR_VECTOR}): no switch, the original model")
+            uncensored = None
     tag = fam["tag"] + NVFP4_MODEL
     cfg_path = ROOT / f"strata-{tag.lower()}.json"
     models_dir = Path(a.models_dir)
@@ -5710,8 +5720,8 @@ def nvfp4_install(a, family: str, gpu: dict, multi: list, cuda_tk: int, ram: flo
     for k in ("host", "api_key"):
         if getattr(a, k):
             cfg[k] = getattr(a, k)
-    if uncensored:                                     # the default for requests (the server's alias of
-        cfg["uncensored"] = True                       # experimental_speed_projection); a request can say false
+    if uncensored is not None:                         # the switch's default for requests (the server's alias of
+        cfg["uncensored"] = uncensored                 # experimental_speed_projection); a request can say otherwise
     if draft_vocab:
         cfg["draft_vocab"] = draft_vocab
     if a.browser is not None:
@@ -5809,8 +5819,9 @@ def main() -> int:
                          "the CPU): more reads small text and charts better, and takes longer to encode; remembered "
                          "for this model")
     ap.add_argument("--uncensored", choices=["on", "off"],
-                    help="qwen-nvfp4-gptq: on = this fork's refusal-direction projection (data/uncensor), the model no "
-                         "longer declines; off by default. Never for NVIDIA's model (its license)")
+                    help="qwen-nvfp4-gptq: the default of the censorship switch (this fork's refusal-direction "
+                         "projection, always loaded there; the web app and the API switch it per request): on = "
+                         "the model no longer declines; off by default. Never for NVIDIA's model (its license)")
     ap.add_argument("--experimental-speed-projection", metavar="on|off|GGUF",
                     help="EXPERIMENTAL, off by default: the control vector in data/experimental-speed-projection "
                          "(or another GGUF) as a projection on layers 4-44; see docs/DETAILS.md")
