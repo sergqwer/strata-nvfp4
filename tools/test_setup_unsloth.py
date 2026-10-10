@@ -227,9 +227,12 @@ class Main(Base):
         args = cfg["args"]
         self.assertEqual(args[args.index("--resident-budget-gib") + 1], "40")
         self.assertTrue(args[args.index("--native") + 1].endswith("-00001-of-00004.gguf"))
-        for flag in ("--ple-gguf", "--mmap-experts", "--resident-experts", "--vision", "--control-vector-scaled",
-                     "--kv-resident"):
+        for flag in ("--ple-gguf", "--mmap-experts", "--resident-experts", "--vision", "--kv-resident"):
             self.assertNotIn(flag, args)
+        # this fork's censorship switch: loaded, off by default (not upstream's speed projection)
+        self.assertTrue(args[args.index("--control-vector-scaled") + 1].replace("\\", "/").endswith(
+            "/data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0"))
+        self.assertIs(cfg["uncensored"], False)
         self.assertEqual(args[args.index("--max-context") + 1], "8192")
         self.assertEqual(cfg["model_name"], "qwen3.8-flash-next-unsloth-ud-q4_k_xl")
         self.assertNotIn("vision", cfg)
