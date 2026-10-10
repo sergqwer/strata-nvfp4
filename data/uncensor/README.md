@@ -31,7 +31,11 @@ Against each GGUF quant's own stock model (5 greedy replays of the long Claude C
 |---|---|---|---|---|---|
 | ISTA Q2_0 | 1/104, 2/30 (30/30, 28/30) | 1/104, 0/30 (30/30, 19/30) | 0.016 | +0.027 to +0.040 (upstream's +0.087 to +0.149) | 965 / LOOP / 1,766 against 1,306 / 1,350 / 906, no loop |
 | ISTA IQ2_XS | 1/104, 2/30 | 0/104 EN | 0.017 | -0.003 to +0.066 (upstream's +0.12 to +0.20) | 3 of 3 loop against 2 of 3 loop |
-| Unsloth UD-Q4_K_XL | 4/104 (the classifier counts disclaimers), 1/30 | 0/104, 1/30 (30/30, 29/30) | - | - | 888 / 1,183 / 1,731 against 1,204 / 1,255 / 1,343, no loop |
+| Unsloth UD-Q4_K_XL | 4/104 (the classifier counts disclaimers), 1/30 (30/30, 30/30) | 0/104, 1/30 (30/30, 29/30) | 0.028 (upstream's 0.042) | -0.044 / +0.050 on text / thinking (upstream's +0.233 / +0.163) | 888 / 1,183 / 1,731 against 1,204 / 1,255 / 1,343, no loop |
+
+On UD-Q4_K_XL the KL is 0.028 (p99 0.335; upstream's vector 0.042, p99 0.483), 0.011 on the model's thinking
+(upstream's 0.022) and 0.041 on agent replies (upstream's 0.027), the same top token 93.7% (93.2%), and 1 of 64
+harmless prompts flagged. The vector works unchanged on all three quants, with no rescaling.
 
 IQ2_XS loops in long greedy agentic thinking by itself (3 of 3 without the vector); the vector does not make it
 worse, and setup says so when IQ2_XS is chosen.
