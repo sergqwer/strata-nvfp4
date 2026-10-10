@@ -78,6 +78,11 @@ page).
 - **AMD cards:** the NVFP4 models run on NVIDIA cards only, and this fork publishes no AMD engine. For the GGUF models
   setup compiles one on Linux; on Windows build it first with `tools\hip\build_windows.bat`, then run
   `START-HERE.bat --backend hip --prebuilt <its dist folder>` ([docs/AMD_HIP.md](docs/AMD_HIP.md)).
+- **Sampling:** setup writes the model's recommended sampling into `strata-<model>.json` (`"sampling":
+  {"temperature": 1.0, "top_p": 0.95, "top_k": 20}`, Qwen's generation_config.json) as the default for requests;
+  a request's own values win, and temperature 0 means greedy. Before, a client that sent no temperature (Claude
+  Code) decoded greedy, which Qwen advises against with thinking. A setup run again keeps the values you changed;
+  `UPDATE.bat` adds the block to an older config that has none.
 - **Options:** `--family qwen-nvidia-nvfp4` picks a model without the menu, `--uncensored on|off` answers the
   censorship question (the switch's default), `--check` says what fits this PC, `--dry-run`
   shows what setup would download, install and write for an NVFP4 model (the engine's arguments too) and changes
