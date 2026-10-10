@@ -1757,10 +1757,14 @@ struct PcieAuto {
 // (DRAM-less NVMe, Windows unbuffered I/O) they run at 34 MB/s or 4-8 tok/s and a prompt reads layer 1 for minutes.
 // Rows per second of a short cold probe: a few batches of random rows through the same batched reader a prompt chunk
 // uses, stopped after ~0.6 s. Returns <= 0 when nothing could be measured.
+// This fork: batches of 256 tokens (4,096 rows), the size from which a prompt chunk takes the PLE batch readers
+// (PleTable::gather_batch, 8 readers x 32 reads in flight).  Upstream's 4-token batches go one ticket at a time: on an
+// RTX 5090 PC with a Samsung 9100 PRO they measured 5,500 rows/s, "slow", and the mapped reads it switched to took a
+// 32K prompt's PLE from 231 ms to 20.2 s (3.7 -> 23.4 s in all).
 static double ple_direct_rows_per_s(strata::kernels::PleTable& t) {
     const uint64_t n = t.rows();
     if (n < 4096) return -1.0;
-    constexpr size_t kTok = 4;   // 64 rows a batch
+    constexpr size_t kTok = 256;   // 4,096 rows a batch
     std::vector<uint32_t> rows(kTok * 16);
     std::vector<float> out(kTok * 2560);
     uint64_t x = 0x9E3779B97F4A7C15ull ^ n;
