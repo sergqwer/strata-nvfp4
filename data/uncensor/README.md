@@ -4,7 +4,8 @@
 2,560 values per layer (GGUF `controlvector` format). The JSON beside it has its per-layer strengths, how it was built,
 and its scores.
 
-**What it does.** For `qwen-nvfp4-gptq` setup (and the Windows bundle's config) starts the engine with
+**What it does.** For `qwen-nvfp4-gptq`, ISTA's GGUFs (the `qwen` family) and Unsloth's (`unsloth`) setup - and the
+Windows bundle's config - starts the engine with
 
 ```
 --control-vector-scaled data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0 --control-vector-layer-range 8 33
@@ -19,9 +20,21 @@ loaded but **off** unless chosen: `"uncensored": false` in `strata-<model>.json`
 censorship" switch and the API field `"uncensored"` (alias `"experimental_speed_projection"`) change it per
 request. Off, a request runs the original model bit for bit (the kernel skips the projection).
 
-**Where.** Made and measured on `qwen-nvfp4-gptq`, the only family setup offers it for. Never for
-`qwen-nvidia-nvfp4`: the NVIDIA Open Model License does not allow bypassing the model's safety guardrails. Not for
-Swift 1.5 or the Coder, which have other weights.
+**Where.** Made and measured on `qwen-nvfp4-gptq`; measured too on ISTA's Q2_0 and IQ2_XS (setup offers it for the
+whole `qwen` family: IQ3_XXS and IQ3_S sit between Q2_0 and NVFP4) and on Unsloth's UD-Q4_K_XL (the `unsloth`
+family; its UD-IQ4_XS was not measured). Never for `qwen-nvidia-nvfp4`: the NVIDIA Open Model License does not
+allow bypassing the model's safety guardrails. Not for Swift 1.5 or the Coder, which have other weights.
+
+Against each GGUF quant's own stock model (5 greedy replays of the long Claude Code request where it says loops):
+
+| quant | refusals, thinking off, EN / UK (stock) | refusals, thinking on, EN / UK (stock) | KL | log p(`</think>`) shift | thinking tokens, stock / this vector |
+|---|---|---|---|---|---|
+| ISTA Q2_0 | 1/104, 2/30 (30/30, 28/30) | 1/104, 0/30 (30/30, 19/30) | 0.016 | +0.027 to +0.040 (upstream's +0.087 to +0.149) | 965 / LOOP / 1,766 against 1,306 / 1,350 / 906, no loop |
+| ISTA IQ2_XS | 1/104, 2/30 | 0/104 EN | 0.017 | -0.003 to +0.066 (upstream's +0.12 to +0.20) | 3 of 3 loop against 2 of 3 loop |
+| Unsloth UD-Q4_K_XL | 4/104 (the classifier counts disclaimers), 1/30 | 0/104, 1/30 (30/30, 29/30) | - | - | 888 / 1,183 / 1,731 against 1,204 / 1,255 / 1,343, no loop |
+
+IQ2_XS loops in long greedy agentic thinking by itself (3 of 3 without the vector); the vector does not make it
+worse, and setup says so when IQ2_XS is chosen.
 
 **How it was made.** On this engine and the `qwen-nvfp4-gptq` pack, the residual after every layer was dumped at the
 assistant-header positions of 320 harmful and 320 harmless prompts (mlabonne's harmful_behaviors and
