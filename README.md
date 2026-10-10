@@ -15,11 +15,12 @@ models are still offered.
 ## What's new
 
 - **On upstream 0.1.42 (0.1.42-nvfp4.1).** Upstream's own changes now run here too:
-  - **The route tail skip is on by default** (`STRATA_ROUTE_TAIL_SKIP=7`): a missed expert that every token of a
-    verify window routes at rank 7-9 is neither fetched nor computed. With `qwen-nvfp4-gptq` decode is 11.5% faster
-    (193.7 against 174.0 tokens/s), but the answers change more than upstream's models show: teacher-forced KL
-    0.035 against the skip off (top token the same 93.7% of the time), more than the censorship switch's 0.026.
-    No loops in 3 long Claude Code replays. `STRATA_ROUTE_TAIL_SKIP=0` (in the config's `"env"`) turns it off
+  - **The route tail skip** (`STRATA_ROUTE_TAIL_SKIP=7`: a missed expert that every token of a verify window routes
+    at rank 7-9 is neither fetched nor computed) is upstream's default for the GGUF models, and **off by default for
+    the NVFP4 models**. On `qwen-nvfp4-gptq` it moves the answers by teacher-forced KL 0.035 against the skip off
+    (top token the same 93.7% of the time), as much as the whole GPTQ quantization error against an all-Q8_0
+    reference (0.038), and thinking ends sooner (p(`</think>`) early x1.35). It makes decode 11.5% faster (193.7
+    against 174.0 tokens/s): `"env": {"STRATA_ROUTE_TAIL_SKIP": "7"}` in the model's config turns it on
     ([numbers](docs/NVFP4.md#upstream-0142-2026-10-10-release-0142-nvfp41)).
   - **Decode's PCIe share is upstream's measured one** (from the CPU pool's speed: 0.35 here); this fork's per-layer
     cost model is gone. The same speed as the old fixed share.
@@ -305,7 +306,7 @@ The switches kept only for A/B runs (each gives the same bits or a measured alte
 | `--vram-reserve-mib N` | VRAM left unused (default 700); also a smaller card's budget on a bigger one |
 | `--pcie-frac F` | a fixed share of decode's cache misses fetched over PCIe (default: upstream's, set from the CPU pool's speed in the first decode windows) |
 | `STRATA_PCIE_FRAC_DEFAULT=old` | decode keeps the link probe's fixed PCIe share (upstream 0.1.41's rule) |
-| `STRATA_ROUTE_TAIL_SKIP=0` | decode computes every missed expert again (upstream's default since 0.1.42 skips those routed only at rank 7-9; this fork measured KL 0.035 with it on) |
+| `STRATA_ROUTE_TAIL_SKIP=7` / `=0` | decode skips a missed expert every token of a window routes only at rank 7-9 / computes every one (default: off with NVFP4 experts, KL 0.035 with it on; upstream's 7 for the GGUF models) |
 | `STRATA_PREFILL_CPU_SHARE=x\|0` | a fixed CPU share of a small prompt chunk's streamed experts / none (default `auto`: measured, and only while sharing is faster; `STRATA_DBG_CPU_GATE=1` prints its readings) |
 | `--adapt-every N`, `--adapt-swaps N`, `--adapt-decay F` | the adaptive VRAM tier: re-rank every N rounds, up to N swaps, counts x F after each (default 2 / 192 / 0.92 with a cache of 20-60% of the experts and every expert in RAM, else upstream's 4 / 96 / 0.7) |
 | `STRATA_ADAPT_FETCH=0\|1\|2` | decode: the PCIe share's experts admitted into the VRAM tier (2, the default: instead of the tier's own swaps where an admission ran; 1: beside them; 0: off) |
