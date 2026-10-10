@@ -396,9 +396,13 @@ Tried and dropped:
   20.2 s (the prompt 3.7 -> 23.4 s). The probe now runs once the arena is in, with 256-token batches through the batch
   readers: 810,000-826,000 rows/s, the bar and the switch upstream's (a9d03502, eb344b39).
 - **The route tail skip** (`STRATA_ROUTE_TAIL_SKIP=7`, upstream's default on CUDA serve with one GPU or a layer split,
-  not with every expert in VRAM, `--batch` slots, a peer or helper GPUs) applies to the NVFP4 path: it works in the
-  dispatch, before any format is read. On `qwen-nvfp4-gptq` (cache 8000, every prompt through the verify windows,
-  STRATA_LOGPOS, the uncensor work's texts: 5,153 rows of code, prose and the model's replies, 8,550 of its thinking):
+  not with every expert in VRAM, `--batch` slots, a peer or helper GPUs) works on the NVFP4 path too: it acts in the
+  dispatch, before any format is read. **This fork does not make it a default with NVFP4 experts** (in any layer:
+  `qwen-nvfp4-gptq`, `qwen-nvidia-nvfp4`; c83625c3): it moves the answers by as much as the whole quantization does,
+  and thinking ends sooner. The GGUF models keep upstream's default; the serve start line says which applies and why;
+  `STRATA_ROUTE_TAIL_SKIP=7` opts in, `=0` turns it off for a GGUF model. On `qwen-nvfp4-gptq` (cache 8000, every
+  prompt through the verify windows, STRATA_LOGPOS, the uncensor work's texts: 5,153 rows of code, prose and the
+  model's replies, 8,550 of its thinking):
 
   | against the skip off | KL | KL thinking | same top token | log p(`</think>`) | p(`</think>`) early |
   |---|---|---|---|---|---|
@@ -406,8 +410,9 @@ Tried and dropped:
   | the normal mode (PCIe share, tier) | 0.0353 (p99 0.43) | 0.0090 | 93.7% | +0.188 / +0.106 | x1.35 |
   | the normal mode, off against off | 0 | 0 | 100% | 0 | x1.00 |
 
-  For scale, on the same texts: the censorship switch 0.026 (thinking +0.024), upstream's speed projection 0.043
-  (+0.159), orca's abliteration 0.047 (+0.154). Upstream measured KL 0.003-0.006 on its models. Loopcap (the captured
+  For scale, on the same texts: the GPTQ quantization itself against an all-Q8_0 reference 0.038 (p99 0.43, thinking
+  0.013), the censorship switch 0.026 (thinking +0.024), upstream's speed projection 0.043 (+0.159), orca's
+  abliteration 0.047 (+0.154). Upstream measured KL 0.003-0.006 on its models. Loopcap (the captured
   72K Claude Code request, greedy, 3 runs): no loop, 2,820 / 1,192 / 2,271 thinking tokens (0.1.41's stock: 1,099 -
   2,292, mean 1,699), 178-194 tokens/s.
 - **The PCIe share measured from the CPU pool** (aa7b0cb1; CUDA, one GPU, no `--pcie-frac`): the link 57.9 GB/s, the
@@ -415,18 +420,25 @@ Tried and dropped:
 - **Decode speed**, 5 interleaved rounds of the 4 chats of the uncensor work (EN, UK, code, agent; greedy, the tray's
   settings, cache auto, ~2,800 tokens a run):
 
-  | | tokens/s | against the default |
+  | | tokens/s | the tail skip's gain / against upstream's defaults |
   |---|---|---|
-  | 0.1.42's defaults | 193.7 +- 6.1 | |
-  | `STRATA_ROUTE_TAIL_SKIP=0` | 174.0 +- 8.7 | **1.115 +- 0.051** (5 of 5 rounds faster) |
-  | `STRATA_PCIE_FRAC_DEFAULT=old` (0.25) | 197.2 +- 7.4 | 0.983 +- 0.045 (2 of 5) |
+  | upstream 0.1.42's defaults (`STRATA_ROUTE_TAIL_SKIP=7`, the opt-in here) | 193.7 +- 6.1 | |
+  | `STRATA_ROUTE_TAIL_SKIP=0` (this fork's default for NVFP4) | 174.0 +- 8.7 | **1.115 +- 0.051** (5 of 5 rounds faster) |
+  | `STRATA_PCIE_FRAC_DEFAULT=old` (0.25), the skip on | 197.2 +- 7.4 | 0.983 +- 0.045 (2 of 5) |
 
-  The tail skip gains 11.5%; the measured share is as fast as the fixed 0.25, as this fork's per-layer model was.
-- **Checks** (release build 86e1caa3): against 0.1.41-nvfp4.7's engine (1217e500, references made with it on
-  `qwen-nvfp4-gptq`: the orca packs are deleted), 2K and 32K give the same logits and 32 tokens (`--pcie-frac 0.25`,
-  the CPU share 0.5, 6,000 slots; the tail skip is a serve default, so not in these runs). With every fork default
-  off the logits equal upstream 0.1.42's on IQ2_XS (32K, 12,000 slots). Tests: 115 of 118 pass (the 3 that fail need model files this PC does not have); the server's 708 OK (15
-  skipped); setup's and the tools' 769, all but `test_iq_pack` (no `yaml` in that venv).
+  The tail skip gains 11.5%, which the NVFP4 models give up by default; the measured share is as fast as the fixed
+  0.25, as this fork's per-layer model was.
+- **Checks** (release build 7eeefca8, c83625c3): against 0.1.41-nvfp4.7's engine (1217e500, references made with it
+  on `qwen-nvfp4-gptq`: the orca packs are deleted), 2K and 32K give the same logits and 32 tokens (`--pcie-frac 0.25`,
+  the CPU share 0.5, 6,000 slots; the tail skip is a serve default, so not in these runs).
+  - **The tail skip's default, through serve** (the normal mode, 8,000 slots, the texts above): unset, the start line
+    says it is off for NVFP4 experts, and all 13 output files are byte for byte those of `STRATA_ROUTE_TAIL_SKIP=0` on
+    the build before the change (86e1caa3). With `=7` it acts: KL 0.034 against that run (p99 0.45), the same top
+    token 93.7%. Upstream's IQ2_XS GGUF, unset: `STRATA_ROUTE_TAIL_SKIP=7 is ON (default)`.
+  - **On 86e1caa3** (the same engine but for that start-up default): with every fork default off the logits equal
+    upstream 0.1.42's on IQ2_XS (32K, 12,000 slots). Tests: 115 of 118 pass (the 3 that fail need model files this PC
+    does not have); the server's 708 OK (15 skipped); setup's and the tools' 769, all but `test_iq_pack` (no `yaml`
+    in that venv).
 
 ### The censorship switch in Model settings (2026-10-10, release 0.1.41-nvfp4.7)
 
