@@ -3117,6 +3117,10 @@ class Service:
                 live["state"] = "generating"
         engine = {"model": self.model, "max_context": self.reported_ctx(), "images": self.vision is not None,
                   **dict(getattr(self.engine, "info", {}) or {})}
+        # this fork: the projection switch's default for requests that leave it out (the config's "uncensored" /
+        # sampling block, then the Chat settings shared with apps); a loaded vector is on when nothing says
+        on = {**self.sampling_defaults, **self.shared}.get("experimental_speed_projection")
+        engine["uncensored_default"] = True if on is None else bool(on)
         tel = self.telemetry.snapshot() if getattr(self, "telemetry", None) else {"now": {}, "history": {}, "static": {}}
         parked = self.conv_log.poll(getattr(self.engine, "log_path", None), getattr(self.engine, "log_start", None))
         return {"engine": engine, "live": live, "requests": hist[::-1][:None if all_requests else 12],
