@@ -44,8 +44,9 @@ inline bool low_ram_auto(uint64_t installed) { return installed > 0 && installed
 /// a file typed as 64000 counts 64000.  Only what is there for sure counts: a page file Windows grows on demand
 /// (system-managed, or an initial size below the maximum) may not grow in time while WDDM charges the VRAM (upstream
 /// issue #60: "System managed" and 4096-32768 MB still failed, a fixed 64 GB worked).  Below kPageFileWarnMb in all,
-/// the engine and setup warn; kPageFileAdviseMb is what they advise, as a fixed size (initial = maximum).
-constexpr uint64_t kPageFileWarnMb = 60000, kPageFileAdviseMb = 64000;
+/// the engine and setup warn; kPageFileAdviseMb is what they advise, as a fixed size (initial = maximum): 65536, the
+/// size setup's page_file_advice advises since upstream 0.1.42 (#1693, PAGE_FILE_FIXED_MB).
+constexpr uint64_t kPageFileWarnMb = 60000, kPageFileAdviseMb = 65536;
 
 /// One PagingFiles entry ("C:\pagefile.sys 16000 64000", "C:\pagefile.sys 0 0" or "?:\pagefile.sys"): the drive
 /// ('?' = every drive automatic) and its sizes, -1 when Windows manages the size.  False for an empty line.
