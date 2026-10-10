@@ -1760,7 +1760,8 @@ struct PcieAuto {
 // This fork: batches of 256 tokens (4,096 rows), the size from which a prompt chunk takes the PLE batch readers
 // (PleTable::gather_batch, 8 readers x 32 reads in flight).  Upstream's 4-token batches go one ticket at a time: on an
 // RTX 5090 PC with a Samsung 9100 PRO they measured 5,500 rows/s, "slow", and the mapped reads it switched to took a
-// 32K prompt's PLE from 231 ms to 20.2 s (3.7 -> 23.4 s in all).
+// 32K prompt's PLE from 231 ms to 20.2 s (3.7 -> 23.4 s in all).  One batch first, untimed: the batch readers'
+// threads and handles start with it.
 static double ple_direct_rows_per_s(strata::kernels::PleTable& t) {
     const uint64_t n = t.rows();
     if (n < 4096) return -1.0;
@@ -1768,6 +1769,11 @@ static double ple_direct_rows_per_s(strata::kernels::PleTable& t) {
     std::vector<uint32_t> rows(kTok * 16);
     std::vector<float> out(kTok * 2560);
     uint64_t x = 0x9E3779B97F4A7C15ull ^ n;
+    {   // this fork: the untimed first batch (the batch readers start)
+        for (auto& r : rows) { x ^= x << 13; x ^= x >> 7; x ^= x << 17; r = (uint32_t) (x % n); }
+        std::string e;
+        if (!t.gather_batch(rows.data(), kTok, out.data(), e)) return -1.0;
+    }
     const auto t0 = std::chrono::steady_clock::now();
     uint64_t done = 0;
     double el = 0;
@@ -3364,6 +3370,7 @@ int main(int argc, char** argv) {
     // is a mapping of the ORIGINAL second GGUF shard, the six weights are already loaded in the arena, and the
     // three buffers are the only allocation.
     strata::kernels::PleTable ple_table;
+    std::function<bool()> ple_probe_later;   // this fork: the PLE probe after the expert arena's thread (see the probe)
     std::vector<float> ple_emb_host((size_t) strata::kernels::NG_N_EMBD);
     float* ple_emb_dev = nullptr;
     float* ple_scratch = nullptr;
@@ -3392,6 +3399,12 @@ int main(int argc, char** argv) {
         }
         // Recommend, never force: when the default direct reads measure slow, switch to the mapped reads (40-100x
         // faster on the reporters' drives); an explicit --ple-io direct is kept and only warned about.
+        // This fork: while the expert arena loads on its own thread (63 GiB at ~11 GiB/s from the same SSD) the probe
+        // measured the arena's reads - 15,500-21,600 rows/s against a 15,000 bar on qwen-nvfp4-gptq, 800,000 with the
+        // arena loaded first (STRATA_ARENA_SYNC=1) - so it runs once the arena is in (ple_probe_later, below).
+        auto pio_s = std::make_shared<strata::kernels::PleIoOptions>(pio);
+        auto ple_probe = [&ple_table, &o, pio_s]() -> bool {
+        strata::kernels::PleIoOptions& pio = *pio_s;
         if (pio.mode == strata::kernels::PleIo::Direct && std::getenv("STRATA_PLE_PROBE") == nullptr) {
             constexpr double kSlowRowsPerS = 15000.0;   // ~60 MB/s of 4 KiB pages; a healthy NVMe is >100k
             const double rps = ple_direct_rows_per_s(ple_table);
@@ -3406,9 +3419,10 @@ int main(int argc, char** argv) {
                     ple_table.close();
                     pio.mode = strata::kernels::PleIo::Mmap;
                     pio.keepalive_ms = 0;
+                    std::string err;
                     if (!ple_table.open(o.ple_gguf, err, pio)) {
                         std::fprintf(stderr, "strata generate: %s\n", err.c_str());
-                        return 1;
+                        return false;
                     }
                 } else {
                     std::fprintf(stderr, "strata generate: WARNING: --ple-io direct measures slow here (%.0f rows/s, about %.0f "
@@ -3417,6 +3431,14 @@ int main(int argc, char** argv) {
                                          "--ple-io ram needs the RAM for the table\n", rps, rps * 4096.0 / 1e6);
                 }
             }
+        }
+        return true;
+        };
+        if (arena_async && arena_thread.joinable()) {
+            ple_probe_later = ple_probe;
+        } else {
+            if (!ple_probe()) return 1;
+            pio = *pio_s;   // the mode the probe chose (the lines below say which)
         }
 #if !defined(_WIN32)
         if (pio.mode == strata::kernels::PleIo::Direct) {
@@ -4833,6 +4855,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "strata generate: loaded %.2f GiB at %.2f GiB/s\n",
                      (double) strata::kernels::cpu::expert_layout().total / (1024.0 * 1024 * 1024),
                      arena_src.load_gib_per_second());
+        if (ple_probe_later && !ple_probe_later()) return 1;   // this fork: the PLE probe once the arena is in
         // A rate under ~0.2 GiB/s is not the hardware.  Task Scheduler / service contexts throttle this
         // read+fill about 24x (measured 0.05 vs 1.42 GiB/s for the same binary, args and cache state; the
         // scheduler's defaults - Below normal priority and a least-privilege token - were the only
