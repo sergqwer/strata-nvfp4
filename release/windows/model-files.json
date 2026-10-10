@@ -1,0 +1,143 @@
+{
+ "family": "qwen-nvfp4-gptq",
+ "title": "Qwen3.8-Flash-Next (NVFP4, GPTQ)",
+ "note": "tools/bundle_model.py --write from setup.py's NVFP4_REPOS: do not edit by hand",
+ "files": [
+  {
+   "repo": "Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata",
+   "revision": "640a1db97446ddd5e89d2b70ecd0297987192c93",
+   "path": "pack/dense.bin",
+   "size": 1538035200,
+   "sha256": "974df6dcefcae85e3fd2c19fcc12eeaacaadde8261ab732d5af5af6ce2e25a7a",
+   "dir": "models/qwen-nvfp4-gptq"
+  },
+  {
+   "repo": "Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata",
+   "revision": "640a1db97446ddd5e89d2b70ecd0297987192c93",
+   "path": "pack/experts.bin",
+   "size": 67948118016,
+   "sha256": "325e5e0d85c262a8d8278daf73b20696ec877d9a3ff584e57391fa69ad10bc64",
+   "dir": "models/qwen-nvfp4-gptq"
+  },
+  {
+   "repo": "Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata",
+   "revision": "640a1db97446ddd5e89d2b70ecd0297987192c93",
+   "path": "pack/index.txt",
+   "size": 93663,
+   "sha256": "f62dc71e1c74a72794db54d3917bc71131cc6eae6f3dcdc3fdada48ff70f93ab",
+   "dir": "models/qwen-nvfp4-gptq"
+  },
+  {
+   "repo": "Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata",
+   "revision": "640a1db97446ddd5e89d2b70ecd0297987192c93",
+   "path": "pack/native_experts.txt",
+   "size": 1599,
+   "sha256": "615f655fb28bf60b243664860b135710bf4177b111c6be89073e780a35de1018",
+   "dir": "models/qwen-nvfp4-gptq"
+  },
+  {
+   "repo": "Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata",
+   "revision": "640a1db97446ddd5e89d2b70ecd0297987192c93",
+   "path": "pack/tokenizer/chat_template.jinja",
+   "size": 8952,
+   "sha256": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+   "dir": "models/qwen-nvfp4-gptq"
+  },
+  {
+   "repo": "Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata",
+   "revision": "640a1db97446ddd5e89d2b70ecd0297987192c93",
+   "path": "pack/tokenizer/merges.txt",
+   "size": 3600844,
+   "sha256": "080cf95432173729d160346b7882bd2a644b07f7a3813a3eb73f4e66787bfde9",
+   "dir": "models/qwen-nvfp4-gptq"
+  },
+  {
+   "repo": "Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata",
+   "revision": "640a1db97446ddd5e89d2b70ecd0297987192c93",
+   "path": "pack/tokenizer/token_type.json",
+   "size": 744960,
+   "sha256": "5088c8c298fc06af8382ddb3b76c888703ac2634e82263b97eedcc2ad202738b",
+   "dir": "models/qwen-nvfp4-gptq"
+  },
+  {
+   "repo": "Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata",
+   "revision": "640a1db97446ddd5e89d2b70ecd0297987192c93",
+   "path": "pack/tokenizer/tokenizer.json",
+   "size": 554,
+   "sha256": "87be2ac47d8bc7393b7435df6ccd276740019a393941a2585d5edce59f450c54",
+   "dir": "models/qwen-nvfp4-gptq"
+  },
+  {
+   "repo": "Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata",
+   "revision": "640a1db97446ddd5e89d2b70ecd0297987192c93",
+   "path": "pack/tokenizer/vocab.json",
+   "size": 5737005,
+   "sha256": "4ba64f0332abcfb0b600b7df1537d1e836e68009d5fb7cdb77339738dc6365c4",
+   "dir": "models/qwen-nvfp4-gptq"
+  },
+  {
+   "repo": "Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata",
+   "revision": "640a1db97446ddd5e89d2b70ecd0297987192c93",
+   "path": "qwen-nvfp4-gptq-dense.gguf",
+   "size": 5991569472,
+   "sha256": "abdf74336b53d8f7ca3d99947f1eac8f19b8a544966750127cb61e561b127e3b",
+   "dir": "models/qwen-nvfp4-gptq"
+  },
+  {
+   "repo": "Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata",
+   "revision": "640a1db97446ddd5e89d2b70ecd0297987192c93",
+   "path": "ple-fp8.gguf",
+   "size": 51200246176,
+   "sha256": "37f89b8ce5a3425932763257c40229ec02723ad2ab14b4bbfc26a486f4725c9c",
+   "dir": "models/qwen-nvfp4-gptq"
+  },
+  {
+   "repo": "Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata",
+   "revision": "640a1db97446ddd5e89d2b70ecd0297987192c93",
+   "path": "token-embd-bf16.gguf",
+   "size": 1271398656,
+   "sha256": "386203af9070c7b43acb24ded8922876721d97bbad1a709b25cb49d694a7f51d",
+   "dir": "models/qwen-nvfp4-gptq"
+  },
+  {
+   "repo": "Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata",
+   "revision": "640a1db97446ddd5e89d2b70ecd0297987192c93",
+   "path": "mtp/dense.bin",
+   "size": 116099072,
+   "sha256": "c724dc0b0822ada5d2977bf5bde821605feabaa64ea2e0045b67ca656329070a",
+   "dir": "models/qwen-nvfp4-gptq"
+  },
+  {
+   "repo": "Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata",
+   "revision": "640a1db97446ddd5e89d2b70ecd0297987192c93",
+   "path": "mtp/dense.txt",
+   "size": 1880,
+   "sha256": "8773c81ebb0986e37fe94a8a9933e87be48b1fabc6889a0106bcdab179d1c2ac",
+   "dir": "models/qwen-nvfp4-gptq"
+  },
+  {
+   "repo": "Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata",
+   "revision": "640a1db97446ddd5e89d2b70ecd0297987192c93",
+   "path": "mtp/draft_vocab.bin",
+   "size": 235852,
+   "sha256": "25d7fd1670a2e0ec885868d1718d410a3baab03bceeacf0a156cf93ffe4e1ef4",
+   "dir": "models/qwen-nvfp4-gptq"
+  },
+  {
+   "repo": "Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata",
+   "revision": "640a1db97446ddd5e89d2b70ecd0297987192c93",
+   "path": "mtp/experts.bin",
+   "size": 707788800,
+   "sha256": "09398406be61f1f54c93861f449e48b8df0bfccbc9ec9b2b7636775a6ea9244f",
+   "dir": "models/qwen-nvfp4-gptq"
+  },
+  {
+   "repo": "ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF",
+   "revision": "ed59f92082b1e93c0e96d60a8b11aab089b52f09",
+   "path": "mmproj-Qwen3.8-Flash-Next-BF16.gguf",
+   "size": 907543008,
+   "sha256": "b1a82259702816a5330d7bd7607cd9676b11780e79ff7348c21103ff3ce49bd0",
+   "dir": "models"
+  }
+ ]
+}
