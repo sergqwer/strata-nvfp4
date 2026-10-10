@@ -1,6 +1,6 @@
-"""The original, censored Qwen in this fork's NVFP4 format: qwen-nvidia-nvfp4 (NVIDIA's ModelOpt NVFP4 checkpoint
-converted) and qwen-nvfp4-gptq (every expert NVFP4 by GPTQ), both uploaded and offered: the menu lists them after the
-uncensored model and says which are censored, an install names its config, served model, files and license, and the
+"""The original, censored Qwen in this fork's NVFP4 format: qwen-nvfp4-gptq (every expert NVFP4 by GPTQ, the default)
+and qwen-nvidia-nvfp4 (NVIDIA's ModelOpt NVFP4 checkpoint converted), both uploaded and offered: the menu lists them
+first and says they are censored, an install names its config, served model, files and license, and the
 files the two repositories share are downloaded once.  tools/test_setup_nvfp4.py's harness (setup.main() on mocked PCs).
 
     python -m unittest tools.test_setup_qwen_nvfp4
@@ -57,7 +57,7 @@ class AsCommitted(unittest.TestCase):
         for comp in ("ple", "embd", "mtp"):
             self.assertEqual(sorted(a[comp].values()), sorted(b[comp].values()), comp)
         self.assertNotEqual(a["pack"]["pack/experts.bin"][1], b["pack"]["pack/experts.bin"][1])
-        orca = setup.NVFP4_REPOS[setup.ORCA_REPO]["ple"]["ple-fp8.gguf"][1]
+        orca = "40f95a6242e08e9aea2e525cd3b21c3239163d1040682facf5cf2484192d42ce"   # withdrawn orca's ple-fp8.gguf
         self.assertNotEqual(a["ple"]["ple-fp8.gguf"][1], orca)          # orca's file is another FP8 rounding
 
     def test_the_menu_with_the_committed_tables(self):
@@ -65,12 +65,11 @@ class AsCommitted(unittest.TestCase):
         code, out, cfg, _ = run(ram, found, ["--no-start"], repos=setup.NVFP4_REPOS, answers="")
         self.assertEqual(code, 0, out[-3000:])
         lines = menu_lines(out)
-        self.assertEqual(len(lines), 3 + len(setup.FAMILIES))
-        self.assertTrue(lines[0].startswith("1) OrcaRouter"), lines)
+        self.assertEqual(len(lines), 2 + len(setup.FAMILIES))
+        self.assertTrue(lines[0].startswith("1) Qwen3.8-Flash-Next (NVFP4, GPTQ)"), lines)
         self.assertTrue(lines[1].startswith("2) Qwen3.8-Flash-Next (NVIDIA's NVFP4)"), lines)
-        self.assertTrue(lines[2].startswith("3) Qwen3.8-Flash-Next (NVFP4, GPTQ)"), lines)
         self.assertNotIn("not offered", out)
-        self.assertEqual(cfg["model_name"], "orcarouter-qwen3.8-flash-next-uncensored-nvfp4")   # still the default
+        self.assertEqual(cfg["model_name"], "qwen3.8-flash-next-gptq-nvfp4")   # the default since 0.1.41-nvfp4.5
 
     def test_each_install_pins_its_upload_and_links_what_the_other_has(self):
         ram, found = PROFILES["128GB-1x24GB"]
@@ -106,17 +105,17 @@ class Published(unittest.TestCase):
         code, out, cfg, _ = run(ram, found, ["--no-start"], repos=ALL, answers="")
         self.assertEqual(code, 0, out[-3000:])
         lines = menu_lines(out)
-        self.assertEqual(len(lines), 3 + len(setup.FAMILIES))
-        self.assertTrue(lines[0].startswith("1) OrcaRouter"), lines)
+        self.assertEqual(len(lines), 2 + len(setup.FAMILIES))
+        self.assertTrue(lines[0].startswith("1) Qwen3.8-Flash-Next (NVFP4, GPTQ)"), lines)
         self.assertTrue(lines[1].startswith("2) Qwen3.8-Flash-Next (NVIDIA's NVFP4)"), lines)
-        self.assertTrue(lines[2].startswith("3) Qwen3.8-Flash-Next (NVFP4, GPTQ)"), lines)
-        for i in (1, 2):
+        for i in (0, 1):
             self.assertIn("censored", lines[i])
             self.assertNotIn("does not refuse", lines[i])
         self.assertIn("plain rounding", lines[1])
-        self.assertIn("GPTQ", lines[2])
-        self.assertIn("does not refuse", lines[0])        # OrcaRouter's: uncensored
-        self.assertEqual(cfg["model_name"], "orcarouter-qwen3.8-flash-next-uncensored-nvfp4")   # still the default
+        self.assertIn("GPTQ", lines[0])
+        self.assertIn("--uncensored on", lines[0])        # the switch, only on ours
+        self.assertNotIn("uncensored", lines[1])
+        self.assertEqual(cfg["model_name"], "qwen3.8-flash-next-gptq-nvfp4")   # the default
 
     def test_each_installs_its_own_files(self):
         ram, found = PROFILES["128GB-1x24GB"]
