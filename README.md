@@ -12,6 +12,28 @@ models are still offered.
 - [Maximilian228/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Strata):
   the original Qwen, censored, NVIDIA's NVFP4 converted (`--family qwen-nvidia-nvfp4`)
 
+## What's new
+
+- **Censorship can be turned off (0.1.41-nvfp4.5).** The original Qwen (`qwen-nvfp4-gptq`, and the original Qwen's
+  GGUFs `qwen` and `unsloth`) now runs with or without censorship. The switch is off by default. To turn it on:
+  - for one chat: the web app's **"Disable censorship"** switch;
+  - for one request: the API field `"uncensored": true`;
+  - as the default: install with `START-HERE.bat --uncensored on`.
+
+  The engine removes the model's refusal direction at run time in layers 8-33 only; the weights are untouched.
+  - With it on and thinking on, 0 of 104 English and 0 of 30 Ukrainian test requests were refused.
+  - The model thinks as long as the original: 1,947 against 1,699 tokens on a long Claude Code request.
+  - Never for NVIDIA's model: its license forbids it.
+  - [Details](#quick-start).
+- **orca-nvfp4 is removed from the fork (0.1.41-nvfp4.5).** OrcaRouter's uncensored model, the former default, is no
+  longer offered.
+  - Its weight edit made it a much weaker agent. On the same Claude Code task it took 10-70 steps against the
+    original's 175 and gave a clearly worse result. It thinks ~40% less.
+  - Instead, use `--family qwen-nvfp4-gptq --uncensored on`: the original's weights, without the censorship.
+  - An existing orca install keeps working.
+- **Recommended sampling (0.1.41-nvfp4.6).** Setup writes the model's own `temperature 1.0, top_p 0.95, top_k 20`
+  into the config, as the default for requests that send none. Before, Claude Code decoded greedy.
+
 The design is upstream's: the routed experts live in RAM, the most-used ones are cached in VRAM, the misses are
 computed on the CPU and fetched over PCIe in parallel with the GPU, and an MTP draft head speculates. Upstream's README
 is kept as [README.upstream.md](README.upstream.md). [docs/NVFP4.md](docs/NVFP4.md) has every measurement behind this
