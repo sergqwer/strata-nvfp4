@@ -12,18 +12,18 @@ Accuracy against Qwen3.8-Flash-Next with every routed expert in Q8_0, speed on a
 Setup downloads the models it names; each Hugging Face card has its measurements and how to run the
 files by hand.
 
-| Model | Same top token as Q8_0 | Decode, tokens/s | 32K prompt | RAM, from | Get it |
-| --- | ---: | ---: | ---: | ---: | --- |
-| Q8_0: every expert Q8_0 (ours, `qwen-q8`) | 100% (the reference) | 47 | 10.3 s | 128 GB | [Maximilian228/Qwen3.8-Flash-Next-Q8_0-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-Q8_0-Strata) |
-| NVFP4 + Q8_0 mix (ours, `qwen-nvfp4-mix`) | 95.0% | 91 | 4.2 s | 128 GB | [Maximilian228/Qwen3.8-Flash-Next-NVFP4-Q8-Mix-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVFP4-Q8-Mix-Strata) |
-| Unsloth UD-Q4_K_XL (`unsloth`, `--model UD-Q4_K_XL`) | 94.1% | 169 | 4.9 s | 48 GB | [unsloth/Qwen3.8-Flash-Next-GGUF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) |
-| NVFP4 GPTQ (ours, `qwen-nvfp4-gptq`, setup's default) | 93.6% | 177 | 3.9 s | 64 GB | [Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata) |
-| NVIDIA NVFP4, converted by us (`qwen-nvidia-nvfp4`) | 92.9% | 167 | 3.9 s | 64 GB | [Maximilian228/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Strata) |
-| Unsloth UD-Q3_K_XL (`unsloth`, `--model UD-Q3_K_XL`) | 90.7% | 208 | 3.8 s | 48 GB | [unsloth/Qwen3.8-Flash-Next-GGUF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) |
-| ISTA-DASLab IQ3_S (`qwen`, `--model IQ3_S`) | 90.0% | 228 | 3.9 s | 64 GB | [ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF) |
-| ISTA-DASLab IQ3_XXS (`qwen`, `--model IQ3_XXS`, upstream's pick) | 87.3% | 239 | 3.9 s | 60 GB | [ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF) |
-| ISTA-DASLab IQ2_XS (`qwen`, `--model IQ2_XS`) | 85.0% | 265 | 4.2 s | 48 GB | [ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF) |
-| ISTA-DASLab Q2_0 (`qwen`, `--model Q2_0`) | 84.1% | 256 | 3.9 s | 48 GB | [ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF) |
+| Model | Same top token as Q8_0 | Decode, tokens/s | 32K prompt | RAM in use | PC for this speed | Get it |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Q8_0: every expert Q8_0 (ours, `qwen-q8`) | 100% (the reference) | 47 | 10.3 s | 106 GiB | 128 GB | [Maximilian228/Qwen3.8-Flash-Next-Q8_0-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-Q8_0-Strata) |
+| NVFP4 + Q8_0 mix (ours, `qwen-nvfp4-mix`) | 95.0% | 91 | 4.2 s | 105 GiB | 128 GB | [Maximilian228/Qwen3.8-Flash-Next-NVFP4-Q8-Mix-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVFP4-Q8-Mix-Strata) |
+| Unsloth UD-Q4_K_XL (`unsloth`, `--model UD-Q4_K_XL`) | 94.1% | 169 | 4.9 s | 77 GiB | 96 GB | [unsloth/Qwen3.8-Flash-Next-GGUF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) |
+| NVFP4 GPTQ (ours, `qwen-nvfp4-gptq`, setup's default) | 93.6% | 177 | 3.9 s | 69 GiB | 96 GB | [Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata) |
+| NVIDIA NVFP4, converted by us (`qwen-nvidia-nvfp4`) | 92.9% | 167 | 3.9 s | 69 GiB | 96 GB | [Maximilian228/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Strata) |
+| Unsloth UD-Q3_K_XL (`unsloth`, `--model UD-Q3_K_XL`) | 90.7% | 208 | 3.8 s | 58 GiB | 96 GB | [unsloth/Qwen3.8-Flash-Next-GGUF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) |
+| ISTA-DASLab IQ3_S (`qwen`, `--model IQ3_S`) | 90.0% | 228 | 3.9 s | 52 GiB | 64 GB | [ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF) |
+| ISTA-DASLab IQ3_XXS (`qwen`, `--model IQ3_XXS`, upstream's pick) | 87.3% | 239 | 3.9 s | 45 GiB | 64 GB | [ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF) |
+| ISTA-DASLab IQ2_XS (`qwen`, `--model IQ2_XS`) | 85.0% | 265 | 4.2 s | 38 GiB | 48 GB | [ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF) |
+| ISTA-DASLab Q2_0 (`qwen`, `--model Q2_0`) | 84.1% | 256 | 3.9 s | 37 GiB | 48 GB | [ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF) |
 
 - **Accuracy:** how often the model's most likely next token is the Q8_0 model's. Measured on 5,153 tokens of code,
   docs, English and Ukrainian chats and agent transcripts, every model fed the same text. Every model ran with its
@@ -33,9 +33,14 @@ files by hand.
 - **Speed:** RTX 5090 (32 GB), Ryzen 9 9950X3D, 128 GB of DDR5-5600, Windows 11, Strata NVFP4 0.1.42-nvfp4.1's engine with
   the arguments 0.1.42-nvfp4.2's setup writes for each model. Median of 3 runs: 4 greedy chats (up to 1,500 tokens each) and one
   32,007-token prompt.
+- **RAM:** "RAM in use" is the engine and the server at the speed shown; "PC for this speed" is the installed RAM that
+  holds it with Windows beside it. Smaller PCs still run the models, slower: the NVFP4 GPTQ and NVIDIA's on a 64 GB PC
+  in the low-RAM mode decode ~115 tokens/s and read a 32K prompt in ~9 s (docs/NVFP4.md, "64 GB of RAM"); Unsloth's
+  files go into a RAM-budget mode there and read experts from the SSD (UD-Q4_K_XL: 7-8.5 tokens/s at 64 GB,
+  upstream's measurement); setup's minimum is 48 GB for them and the ISTA 2-bit files, 60-64 GB for the ISTA 3-bit ones.
 - **Unsloth's files keep every expert in RAM where they fit with 16 GiB more** (setup from 0.1.42-nvfp4.2): from ~88 GB
   of RAM for UD-Q4_K_XL and ~68 GB for UD-Q3_K_XL. Below that, setup's RAM-budget mode reads the rest from the GGUF on
-  the SSD: UD-Q4_K_XL 7-8.5 tokens/s on 64 GB (upstream's measurement). Setup before 0.1.42-nvfp4.2 used the budget
+  the SSD. Setup before 0.1.42-nvfp4.2 used the budget
   mode on every PC; on 128 GB UD-Q4_K_XL then decoded 118 tokens/s and read the 32K prompt in 30 s (run setup again to
   switch an existing install).
 - UD-Q3_K_XL's experts are i-quants despite the name: IQ3_XXS gate/up with IQ4_NL or Q8_0 down.
