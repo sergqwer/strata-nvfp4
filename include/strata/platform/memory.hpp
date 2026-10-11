@@ -44,7 +44,21 @@ uint64_t total_physical_memory();
 /// installed (total_physical_memory), so a 96 GB PC (93.4-95.6 GiB listed) keeps every expert in RAM and a 64 GB one
 /// does not.  Measured with 88 GiB left to the engine (ram88): the arena 13.1 ms a round, 21 GiB free; low-RAM 20.3.
 constexpr uint64_t kLowRamBelowGib = 92;
-inline bool low_ram_auto(uint64_t installed) { return installed > 0 && installed < (kLowRamBelowGib << 30); }
+/// 0.1.42-nvfp4.2: from 92 GiB on, a pack whose experts (experts.bin) do not fit with kLowRamBesideGib more is low-RAM
+/// too - the all-Q8_0 pack (119.5 GiB) on a 128 GB PC (127.2 GiB listed).  16 = what the engine, the server and the
+/// image encoder took beside the experts (4.5-5.7 GiB, the GPTQ and mix packs) + 10 for Windows and the desktop.
+/// The NVFP4+Q8 mix (103.1 GiB) keeps the arena there: 107 GiB more in use, ~10 still available beside the desktop.
+constexpr uint64_t kLowRamBesideGib = 16;
+/// The RAM the low-RAM mode leaves free when the pack's size turned it on (generate.cpp; below 92 GiB it is 6): with
+/// 6 the Q8_0 pack left the 128 GB desktop too little (a background job was killed), with 10 it ran (46-47 tok/s).
+constexpr uint64_t kLowRamBySizeHeadroomGib = 10;
+inline bool low_ram_auto(uint64_t installed, uint64_t experts = 0) {
+    return installed > 0 && (installed < (kLowRamBelowGib << 30) || installed < experts + (kLowRamBesideGib << 30));
+}
+/// low_ram_auto because of the pack's size, not because of a PC below 92 GiB
+inline bool low_ram_by_size(uint64_t installed, uint64_t experts) {
+    return installed >= (kLowRamBelowGib << 30) && low_ram_auto(installed, experts);
+}
 
 /// Windows' page files.  The commit limit is RAM + page files, and under WDDM the GPU's allocations are charged to it
 /// too (~30 GiB on a 32 GB card): the NVFP4 models commit ~100 GiB.  Sizes in Windows' dialog units ("MB" = MiB), so
