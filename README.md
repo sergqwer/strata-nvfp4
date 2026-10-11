@@ -6,11 +6,39 @@ upstream 0.1.42. Setup installs, ready-made from Hugging Face, the original Qwen
 checkpoint converted), censored as Qwen ships it; on ours an opt-in switch turns the censorship off. Upstream's GGUF
 models are still offered.
 
-**The models on Hugging Face** (setup downloads them; each card has the measurements and how to run the files by hand):
-- [Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata):
-  the original Qwen, our GPTQ (`--family qwen-nvfp4-gptq`, the default; with a switch that turns its censorship off)
-- [Maximilian228/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Strata):
-  the original Qwen, censored, NVIDIA's NVFP4 converted (`--family qwen-nvidia-nvfp4`)
+## Models
+
+Accuracy against Qwen3.8-Flash-Next with every routed expert in Q8_0, speed on an RTX 5090 with 128 GB of RAM.
+Setup downloads the models it names; each Hugging Face card has its measurements and how to run the
+files by hand.
+
+| Model | Same top token as Q8_0 | Decode, tokens/s | 32K prompt | RAM, from | Get it |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Q8_0: every expert Q8_0 (ours) | 100% (the reference) | 47 | 10.3 s | 128 GB | [Maximilian228/Qwen3.8-Flash-Next-Q8_0-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-Q8_0-Strata) |
+| NVFP4 + Q8_0 mix (ours) | 95.0% | 91 | 4.2 s | 128 GB | [Maximilian228/Qwen3.8-Flash-Next-NVFP4-Q8-Mix-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVFP4-Q8-Mix-Strata) |
+| Unsloth UD-Q4_K_XL (`unsloth`) | 94.1% | 118 | 29.9 s | 48 GB | [unsloth/Qwen3.8-Flash-Next-GGUF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) |
+| NVFP4 GPTQ (ours, `qwen-nvfp4-gptq`, setup's default) | 93.6% | 177 | 3.9 s | 64 GB | [Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata) |
+| NVIDIA NVFP4, converted by us (`qwen-nvidia-nvfp4`) | 92.9% | 167 | 3.9 s | 64 GB | [Maximilian228/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Strata) |
+| ISTA-DASLab IQ3_S (`qwen`, `--model IQ3_S`) | 90.0% | 228 | 3.9 s | 64 GB | [ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF) |
+| ISTA-DASLab IQ3_XXS (`qwen`, `--model IQ3_XXS`, upstream's pick) | 87.3% | 239 | 3.9 s | 60 GB | [ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF) |
+| ISTA-DASLab IQ2_XS (`qwen`, `--model IQ2_XS`) | 85.0% | 265 | 4.2 s | 48 GB | [ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF) |
+| ISTA-DASLab Q2_0 (`qwen`, `--model Q2_0`) | 84.1% | 256 | 3.9 s | 48 GB | [ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF) |
+
+- **Accuracy:** how often the model's most likely next token is the Q8_0 model's. Measured on 5,153 tokens of code,
+  docs, English and Ukrainian chats and agent transcripts, every model fed the same text. Every model ran with its
+  experts on the CPU and the route tail skip off, so only the quantization differs. The Q8_0 model also has Q8_0
+  attention, Qwen's BF16 router and Qwen's own FP8 PLE, so it is the original's precision everywhere but the 8-bit
+  weights.
+- **Speed:** RTX 5090 (32 GB), Ryzen 9 9950X3D, 128 GB of DDR5-5600, Windows 11, Strata NVFP4 0.1.42-nvfp4.1 with the
+  arguments setup writes for each model. Median of 3 runs: 4 greedy chats (up to 1,500 tokens each) and one
+  32,007-token prompt.
+- The GGUF models run upstream's route tail skip by default: ~10% faster decode, and answers a little further from
+  Q8_0 than the table shows.
+- Unsloth's 32K prompt is slow because the release engine has no prompt kernels for its Q4_K / Q5_K experts
+  (upstream's choice), so they are expanded to FP16 first. Below ~100 GB of RAM its experts come from the SSD:
+  7-8.5 tokens/s at 64 GB (upstream's measurement).
+- The two 128 GB models are not in the fork's setup yet; their cards say how to run them. Q8_0 on a 128 GB PC runs in
+  the low-RAM mode (100 GiB of experts locked in RAM).
 
 ## What's new
 
