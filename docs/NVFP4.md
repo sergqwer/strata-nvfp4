@@ -374,6 +374,91 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### Q8_0 for a 128 GB PC (2026-10-11, release 0.1.42-nvfp4.2)
+
+- **Two packs of the original Qwen with Q8_0 experts**, in this fork's pack format, on Hugging Face (public, every
+  file checked against its SHA-256 after the upload), and in setup:
+  - `qwen-nvfp4-mix`: [Maximilian228/Qwen3.8-Flash-Next-NVFP4-Q8-Mix-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVFP4-Q8-Mix-Strata)
+    (4774b340). `qwen-nvfp4-gptq`'s GPTQ NVFP4 in 10 layers; in the other 38, Q8_0 for the down projection (2
+    layers), for gate/up (8) or for all three (28). The layers were chosen by their measured sensitivity, within
+    ~110 GB of RAM for the whole model. 103.13 GiB of experts (`pack/mix.json` lists the layers).
+  - `qwen-q8`: [Maximilian228/Qwen3.8-Flash-Next-Q8_0-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-Q8_0-Strata)
+    (5202b08c). Every routed expert Q8_0, rounded to nearest from Qwen's BF16: 119.53 GiB. The reference of the
+    README's model table.
+  - The dense GGUF, `pack/dense.bin`, the FP8 n-gram table, the BF16 embedding and the MTP head are
+    `qwen-nvfp4-gptq`'s files byte for byte: setup links them by SHA-256, so after `qwen-nvfp4-gptq` it downloads
+    only the experts (111 / 128 GB).
+  - Measured on 128 GB with an RTX 5090 (engine 0.1.42-nvfp4.1, the tail skip off, 3 rounds; the same texts and runs
+    as the README's table):
+
+    | | the same top token as Q8_0 | decode, tokens/s | 32K prompt | RAM in use | experts |
+    |---|---:|---:|---:|---:|---|
+    | `qwen-q8` | the reference | 46.1-47.0 | 10.2-10.3 s | 106 GiB | the low-RAM mode, 100 GiB locked |
+    | `qwen-nvfp4-mix` | 95.0% | 90.1-94.8 | 4.2-4.3 s | 105-108 GiB | all in RAM (4 KB pages) |
+    | `qwen-nvfp4-gptq` | 93.6% | 169-185 | 3.8-4.0 s | 69 GiB | all in RAM |
+
+    The captured 72K-token Claude Code request (greedy, 5 runs each): no loop on either; 1,582-2,858 thinking tokens
+    on the mix, 722-2,069 on Q8_0.
+  - The censorship switch (the same vector, layers 8-33) works on both: 5 of 5 held-out harmful requests refused with
+    it off and 0 of 5 with it on (`qwen-q8`: thinking off, through the server, release build ddd78216). Setup loads
+    it, off by default, as for `qwen-nvfp4-gptq`.
+  - Setup offers them after NVIDIA's model (`qwen-nvfp4-gptq` stays the default). Below 120 GiB listed (a 128 GB PC
+    lists ~125-127), it says they are made for 128 GB and asks (default no). The engine would run them in its low-RAM
+    mode there, which was not measured with them. `--family qwen-q8 --yes` is the consent. Config names:
+    `strata-qwen-mix-nvfp4.json` and `strata-qwen-q8_0.json` (served as `qwen3.8-flash-next-q8_0`).
+- **The low-RAM rule by the pack's size** (`memory.hpp`: `kLowRamBesideGib` 16, `kLowRamBySizeHeadroomGib` 10). From
+  92 GiB installed, the low-RAM mode also starts by itself where `experts.bin` and 16 GiB more do not fit. Then it
+  leaves 10 GiB free instead of 6. The 16 GiB: the engine, the server and the image encoder took 4.5-5.7 GiB beside
+  the experts (GPTQ 69.0 GiB = 63.3 + 5.7; the mix 107.6 = 103.1 + 4.5), and Windows and the desktop keep ~10. The 10
+  GiB: with 6, the Q8_0 pack left the 128 GB desktop so little that a background job was killed (2026-10-02); with
+  10 it ran the table's runs. Below 92 GiB nothing changes. Setup's `engine_low_ram` mirrors it, and its RAM line
+  says which applies. On this PC (127.2 GiB), with release build ddd78216, through the server:
+  - Q8_0: `low RAM (its 119.5 GiB of experts and 16 GiB beside them do not fit; 127.2 GiB installed)`, 100.16 GiB of
+    experts locked, ready in 40 s, 11.6 GiB still available;
+  - the mix: `92 GiB or more, and the experts with 16 GiB beside them fit`, every expert in RAM, ready in 28 s;
+  - `qwen-nvfp4-gptq` and IQ2_XS: every expert in RAM, as before.
+- **The route tail skip off for all of this fork's packs.** c83625c3 (0.1.42-nvfp4.1) left the skip off only where a
+  layer had NVFP4 experts, so the all-Q8_0 pack would have got upstream's default. The engine now leaves it off for any
+  native pack without GGUF offsets: this fork's NVFP4, Q8_0 and mixed packs (`tools/requant.py`,
+  `tools/nvfp4_convert.py`). `tools/iq_pack.py`'s packs of a GGUF name each layer's place in it and keep upstream's
+  default. Start lines (release build ddd78216): Q8_0, the mix and `qwen-nvfp4-gptq`, unset: `STRATA_ROUTE_TAIL_SKIP
+  is OFF by default with this fork's packs`. The mix with `STRATA_ROUTE_TAIL_SKIP=7`: `=7 is ON`. IQ2_XS, unset: `=7
+  is ON (default)`.
+- **Unsloth's files with every expert in RAM where they fit** (setup: `UNSLOTH_RESIDENT_BESIDE_GB` 16,
+  `unsloth_budget`). Setup ran Unsloth's files in their RAM-budget mode on any PC: `--resident-budget-gib`, with the
+  experts read from the GGUF in place. That mode is for a 64 GB PC. On 128 GB it was much slower than the pinned arena
+  the ISTA files get (0.1.42-nvfp4.1, RTX 5090, the median of 3 rounds and their range):
+
+  | | budget mode: tokens/s, 32K prompt, RAM | every expert in RAM: tokens/s, 32K prompt, RAM |
+  |---|---|---|
+  | UD-Q4_K_XL | 118 (94-122), 30.0 s, 98.5 GiB | 169 (167-175), 4.9 s, 77.3 GiB |
+  | UD-Q3_K_XL | 165 (87-168), 21.0 s, 58.6 GiB | 208 (206-209), 3.8 s, 57.5 GiB |
+
+  Setup now writes the arena (no `--resident-budget-gib`, the GGUF models' context and K/V streaming) where the
+  experts and 16 GiB more fit: from 87.7 GiB listed for UD-Q4_K_XL, 71.4 for UD-IQ4_XS, 68.0 for UD-Q3_K_XL. So a 96
+  GB PC gets the arena for all three, and a 64 GB one keeps the budget mode. The margin is the NVFP4 rule's: the
+  engine and the server took 5.6 GiB beside these arenas (131072 context, K/V streamed), the image encoder ~1.1, and
+  ~10 is left for Windows. `--resident-budget-gib N` still chooses the budget mode, and a unified-memory APU keeps it
+  (#1715; the arena was measured on a discrete card only). Two GPUs where the experts fit: the GGUF models' layer
+  split, all of them in RAM. An existing install keeps its config until setup runs again (`START-HERE.bat --setup`).
+  The `--yes` configs of setup's golden test changed only for UD-Q4_K_XL on 96 GB (16 GB card: 65536 context,
+  `--kv-resident 32768`) and on 128 GB (24 GB card: 131072).
+- **Unsloth's UD-Q3_K_XL** joins `--family unsloth`, after UD-IQ4_XS (still the default) and before UD-Q4_K_XL, as a
+  user asked. Three shards at the family's pinned revision 38bb39ee (the same files at 766911a6), 90.0 GB, each checked
+  against its SHA-256. Its experts are i-quants despite the name: IQ3_XXS gate/up with IQ4_NL down in 43 layers, with
+  Q8_0 down in 4, IQ4_XS with Q8_0 in 1; 55.82 GB (51.99 GiB). Packed as UD-IQ4_XS is (`iq_pack.py --compat-bf16`).
+  With every expert in RAM: the same top token as Q8_0 90.7% (UD-Q4_K_XL 94.1%), KL 0.073, 208 tokens/s, a 32K
+  prompt in 3.8 s. Images are allowed with the same "untested" note as UD-Q4_K_XL; the censorship switch is loaded,
+  as for the whole family (not measured on this file). Not run end to end through setup: the files were deleted
+  after the measurement, and the install path ran on a mocked PC (pins, download list, SHA-256 checks, pack command,
+  config, read-back).
+- **Checks** (release build ddd78216): `platform_memory_test` with the new cases; 115 of 118 engine tests pass (the 3
+  that fail need model files this PC does not have); the server's 708 OK (15 skipped); the tools' and setup's 788,
+  all but `test_iq_pack` (no `yaml` in that venv). Setup's plans for `qwen-q8`, `qwen-nvfp4-mix`, UD-Q4_K_XL and
+  UD-Q3_K_XL at 128, 96 and 64 GB (`--dry-run`, mocked installs): Q8_0 low-RAM by size on 128 and 96 GB, below 92 on
+  64; the mix all in RAM on 128, low-RAM by size on 96; Unsloth's arena on 128 and 96 (131072, `--kv-resident`), a
+  40 GiB budget at 32768 on 64.
+
 ### Upstream 0.1.42 (2026-10-10, release 0.1.42-nvfp4.1)
 
 - **The port.** rel/0.1.41's first-parent chain since v0.1.41 holds 109 commits; 104 are carried. Dropped, because
