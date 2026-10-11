@@ -46,6 +46,29 @@ files by hand.
 
 ## What's new
 
+- **Two more exact models for a 128 GB PC, and Unsloth's files faster (0.1.42-nvfp4.2).**
+  - **`--family qwen-nvfp4-mix`**: our GPTQ NVFP4 with Q8_0 experts in 38 of its 48 layers. It picks Q8_0's top token
+    95.0% of the time (GPTQ: 93.6%), at about half GPTQ's speed (91-95 tokens/s on an RTX 5090). Every expert stays
+    in RAM: 106 GiB in use with images and the server.
+  - **`--family qwen-q8`**: every routed expert Q8_0, the reference the others are measured against. 46-47 tokens/s,
+    a 32K prompt in 10.3 s. Its 119.5 GiB of experts do not fit 128 GB beside Windows, so it runs in the low-RAM mode
+    (100 GiB of them locked in RAM).
+  - Both are the original, censored Qwen, with the censorship switch: 5 of 5 held-out harmful requests refused with it
+    off, 0 of 5 with it on. Both share qwen-nvfp4-gptq's dense weights, n-gram table, embedding and draft head; an
+    install after it downloads only the experts.
+  - Below 128 GB, setup asks before installing them: they would run in the low-RAM mode, which was not measured with
+    them.
+  - **The low-RAM mode also follows the pack's size:** from 92 GiB installed, it now starts when the experts and 16 GiB
+    more do not fit. In that case it leaves 10 GiB free, not 6. Below 92 GiB nothing changes.
+  - **The route tail skip is off by default for all of this fork's packs**: NVFP4, Q8_0 and the mix. Before, only
+    packs with NVFP4 experts left it off, so the all-Q8_0 pack would have had it on. The GGUF models keep upstream's
+    default.
+  - **Unsloth's files keep every expert in RAM where they fit with 16 GiB more** (a 96 GB PC for UD-Q4_K_XL). On a
+    128 GB PC, UD-Q4_K_XL now decodes 169 tokens/s and reads a 32K prompt in 4.9 s. Setup's old RAM-budget mode gave
+    118 tokens/s and 30 s, and it used more RAM (98.5 against 77.3 GiB). A 64 GB PC keeps the budget mode. To get the
+    new config on an existing install, run setup again (`START-HERE.bat --setup`).
+  - **Unsloth's UD-Q3_K_XL** is a size of `--family unsloth`, as a user asked. It picks Q8_0's top token 90.7% of the
+    time, at 208 tokens/s and a 3.8 s 32K prompt, with every expert in RAM (57.5 GiB in use).
 - **On upstream 0.1.42 (0.1.42-nvfp4.1).** Upstream's own changes now run here too:
   - **The route tail skip** (`STRATA_ROUTE_TAIL_SKIP=7`: a missed expert that every token of a verify window routes
     at rank 7-9 is neither fetched nor computed) is upstream's default for the GGUF models, and **off by default for
@@ -103,7 +126,9 @@ page).
 | --- | --- | --- |
 | `qwen-nvfp4-gptq` (the default) | the original [Qwen3.8-Flash-Next](https://huggingface.co/Qwen/Qwen3.8-Flash-Next), every expert NVFP4 by our GPTQ; censored unless `--uncensored on`: [Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata) | Qwen Community License 1.0 |
 | `qwen-nvidia-nvfp4` | **NVIDIA's** NVFP4 of the original, censored Qwen3.8-Flash-Next ([nvidia/Qwen3.8-Flash-Next-NVFP4](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4), ModelOpt), converted for Strata with its experts bit for bit: [Maximilian228/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Strata) | NVIDIA Open Model License and the Qwen Community License 1.0 |
-| `qwen`, `swift`, `coder`, `unsloth` | upstream Strata's GGUF models: ISTA-DASLab's GSQ-RCO quants of Qwen3.8-Flash-Next, Swift 1.5 and the Coder, Unsloth's ~4-bit files | as upstream lists them |
+| `qwen-nvfp4-mix` (128 GB) | the original Qwen3.8-Flash-Next, our GPTQ NVFP4 with Q8_0 in 38 of 48 layers, more exact, half the speed; censored unless `--uncensored on`: [Maximilian228/Qwen3.8-Flash-Next-NVFP4-Q8-Mix-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVFP4-Q8-Mix-Strata) | Qwen Community License 1.0 |
+| `qwen-q8` (128 GB) | the original Qwen3.8-Flash-Next, every expert Q8_0, the most exact, runs in the low-RAM mode; censored unless `--uncensored on`: [Maximilian228/Qwen3.8-Flash-Next-Q8_0-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-Q8_0-Strata) | Qwen Community License 1.0 |
+| `qwen`, `swift`, `coder`, `unsloth` | upstream Strata's GGUF models: ISTA-DASLab's GSQ-RCO quants of Qwen3.8-Flash-Next, Swift 1.5 and the Coder, Unsloth's ~3.5-4-bit files (UD-IQ4_XS, UD-Q3_K_XL, UD-Q4_K_XL) | as upstream lists them |
 
 - **The NVFP4 models come ready-made:** the expert pack, the dense GGUF, the FP8 n-gram table, the BF16 embedding
   and the MTP draft head are downloaded at a pinned revision and checked against their SHA-256; nothing is converted
@@ -112,10 +137,12 @@ page).
   and speed (179 against 175 tokens/s). `qwen-nvidia-nvfp4` is NVIDIA's own checkpoint, quantized by NVIDIA and only
   converted here. The two share the n-gram table, the embedding and the draft head: the second one links them
   ([The original Qwen in NVFP4](docs/NVFP4.md#the-original-qwen-in-nvfp4-2026-10-09-release-0141-nvfp44)).
+  `qwen-nvfp4-mix` and `qwen-q8` share all of `qwen-nvfp4-gptq`'s files but the experts
+  ([Q8_0 for a 128 GB PC](docs/NVFP4.md#q8_0-for-a-128-gb-pc-2026-10-11-release-0142-nvfp42)).
 - **`qwen-nvfp4-gptq` is the default** where the PC meets the [requirements](#requirements); a PC below them gets a
   GGUF model as the default, and `--family qwen-nvfp4-gptq --yes` installs it anyway.
-- **Disable censorship (off by default):** for `qwen-nvfp4-gptq` and the original Qwen's GGUFs (`qwen`, ISTA's;
-  `unsloth`) setup always loads this fork's refusal-direction projection ([data/uncensor](data/uncensor/README.md))
+- **Disable censorship (off by default):** for `qwen-nvfp4-gptq`, `qwen-nvfp4-mix`, `qwen-q8` and the original Qwen's
+  GGUFs (`qwen`, ISTA's; `unsloth`) setup always loads this fork's refusal-direction projection ([data/uncensor](data/uncensor/README.md))
   and leaves it off: the web app's "Disable censorship"
   switch (Sampling) and the API field `"uncensored": true` turn it on for a request, and setup's question "Disable
   censorship?" (default no; `--uncensored on|off`) sets the default, `"uncensored"` in `strata-<model>.json`. Off,
@@ -194,6 +221,10 @@ page).
     up to the free RAM less 6 GiB, and the rest are read from `experts.bin` when needed. `--low-ram` forces it,
     `--no-low-ram` turns it off, `--ram-budget GIB` caps it
     ([64 GB of RAM](docs/NVFP4.md#64-gb-of-ram-2026-09-30), [A 96 GB PC](docs/NVFP4.md#a-96-gb-pc-2026-10-09-release-0141-nvfp42)).
+  - From 92 GiB it also starts where the pack's experts and 16 GiB more do not fit, and then leaves 10 GiB free: on
+    a 128 GB PC (127.2 GiB listed) the all-Q8_0 pack (119.5 GiB) runs in it, the NVFP4 + Q8_0 mix (103.1 GiB) keeps
+    every expert in RAM. Both are for a 128 GB PC
+    ([Q8_0 for a 128 GB PC](docs/NVFP4.md#q8_0-for-a-128-gb-pc-2026-10-11-release-0142-nvfp42)).
 - **Page file: set a fixed 65536 MB** (initial = maximum). Windows lets all programs together commit at most RAM +
   page file, and the engine commits ~100 GiB with every expert in RAM (~80 GiB in the low-RAM mode): the experts
   plus ~30 GiB that WDDM charges for the VRAM it uses. Nothing of the model is paged out, but short of commit the
@@ -256,7 +287,10 @@ Each change was measured (first-token KL against a reference, interleaved speed 
   admits the PCIe share's experts into VRAM
   ([The adaptive VRAM tier](docs/NVFP4.md#the-adaptive-vram-tier-and-an-audit-2026-10-01-release-0131-nvfp43),
   [A second round of kernels](docs/NVFP4.md#a-second-round-of-kernels-2026-10-08-release-01403-nvfp41)).
-- **The low-RAM mode** below 92 GiB installed, read unbuffered (see [Requirements](#requirements)).
+- **The low-RAM mode** below 92 GiB installed, or where the pack's experts and 16 GiB more do not fit, read
+  unbuffered (see [Requirements](#requirements)).
+- **Q8_0 experts in this fork's packs** (`qwen-q8`, all of them; `qwen-nvfp4-mix`, 38 layers beside GPTQ NVFP4) for a
+  128 GB PC ([Q8_0 for a 128 GB PC](docs/NVFP4.md#q8_0-for-a-128-gb-pc-2026-10-11-release-0142-nvfp42)).
 - **Every RTX 20-50 card with 12 GB or more:** only the optional FP4 x FP4 unit needs Blackwell; each generation's
   code path was tested on the RTX 5090 ([Other GPUs](docs/NVFP4.md#other-gpus-rtx-20-30-and-40-2026-09-30)).
 - **Images on the CPU:** the encoder runs in RAM, so the expert cache keeps all its VRAM; upstream's GPU encoder
@@ -330,9 +364,9 @@ The switches kept only for A/B runs (each gives the same bits or a measured alte
 | | |
 | --- | --- |
 | `--prefill auto:8192\|16384` | cap `--prefill auto`'s chunk (default 32768 here, 8192 upstream) |
-| `--low-ram` / `--no-low-ram` | the low-RAM mode on / off (default: on below 92 GiB installed) |
+| `--low-ram` / `--no-low-ram` | the low-RAM mode on / off (default: on below 92 GiB installed, or where `experts.bin` + 16 GiB do not fit) |
 | `--ram-budget GIB` | the low-RAM mode with at most GIB of pinned expert copies |
-| `STRATA_RESIDENT_HEADROOM_GIB=6` | RAM the low-RAM mode leaves free |
+| `STRATA_RESIDENT_HEADROOM_GIB=6` | RAM the low-RAM mode leaves free (10 when the pack's size turned it on) |
 | `--no-kv-grow`, `STRATA_KV_GROW=0` | the K/V allocated for the whole context at start |
 | `STRATA_KV_GROW_INIT` / `_STEP` | the K/V's cells at start (16384) and its growth step (8192) |
 | `--vram-reserve-mib N` | VRAM left unused (default 700); also a smaller card's budget on a bigger one |
