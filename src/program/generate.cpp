@@ -453,8 +453,9 @@ struct Options {
     /// not hold that the expert profile ranks hottest are copied into RAM, the rest are read from the files in place
     /// (the GGUF shards when the pack has no experts.bin).  0 = the whole complement (--resident-experts).
     uint64_t resident_budget = 0;
-    /// The fork's low-RAM mode: -1 auto (on below 92 GiB installed), 0 --no-low-ram, 1 --low-ram / --ram-budget.  On, it
-    /// is --mmap-experts with --resident-budget-gib (the --ram-budget, else the available RAM less 6 GiB).
+    /// The fork's low-RAM mode: -1 auto (on below 92 GiB installed, or where experts.bin + 16 GiB do not fit), 0
+    /// --no-low-ram, 1 --low-ram / --ram-budget.  On, it is --mmap-experts with --resident-budget-gib (the --ram-budget,
+    /// else the available RAM less 6 GiB; 10 when the pack's size turned it on).
     int low_ram = -1;
     /// R4: slots of VRAM-resident experts.  **0 = off, and off is the default.**
     /// **THE COMMENT THAT USED TO BE HERE WAS FALSE AND ROUND 328 MEASURED IT.**  It said "the cache has no
@@ -938,7 +939,8 @@ void usage() {
                  "                       round.  Not bit-exact run to run.  0 (default) = the blocking tier.\n"
                  "  --low-ram            (this fork) --mmap-experts --resident-budget-gib with the available RAM less\n"
                  "                       6 GiB: the hottest experts the GPU cache does not hold in RAM, the rest read\n"
-                 "                       from the files unbuffered.  On by itself below 92 GiB installed; --no-low-ram:\n"
+                 "                       from the files unbuffered.  On by itself below 92 GiB installed, or where\n"
+                 "                       experts.bin and 16 GiB more do not fit (10 GiB left free); --no-low-ram:\n"
                  "                       never.  --ram-budget GIB: the same with at most GIB in RAM.\n");
 }
 
@@ -2483,24 +2485,38 @@ int main(int argc, char** argv) {
     // RAM budget (0.1.31's tier: hottest first, page-locked) and the rest are read from the files when needed -
     // unbuffered, since such a PC's file cache could not keep them either (FileExpertSource::set_unbuffered).
     // A 96 GB PC (93.4-95.6 GiB listed) keeps the arena (platform::low_ram_auto): with 88 GiB for the engine it ran as on
-    // 128 GB with 16-21 GiB free (ram88: chat 13.1 ms a round, the low-RAM mode 20.3 with 0.5-1 GiB free)
+    // 128 GB with 16-21 GiB free (ram88: chat 13.1 ms a round, the low-RAM mode 20.3 with 0.5-1 GiB free).
+    // 0.1.42-nvfp4.2: from 92 GiB the pack's size decides too (platform::low_ram_auto): experts.bin + 16 GiB must fit,
+    // so the all-Q8_0 pack (119.5 GiB) is low-RAM on 128 GB and the NVFP4+Q8 mix (103.1) keeps the arena there
     if (!o.mmap_experts && o.shared_expert_arena.empty() && !o.expert_profile.empty() && !multi_gpu) {
         const uint64_t installed = strata::platform::total_physical_memory();
-        if (o.low_ram == 1 || (o.low_ram == -1 && strata::platform::low_ram_auto(installed))) {
+        std::error_code fec;
+        const uint64_t experts = o.pack.empty() ? 0 : (uint64_t) std::filesystem::file_size(o.pack + "/experts.bin", fec);
+        const uint64_t ex = fec ? 0 : experts;   // a GGUF pack without experts.bin: the 92 GiB rule alone
+        const bool by_size = o.low_ram == -1 && strata::platform::low_ram_by_size(installed, ex);
+        if (o.low_ram == 1 || (o.low_ram == -1 && strata::platform::low_ram_auto(installed, ex))) {
             o.mmap_experts = o.resident_cpu_experts = o.resident_pin = true;
-            o.resident_headroom = 6ull << 30;   // left to Windows and the rest of the engine's host memory
+            o.resident_headroom = (by_size ? strata::platform::kLowRamBySizeHeadroomGib : 6ull) << 30;   // left to
+                                                                       // Windows and the rest of the engine's host memory
             if (const char* v = std::getenv("STRATA_RESIDENT_HEADROOM_GIB"); v != nullptr && std::atof(v) >= 0.0)
                 o.resident_headroom = (uint64_t) (std::atof(v) * 1073741824.0);
             if (o.resident_budget == 0) o.resident_budget = installed > 0 ? installed : (1ull << 40);   // clamped to
                                                                        // the available RAM less the headroom
+            char why[160];
+            if (by_size)
+                std::snprintf(why, sizeof why, "its %.1f GiB of experts and %llu GiB beside them do not fit", (double) ex /
+                              1073741824.0, (unsigned long long) strata::platform::kLowRamBesideGib);
             std::fprintf(stderr, "strata generate: low RAM (%s; %.1f GiB installed): --mmap-experts with a RAM budget "
-                                 "of %s, the rest of the experts read from the files\n",
-                         o.low_ram == 1 ? "--low-ram" : "below 92 GiB installed", (double) installed / 1073741824.0,
-                         o.resident_budget >= installed ? "the available RAM less the headroom" : "--ram-budget");
+                                 "of %s (%.0f GiB left free), the rest of the experts read from the files\n",
+                         o.low_ram == 1 ? "--low-ram" : by_size ? why : "below 92 GiB installed",
+                         (double) installed / 1073741824.0,
+                         o.resident_budget >= installed ? "the available RAM less the headroom" : "--ram-budget",
+                         (double) o.resident_headroom / 1073741824.0);
         } else {
             std::fprintf(stderr, "strata generate: RAM: %.1f GiB installed (%s): every expert in RAM (the resident "
                                  "arena), no low-RAM mode\n", (double) installed / 1073741824.0,
-                         o.low_ram == 0 ? "--no-low-ram" : installed == 0 ? "unknown" : "92 GiB or more");
+                         o.low_ram == 0 ? "--no-low-ram" : installed == 0 ? "unknown" : ex > 0 ?
+                         "92 GiB or more, and the experts with 16 GiB beside them fit" : "92 GiB or more");
         }
     } else if (o.low_ram == 1 && !o.mmap_experts) {
         std::fprintf(stderr, "strata generate: --low-ram needs one GPU and an --expert-profile (and no shared arena)\n");

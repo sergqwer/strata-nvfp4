@@ -83,6 +83,18 @@ int ram_rule_cases() {
         std::printf("low_ram_auto %7.2f GiB -> %s%s\n", c.gib, got ? "low-RAM" : "arena", got == c.low ? "" : "   <-- WRONG");
         fail |= got != c.low;
     }
+    // 0.1.42-nvfp4.2: by the pack's size too (experts.bin GiB + 16)
+    const struct { double gib, experts; bool low, by_size; } packs[] = {
+        {127.18, 119.53, true, true}, {127.18, 103.13, false, false}, {127.18, 63.28, false, false},
+        {95.6, 63.28, false, false}, {95.6, 103.13, true, true}, {91.9, 63.28, true, false}, {255.7, 119.53, false, false},
+        {0, 119.53, false, false}};
+    for (const auto& c : packs) {
+        const uint64_t in = (uint64_t) (c.gib * 1073741824.0), ex = (uint64_t) (c.experts * 1073741824.0);
+        const bool got = low_ram_auto(in, ex), by = low_ram_by_size(in, ex);
+        std::printf("low_ram_auto %7.2f GiB, experts %7.2f GiB -> %s%s%s\n", c.gib, c.experts, got ? "low-RAM" : "arena",
+                    by ? " (by size)" : "", got == c.low && by == c.by_size ? "" : "   <-- WRONG");
+        fail |= got != c.low || by != c.by_size;
+    }
     const struct { const char* line; bool ok; char drive; int64_t initial, max; } lines[] = {
         {"c:\\pagefile.sys 64000 64000", true, 'C', 64000, 64000},
         {"D:\\pagefile.sys 16000 64000", true, 'D', 16000, 64000},
