@@ -17,7 +17,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 import setup  # noqa: E402
 from test_setup_golden import GOLDEN, PROFILES, install  # noqa: E402
-from test_setup_nvfp4 import install_with  # noqa: E402
+from test_setup_nvfp4 import install_with, run  # noqa: E402
 
 QWEN = {"temperature": 1.0, "top_p": 0.95, "top_k": 20}   # Qwen/Qwen3.8-Flash-Next's generation_config.json
 
@@ -37,9 +37,9 @@ class Table(unittest.TestCase):
 
     def test_the_nvfp4_models_and_the_bundle(self):
         ram, found = PROFILES["128GB-1x24GB"]
-        for family in setup.NVFP4_FAMILIES:
+        for family in setup.NVFP4_FAMILIES:                  # the committed tables (0.1.42-nvfp4.2: the Q8_0 packs too)
             with self.subTest(family):
-                code, out, cfg, _ = install_with(ram, found, ["--family", family, "--no-start"])
+                code, out, cfg, _ = run(ram, found, ["--family", family, "--no-start"], repos=setup.NVFP4_REPOS)
                 self.assertEqual(code, 0, out[-3000:])
                 self.assertEqual(cfg["sampling"], QWEN)
         bundle = json.loads((ROOT / "release" / "windows" / "config" / "strata-qwen-nvfp4-gptq.json").read_text())

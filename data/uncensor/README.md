@@ -4,8 +4,8 @@
 2,560 values per layer (GGUF `controlvector` format). The JSON beside it has its per-layer strengths, how it was built,
 and its scores.
 
-**What it does.** For `qwen-nvfp4-gptq`, ISTA's GGUFs (the `qwen` family) and Unsloth's (`unsloth`) setup - and the
-Windows bundle's config - starts the engine with
+**What it does.** For `qwen-nvfp4-gptq`, `qwen-nvfp4-mix`, `qwen-q8`, ISTA's GGUFs (the `qwen` family) and Unsloth's
+(`unsloth`) setup - and the Windows bundle's config - starts the engine with
 
 ```
 --control-vector-scaled data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0 --control-vector-layer-range 8 33
@@ -22,7 +22,9 @@ request. Off, a request runs the original model bit for bit (the kernel skips th
 
 **Where.** Made and measured on `qwen-nvfp4-gptq`; measured too on ISTA's Q2_0 and IQ2_XS (setup offers it for the
 whole `qwen` family: IQ3_XXS and IQ3_S sit between Q2_0 and NVFP4) and on Unsloth's UD-Q4_K_XL (the `unsloth`
-family; its UD-IQ4_XS was not measured). Never for `qwen-nvidia-nvfp4`: the NVIDIA Open Model License does not
+family; its UD-IQ4_XS and UD-Q3_K_XL were not measured). On this fork's NVFP4 + Q8_0 mix and all-Q8_0 packs (0.1.42-nvfp4.2,
+the same weights closer to BF16) 5 of 5 held-out harmful requests were refused with it off and 0 of 5 with it on
+(on the Q8_0 pack with thinking off). Never for `qwen-nvidia-nvfp4`: the NVIDIA Open Model License does not
 allow bypassing the model's safety guardrails. Not for Swift 1.5 or the Coder, which have other weights.
 
 Against each GGUF quant's own stock model (5 greedy replays of the long Claude Code request where it says loops):
