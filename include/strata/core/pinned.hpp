@@ -28,6 +28,11 @@ enum class PageBacking { LargePages, NormalPages, PinnedByCuda };
 /// -2 for "auto" (Windows: the sliced pin stays below the GPU's shared-memory budget).
 int arena_pin_cap_gib();
 
+/// #243: what a sliced registration may pin on Windows: the GPU's shared-memory (WDDM non-local) budget less what this
+/// process already uses there and 4 GiB (without the DXGI numbers, RAM/2 - 8 GiB).  False where there is no such
+/// budget (not Windows) or nothing could be worked out; `why` says where the number came from.
+bool shared_pin_limit(uint64_t& limit, std::string& why);
+
 struct PinnedArena {
     void* base = nullptr;
     uint64_t capacity = 0;
