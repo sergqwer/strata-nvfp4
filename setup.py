@@ -21,15 +21,16 @@ What the first run does (each step is skipped when it is already done):
   7. writes run-<model>.bat / run-<model>.sh and starts the model
 
 This fork (sergqwer/strata-nvfp4) also offers its NVFP4 models of the original, censored Qwen, ready-made on Hugging
-Face: qwen-nvfp4-gptq (every expert NVFP4 by GPTQ; the default where the PC meets its requirements) and
-qwen-nvidia-nvfp4 (NVIDIA's ModelOpt NVFP4 checkpoint, converted).  qwen-nvfp4-gptq, qwen and unsloth load this
-fork's refusal-direction projection (data/uncensor), off for requests by default: the web app's switch and the API field
+Face: qwen-nvfp4-gptq (every expert NVFP4 by GPTQ; the default where the PC meets its requirements),
+qwen-nvidia-nvfp4 (NVIDIA's ModelOpt NVFP4 checkpoint, converted) and, for a 128 GB PC, qwen-nvfp4-mix (GPTQ NVFP4 with
+Q8_0 in 38 layers) and qwen-q8 (every expert Q8_0).  qwen-nvfp4-gptq, qwen-nvfp4-mix, qwen-q8, qwen and unsloth load
+this fork's refusal-direction projection (data/uncensor), off for requests by default: the web app's switch and the API field
 "uncensored" turn it on, and --uncensored on makes on the default.  Nothing is converted on the PC, and the
 engine is this fork's (its release's, or compiled from this source).  --dry-run shows what setup would do for them.
 Withdrawn, an install of either keeps working: huihui-nvfp4 (0.1.41-nvfp4.3, it often loops in long thinking) and
 orca-nvfp4 (0.1.41-nvfp4.5, its abliteration made it a much weaker agent).
 
-Options: --family qwen-nvfp4-gptq|qwen-nvidia-nvfp4|qwen|swift|coder|unsloth, --uncensored on|off, --model Q2_0|IQ2_XS|IQ3_XXS|IQ3_S, --context 32768, --rope-scaling none|linear|yarn
+Options: --family qwen-nvfp4-gptq|qwen-nvidia-nvfp4|qwen-nvfp4-mix|qwen-q8|qwen|swift|coder|unsloth, --uncensored on|off, --model Q2_0|IQ2_XS|IQ3_XXS|IQ3_S, --context 32768, --rope-scaling none|linear|yarn
 (--rope-scale F; past the trained 262144 the setup adds yarn and the factor is the final context over 262144,
 at least 1 - an explicit --rope-scaling none is refused for such a context), --vision yes|no|gpu|cpu, --port
 8080, --yes (recommended
@@ -37,7 +38,8 @@ answers, no questions), --setup (install another model / change settings instead
 --host 0.0.0.0 --api-key KEY (reach it from other devices on your network), --experimental-speed-projection on|off
 (EXPERIMENTAL, off by default),
 --models-dir DIR, --gguf-dir DIR (use GGUF files you already have), --build (compile instead of the ready-made
-engine), --check (only check this PC), --resident-budget-gib N (UD-Q4_K_XL's or UD-IQ4_XS's experts in RAM),
+engine), --check (only check this PC), --resident-budget-gib N (an Unsloth file's experts in RAM: without it all of
+them stay in RAM where they fit, a budget of them where they do not),
 --kv-streaming on|off|auto.
 
 Setup recommends, it never forces: the recommended answers are the defaults (--yes, or Enter), and a bigger choice
@@ -239,10 +241,20 @@ MODELS = {
     # RAM budget of them, like UD-Q4_K_XL, but far fewer read from the SSD on a 64 GB PC and none from ~80 GB of RAM.
     # Images: the vision path has no restriction for this pack (the same base model and image encoder), so setup asks
     "UD-IQ4_XS": {"about": "~4-bit i-quant (Unsloth Dynamic), between IQ3_S and UD-Q4_K_XL in quality; on a PC with "
-                           "less than ~80 GB of RAM part of its experts are read from the SSD",
+                           "less than ~72 GB of RAM part of its experts are read from the SSD",
                   "download_gb": 93.7, "ram_gb": 48, "arena_gb": 59.5, "families": ("unsloth",), "budget": True,
                   "shards": 3, "file": "Qwen3.8-Flash-Next-{q}-0000{i}-of-00003.gguf", "engine": (0, 1, 38),
                   "vision": True},
+    # 0.1.42-nvfp4.2 (a user asked): Unsloth's UD-Q3_K_XL - i-quants despite its name: IQ3_XXS gate/up with IQ4_NL
+    # downs (43 layers), with Q8_0 downs (4), IQ4_XS with Q8_0 (1); 55.8 GB (51.99 GiB) of experts.  Packed and run as
+    # UD-IQ4_XS (iq_pack.py --compat-bf16).  Measured with every expert in RAM (128 GB, RTX 5090, 0.1.42-nvfp4.1): 90.7%
+    # the same next token as the all-Q8_0 pack (UD-Q4_K_XL 94.1%, UD-IQ4_XS not measured), 208 tokens/s, a 32K prompt
+    # in 3.8 s, 57.5 GiB in use.  Images: the same base model and encoder, not run by us on this file
+    "UD-Q3_K_XL": {"about": "~3.5-bit i-quant (Unsloth Dynamic): the fastest Unsloth file, below UD-IQ4_XS in quality; "
+                            "on a PC with less than ~68 GB of RAM part of its experts are read from the SSD",
+                   "download_gb": 90.0, "ram_gb": 48, "arena_gb": 55.8, "families": ("unsloth",), "budget": True,
+                   "shards": 3, "file": "Qwen3.8-Flash-Next-{q}-0000{i}-of-00003.gguf", "engine": (0, 1, 38),
+                   "vision": True, "vision_untested": True},
 }
 # The experimental Unsloth file's four shards at the pinned revision: name -> (bytes, sha256), checked after the
 # download (setup trusts no other model file by name and size alone either: check_shards reads their directories).
@@ -265,8 +277,25 @@ UNSLOTH_IQ4_XS_SHARDS = {
     "Qwen3.8-Flash-Next-UD-IQ4_XS-00003-of-00003.gguf":
         (43836407744, "d4634e6d84f0ebb0940be15c90d3790bf6464e3dea3a1cddc567dc0e83ad8833"),
 }
+# UD-Q3_K_XL's three shards at the same revision (the Hub's LFS pointers; the same files at 766911a6, 2026-10-11)
+UNSLOTH_Q3_K_XL_SHARDS = {
+    "Qwen3.8-Flash-Next-UD-Q3_K_XL-00001-of-00003.gguf":
+        (10946624, "f2ef4328929d8b8c8930e2856eef52128dd4ce3425302f04bc3c657431cc4c49"),
+    "Qwen3.8-Flash-Next-UD-Q3_K_XL-00002-of-00003.gguf":
+        (49983253824, "7d230e7c9421d868b89eebaf23033af0ea1a4e046956df00fb156814fb62346e"),
+    "Qwen3.8-Flash-Next-UD-Q3_K_XL-00003-of-00003.gguf":
+        (39992153376, "21d4f90f9cd7b7c3a1582667c20cb22f7b03de895b88a23bb20aaeaa44f2c199"),
+}
 UNSLOTH_ENGINE = (0, 1, 32)     # the first engine setup configures for UD-Q4_K_XL (0.1.31 ran it by hand)
 UNSLOTH_RAM_LEFT_GB = 24        # RAM beside the budget: the OS, the engine, and the file cache the rest is read through
+# 0.1.42-nvfp4.2: Unsloth's experts all in RAM (a pinned arena, as ISTA's files) where they fit with this much beside
+# them; the RAM budget (experts read from the GGUF in place) only below that (unsloth_budget).  Measured on 128 GB with
+# an RTX 5090: UD-Q4_K_XL in the arena 169 tokens/s, a 32K prompt in 4.9 s, 77.3 GiB in use; in the budget mode 118,
+# 30 s, 98.5 GiB (it maps the GGUF too); UD-Q3_K_XL 208 / 3.8 s / 57.5 GiB against 165 / 21 s.  16 = the 5.6 GiB the
+# engine and the server took beside the experts there (131072 context, --kv-resident) + the image encoder (~1.1) + ~10
+# for Windows and the desktop - the NVFP4 packs' rule (NVFP4_BESIDE_GIB).  A 96 GB PC keeps all of UD-Q4_K_XL's 71.7
+# GiB; a 64 GB one keeps the budget mode (7-8.5 tokens/s with UD-Q4_K_XL, docs/UNSLOTH_Q4.md)
+UNSLOTH_RESIDENT_BESIDE_GB = 16
 # Contexts past 262144 (the model's trained length) extend it by rope scaling: for the context it will
 # serve the setup resolves the method (yarn, or one question when interactive) and derives the factor
 # from the final context (final / 262144, at least 1) itself (below), keeps an explicit
@@ -302,14 +331,14 @@ FAMILIES = {
     # Unsloth's UD-IQ4_XS (three shards, #621; a regular choice from 0.1.39) and the EXPERIMENTAL UD-Q4_K_XL (four)
     # of the original model (docs/UNSLOTH_Q4.md); "experimental" and "vision" are per model (MODELS)
     "unsloth": {"title": "Qwen3.8-Flash-Next (Unsloth)", "by": "Unsloth's ~4-bit quantizations",
-                "about": "UD-IQ4_XS: a 94 GB download; with less than ~80 GB of RAM part of its experts are read from "
-                         "the SSD (UD-Q4_K_XL, 111 GB: experimental)",
+                "about": "UD-IQ4_XS: a 94 GB download; with less than ~72 GB of RAM part of its experts are read from "
+                         "the SSD (UD-Q3_K_XL, 90 GB: faster, less exact; UD-Q4_K_XL, 111 GB: experimental)",
                 "hf": hf("unsloth/Qwen3.8-Flash-Next-GGUF") + "{q}/",
                 "file": "Qwen3.8-Flash-Next-{q}-0000{i}-of-00004.gguf", "shards": 4, "tag": "unsloth-",
                 "mmproj_hf": hf("ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF"),
                 "mmproj": "mmproj-Qwen3.8-Flash-Next-BF16.gguf", "name": "qwen3.8-flash-next-unsloth",
                 "vision": False, "pack_args": ["--compat-bf16"],
-                "sha256": {**UNSLOTH_SHARDS, **UNSLOTH_IQ4_XS_SHARDS}},
+                "sha256": {**UNSLOTH_SHARDS, **UNSLOTH_IQ4_XS_SHARDS, **UNSLOTH_Q3_K_XL_SHARDS}},
 }
 # The model's recommended sampling (0.1.41-nvfp4.6): setup writes it as the config's "sampling" block, the server's
 # default for a request that sends none (a request's own values win; temperature 0 = greedy).  Without it a client
@@ -321,8 +350,8 @@ FAMILIES = {
 # Qwen/Qwen3.8-Flash-Next as its base: Qwen's.  The withdrawn fine-tunes (an install of one is updated too):
 # huihui-ai's (298f9463) the same values; OrcaRouter's repository is gated now: Qwen's, which it fine-tunes.
 QWEN_SAMPLING = {"temperature": 1.0, "top_p": 0.95, "top_k": 20}
-FAMILY_SAMPLING = {f: QWEN_SAMPLING for f in ("qwen-nvfp4-gptq", "qwen-nvidia-nvfp4", "qwen", "unsloth", "swift",
-                                              "coder", "huihui-nvfp4", "orca-nvfp4")}
+FAMILY_SAMPLING = {f: QWEN_SAMPLING for f in ("qwen-nvfp4-gptq", "qwen-nvidia-nvfp4", "qwen-nvfp4-mix", "qwen-q8",
+                                              "qwen", "unsloth", "swift", "coder", "huihui-nvfp4", "orca-nvfp4")}
 MMPROJ = "mmproj-Qwen3.8-Flash-Next-BF16.gguf"
 # EXPERIMENTAL, off by default (setup asks): a control vector shipped with the repository, see its README
 ESP_VECTOR = ROOT / "data" / "experimental-speed-projection" / "Qwen3.8-Flash-Next-experimental-speed-projection.gguf"
@@ -335,8 +364,10 @@ ESP_VECTOR = ROOT / "data" / "experimental-speed-projection" / "Qwen3.8-Flash-Ne
 UNCENSOR_VECTOR = ROOT / "data" / "uncensor" / "qwen-nvfp4-gptq-uncensored.gguf"
 UNCENSOR_LAYERS = (8, 33)
 # made on qwen-nvfp4-gptq; measured on ISTA's Q2_0 and IQ2_XS (the qwen family; IQ3_XXS / IQ3_S sit between them and
-# NVFP4) and Unsloth's UD-Q4_K_XL (the unsloth family) against each quant's own stock model
-UNCENSOR_FAMILIES = ("qwen-nvfp4-gptq", "qwen", "unsloth")
+# NVFP4) and Unsloth's UD-Q4_K_XL (the unsloth family) against each quant's own stock model.  0.1.42-nvfp4.2: on the
+# NVFP4 + Q8_0 mix and the all-Q8_0 pack (the same weights, closer to BF16) 5 of 5 held-out harmful requests refused with
+# it off, 0 of 5 with it on (the Q8_0 pack: thinking off, Strata-data rel42n2/runs/q8_lowram_vec)
+UNCENSOR_FAMILIES = ("qwen-nvfp4-gptq", "qwen-nvfp4-mix", "qwen-q8", "qwen", "unsloth")
 # IQ2_XS loops in long greedy agentic thinking by itself (3 of 3 replays of a 72K-token Claude Code request, with
 # or without the projection; Q2_0 1 of 3 without, 0 of 3 with; the NVFP4 models 0 of 5)
 LOOPING_MODELS = {"IQ2_XS": "it looped in its thinking in 3 of 3 greedy replays of a long Claude Code request "
@@ -1691,8 +1722,8 @@ def gguf_dir_shards(folder: Path, fam: dict, model: str) -> list[Path]:
 GGUF_QUANT = re.compile(r"(?<![A-Za-z0-9])((?:UD-)?(?:I?Q\d+(?:_[A-Za-z0-9]+)*|BF16|F16|F32))"
                         r"(?=-\d{5}-of-\d{5}\.gguf$|\.gguf$)", re.I)
 SUPPORTED_GGUFS = ("Strata runs ISTA-DASLab's GSQ-RCO files (Qwen3.8-Flash-Next Q2_0, IQ2_XS, IQ3_XXS, IQ3_S; Swift "
-                   "1.5's; the Coder's IQ1_M) and Unsloth's UD-Q4_K_XL and UD-IQ4_XS only: other GGUFs (Unsloth's "
-                   "UD-IQ3_XXS or "
+                   "1.5's; the Coder's IQ1_M) and Unsloth's UD-Q4_K_XL, UD-IQ4_XS and UD-Q3_K_XL only: other GGUFs "
+                   "(Unsloth's UD-IQ3_XXS or "
                    "UD-Q2_K_XL, K-quants) cannot be used")
 
 
@@ -1760,6 +1791,15 @@ def verify_sha256(s: Path, size: int, sha: str) -> None:
         fail(f"{s.name} has the wrong SHA-256 ({h.hexdigest()}, expected {sha}): deleted",
              "run setup again to download it again")
     mark(s, f"sha256 {sha}")
+
+
+def unsloth_budget(model, ram, gpu=None, asked=None) -> bool:
+    """0.1.42-nvfp4.2: does setup write the RAM-budget mode (--resident-budget-gib) for this Unsloth file: asked for
+    (--resident-budget-gib N), a unified-memory APU (#1715: the budget and the GPU's cache are the same RAM there, and
+    the arena was measured on a discrete card only), or its experts with UNSLOTH_RESIDENT_BESIDE_GB beside them do not
+    fit this PC's RAM (GiB, ram_gb()).  Else every expert is kept in RAM, as for ISTA's files."""
+    return asked is not None or bool((gpu or {}).get("uma")) or \
+        ram < MODELS[model]["arena_gb"] / 1.073741824 + UNSLOTH_RESIDENT_BESIDE_GB
 
 
 def resident_budget_gib(model, ram, kv_ram_gb=0.0) -> int:
@@ -4211,9 +4251,9 @@ def choices_from_config(cfg_path: Path) -> dict:
     if model not in MODELS:                            # (sizes have no dash except UD-Q4_K_XL: the old rule)
         model = tag.split("-")[-1].upper()
     nv = next((f for f, d in [*NVFP4_FAMILIES.items(), *NVFP4_WITHDRAWN.items()]
-               if tag.lower() == (d["tag"] + NVFP4_MODEL).lower()), None)
+               if tag.lower() == (d["tag"] + nvfp4_size(f)).lower()), None)
     if nv:                                             # this fork's NVFP4 models: one size each
-        family, model = nv, NVFP4_MODEL
+        family, model = nv, nvfp4_size(nv)
     a = cfg.get("args", [])
     val = lambda k: a[a.index(k) + 1] if k in a and a.index(k) + 1 < len(a) else None   # noqa: E731
     vis = cfg.get("vision")
@@ -5198,14 +5238,18 @@ def bundled_cuda(eng) -> bool:
 
 # The NVFP4 models: the original Qwen, by this fork's GPTQ and NVIDIA's ModelOpt NVFP4 checkpoint converted, ready-made
 # on Hugging Face - nothing is converted on the PC (huihui-ai's abliteration, offered in 0.1.41-nvfp4.1/.2, and
-# OrcaRouter's, offered in 0.1.41-nvfp4.1-.4, are withdrawn: NVFP4_WITHDRAWN).
+# OrcaRouter's, offered in 0.1.41-nvfp4.1-.4, are withdrawn: NVFP4_WITHDRAWN).  0.1.42-nvfp4.2: this fork's packs in the
+# same format with Q8_0 experts too, for a 128 GB PC: the NVFP4 + Q8_0 mix and the all-Q8_0 pack.
 # NVFP4_REPOS holds one table per repository, what its upload fixed: the commit, and per component its files (path
 # in the repository: bytes, SHA-256).  A family takes each component
 # from the repository its "sources" name - its own, or a shared one (the PLE table and the embedding, when they are
 # Qwen's own) - and is offered only once all of them are listed (nvfp4_files).
-NVFP4_MODEL = "NVFP4"                  # the one size: strata-qwen-gptq-nvfp4.json, run-qwen-gptq-nvfp4.bat
+NVFP4_MODEL = "NVFP4"                  # the one size: strata-qwen-gptq-nvfp4.json, run-qwen-gptq-nvfp4.bat; a family's
+                                       # "size" names another (qwen-q8: strata-qwen-q8_0.json)
 QWEN_NV_REPO = "Maximilian228/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Strata"    # nvidia/Qwen3.8-Flash-Next-NVFP4, converted
 QWEN_GPTQ_REPO = "Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata"     # Qwen/Qwen3.8-Flash-Next by GPTQ (this fork)
+QWEN_MIX_REPO = "Maximilian228/Qwen3.8-Flash-Next-NVFP4-Q8-Mix-Strata"    # GPTQ NVFP4 + Q8_0 in 38 layers (this fork)
+QWEN_Q8_REPO = "Maximilian228/Qwen3.8-Flash-Next-Q8_0-Strata"             # every expert Q8_0 (this fork)
 # pack: the experts pack folder (index.txt, experts.bin, dense.bin, native_experts.txt, tokenizer/); dense: the GGUF
 # with the dense weights (--native and --native-dense-gguf); ple: the FP8 n-gram table (--ple-gguf); embd: the BF16
 # token embedding (--embd-gguf); mtp: the draft head's runtime folder (experts.bin, dense.bin, dense.txt; --mtp);
@@ -5264,6 +5308,58 @@ NVFP4_REPOS = {
         },
         "profile": {},
     },
+    # 0.1.42-nvfp4.2 (tools/nvfp4_table.py at the pinned commits, uploaded 2026-10-11): only pack/experts.bin, the
+    # pack's native_experts.txt (and the mix's mix.json) are their own - pack/dense.bin, the dense GGUF, the PLE table,
+    # the embedding and the MTP head are qwen-nvfp4-gptq's files (by SHA-256: nvfp4_fetch links them)
+    QWEN_MIX_REPO: {
+        "revision": "4774b34094cec87d5e4ea7853f5551095cec574a",
+        "pack": {
+            "pack/dense.bin": (1538035200, "974df6dcefcae85e3fd2c19fcc12eeaacaadde8261ab732d5af5af6ce2e25a7a"),
+            "pack/experts.bin": (110729789440, "11d949be778b8337d25660de6326ec733b2a6e34723d69e29523e2379e9a57e7"),
+            "pack/index.txt": (93663, "f62dc71e1c74a72794db54d3917bc71131cc6eae6f3dcdc3fdada48ff70f93ab"),
+            "pack/mix.json": (2736, "7a2d6cee2cc21f2402225f04f53b99216e9678bcf101c14c8d118b8de6dcee45"),
+            "pack/native_experts.txt": (1541, "a5637fd21f7fa114ad7751fa162be194f6ad5450742a992a011d513e34bf1617"),
+            "pack/tokenizer/chat_template.jinja": (8952, "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"),
+            "pack/tokenizer/merges.txt": (3600844, "080cf95432173729d160346b7882bd2a644b07f7a3813a3eb73f4e66787bfde9"),
+            "pack/tokenizer/token_type.json": (744960, "5088c8c298fc06af8382ddb3b76c888703ac2634e82263b97eedcc2ad202738b"),
+            "pack/tokenizer/tokenizer.json": (554, "87be2ac47d8bc7393b7435df6ccd276740019a393941a2585d5edce59f450c54"),
+            "pack/tokenizer/vocab.json": (5737005, "4ba64f0332abcfb0b600b7df1537d1e836e68009d5fb7cdb77339738dc6365c4"),
+        },
+        "dense": {"qwen-nvfp4-mix-dense.gguf": (5991569472, "abdf74336b53d8f7ca3d99947f1eac8f19b8a544966750127cb61e561b127e3b")},
+        "ple": {"ple-fp8.gguf": (51200246176, "37f89b8ce5a3425932763257c40229ec02723ad2ab14b4bbfc26a486f4725c9c")},
+        "embd": {"token-embd-bf16.gguf": (1271398656, "386203af9070c7b43acb24ded8922876721d97bbad1a709b25cb49d694a7f51d")},
+        "mtp": {
+            "mtp/dense.bin": (116099072, "c724dc0b0822ada5d2977bf5bde821605feabaa64ea2e0045b67ca656329070a"),
+            "mtp/dense.txt": (1880, "8773c81ebb0986e37fe94a8a9933e87be48b1fabc6889a0106bcdab179d1c2ac"),
+            "mtp/draft_vocab.bin": (235852, "25d7fd1670a2e0ec885868d1718d410a3baab03bceeacf0a156cf93ffe4e1ef4"),
+            "mtp/experts.bin": (707788800, "09398406be61f1f54c93861f449e48b8df0bfccbc9ec9b2b7636775a6ea9244f"),
+        },
+        "profile": {},
+    },
+    QWEN_Q8_REPO: {
+        "revision": "5202b08cff8286e075cbf1ac91695801fdc59db2",
+        "pack": {
+            "pack/dense.bin": (1538035200, "974df6dcefcae85e3fd2c19fcc12eeaacaadde8261ab732d5af5af6ce2e25a7a"),
+            "pack/experts.bin": (128345702400, "90fb53a0522f9a53565e9d17c268ec9c453aad32bd9e72294c0f84f029c4a68f"),
+            "pack/index.txt": (93663, "f62dc71e1c74a72794db54d3917bc71131cc6eae6f3dcdc3fdada48ff70f93ab"),
+            "pack/native_experts.txt": (1517, "a7086fcf2c9c217c386460803df097f31ddc09aeef97e03f895915b9ba26cd57"),
+            "pack/tokenizer/chat_template.jinja": (8952, "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"),
+            "pack/tokenizer/merges.txt": (3600844, "080cf95432173729d160346b7882bd2a644b07f7a3813a3eb73f4e66787bfde9"),
+            "pack/tokenizer/token_type.json": (744960, "5088c8c298fc06af8382ddb3b76c888703ac2634e82263b97eedcc2ad202738b"),
+            "pack/tokenizer/tokenizer.json": (554, "87be2ac47d8bc7393b7435df6ccd276740019a393941a2585d5edce59f450c54"),
+            "pack/tokenizer/vocab.json": (5737005, "4ba64f0332abcfb0b600b7df1537d1e836e68009d5fb7cdb77339738dc6365c4"),
+        },
+        "dense": {"qwen-q8-dense.gguf": (5991569472, "abdf74336b53d8f7ca3d99947f1eac8f19b8a544966750127cb61e561b127e3b")},
+        "ple": {"ple-fp8.gguf": (51200246176, "37f89b8ce5a3425932763257c40229ec02723ad2ab14b4bbfc26a486f4725c9c")},
+        "embd": {"token-embd-bf16.gguf": (1271398656, "386203af9070c7b43acb24ded8922876721d97bbad1a709b25cb49d694a7f51d")},
+        "mtp": {
+            "mtp/dense.bin": (116099072, "c724dc0b0822ada5d2977bf5bde821605feabaa64ea2e0045b67ca656329070a"),
+            "mtp/dense.txt": (1880, "8773c81ebb0986e37fe94a8a9933e87be48b1fabc6889a0106bcdab179d1c2ac"),
+            "mtp/draft_vocab.bin": (235852, "25d7fd1670a2e0ec885868d1718d410a3baab03bceeacf0a156cf93ffe4e1ef4"),
+            "mtp/experts.bin": (707788800, "09398406be61f1f54c93861f449e48b8df0bfccbc9ec9b2b7636775a6ea9244f"),
+        },
+        "profile": {},
+    },
 }
 NVFP4_FAMILIES = {
     # the original Qwen3.8-Flash-Next, censored: it refuses what Qwen refuses.  This fork's GPTQ quantization of the
@@ -5285,6 +5381,27 @@ NVFP4_FAMILIES = {
                                      "Model License) and Qwen3.8-Flash-Next's Qwen Community License 1.0: "
                                      "https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4",
                           "sources": {c: QWEN_NV_REPO for c in NVFP4_COMPONENTS}},
+    # 0.1.42-nvfp4.2, for a 128 GB PC: more exact than GPTQ, slower.  Measured on 128 GB with an RTX 5090 against the
+    # all-Q8_0 pack (teacher-forced, the same next token): GPTQ 93.6%, 177 tokens/s, a 32K prompt in 3.9 s, 69 GiB in
+    # use; the mix 95.0%, 91-95, 4.2 s, 106 GiB (every expert in RAM); Q8_0 the reference, 46-47, 10.3 s, 106 GiB (the
+    # engine's low-RAM mode by itself: its 119.5 GiB of experts do not fit 128 GB beside the rest).  "min_ram": the
+    # GiB a PC must list (a 128 GB one lists ~125-127), the GB that is
+    "qwen-nvfp4-mix": {"title": "Qwen3.8-Flash-Next (NVFP4 + Q8_0 mix)",
+                       "by": "the original Qwen, GPTQ NVFP4 with Q8_0 in 38 of its 48 layers (this fork)",
+                       "about": "censored unless --uncensored on; 95.0% the same next token as Q8_0 (GPTQ: 93.6%), about "
+                                "half GPTQ's speed; for a 128 GB PC",
+                       "tag": "qwen-mix-", "name": "qwen3.8-flash-next-mix", "min_ram": (120, 128),
+                       "license": "Qwen Community License 1.0, Qwen3.8-Flash-Next's: "
+                                  "https://huggingface.co/Qwen/Qwen3.8-Flash-Next",
+                       "sources": {c: QWEN_MIX_REPO for c in NVFP4_COMPONENTS}},
+    "qwen-q8": {"title": "Qwen3.8-Flash-Next (Q8_0)",
+                "by": "the original Qwen, every expert Q8_0 (this fork's pack)",
+                "about": "censored unless --uncensored on; the most exact (the others are measured against it), about a "
+                         "quarter of GPTQ's speed in the engine's low-RAM mode; for a 128 GB PC",
+                "tag": "qwen-", "size": "Q8_0", "name": "qwen3.8-flash-next", "min_ram": (120, 128),
+                "license": "Qwen Community License 1.0, Qwen3.8-Flash-Next's: "
+                           "https://huggingface.co/Qwen/Qwen3.8-Flash-Next",
+                "sources": {c: QWEN_Q8_REPO for c in NVFP4_COMPONENTS}},
 }
 NVFP4_DEFAULT = "qwen-nvfp4-gptq"      # this fork's recommended model, where the PC meets its requirements
 # Families setup no longer offers.  An install of one keeps working (its config and files are left alone) and every
@@ -5310,6 +5427,8 @@ NVFP4_MIN_RAM_GB = 60                  # a 64 GB PC (63.7 listed), the README's 
 NVFP4_ALL_RAM_GB = 92                  # the engine's rule (memory.hpp kLowRamBelowGib, the same ullTotalPhys GiB as
                                        # ram_gb()): from here every expert stays in RAM - a 96 GB PC lists 93.4-95.6 -
                                        # below it the engine's own low-RAM mode (a 64 GB PC)
+NVFP4_BESIDE_GIB = 16                  # 0.1.42-nvfp4.2, the engine's kLowRamBesideGib: from 92 GiB too, experts.bin and
+                                       # this much more must fit, else the low-RAM mode (qwen-q8 on 128 GB)
 NVFP4_CONTEXTS = ((28, 262144), (20, 131072), (14, 65536), (0, 32768))   # VRAM -> context, the README's table
 NVFP4_VISION_TOKENS = 1024             # the tray's: the encoder runs on the CPU
 
@@ -5369,19 +5488,36 @@ def nvfp4_offer(family: str, gpu, hip: bool, cuda_tk: int = 13) -> str | None:
     return None
 
 
-def nvfp4_short(gpu, ram) -> str | None:
+def nvfp4_size(family: str) -> str:
+    """The family's one size, as its config and start script are named (NVFP4, or its "size")."""
+    return (NVFP4_FAMILIES.get(family) or NVFP4_WITHDRAWN.get(family) or {}).get("size", NVFP4_MODEL)
+
+
+def nvfp4_min_ram(family: str | None) -> tuple:
+    """(GiB the PC must list, the GB that is) for the family: a 64 GB PC, a 128 GB one for the Q8_0 packs."""
+    return (NVFP4_FAMILIES.get(family) or {}).get("min_ram", (NVFP4_MIN_RAM_GB, 64))
+
+
+def nvfp4_short(gpu, ram, family=None) -> str | None:
     """What the PC lacks for the NVFP4 models (a recommendation only), or None."""
     if gpu["vram_gb"] < NVFP4_MIN_VRAM_GB:
         return f"needs a card with 12 GB of VRAM or more, this one has {gpu['vram_gb']:.0f}"
-    if ram < NVFP4_MIN_RAM_GB:
-        return f"needs 64 GB of RAM or more, this PC has {ram:.0f}"
+    need, nominal = nvfp4_min_ram(family)
+    if ram < need:
+        return f"needs {nominal} GB of RAM or more, this PC has {ram:.0f}"
     return None
 
 
-def engine_low_ram(ram: float) -> bool:
+def engine_low_ram(ram: float, gib: float = 0.0) -> bool:
     """Does the engine start the NVFP4 models in its low-RAM mode by itself on this PC (no --low-ram flag): below
-    NVFP4_ALL_RAM_GB GiB installed, as generate.cpp decides (platform::low_ram_auto)."""
-    return 0 < ram < NVFP4_ALL_RAM_GB
+    NVFP4_ALL_RAM_GB GiB installed, or (0.1.42-nvfp4.2) where its gib GiB of experts and NVFP4_BESIDE_GIB more do not
+    fit, as generate.cpp decides (platform::low_ram_auto)."""
+    return 0 < ram < max(NVFP4_ALL_RAM_GB, gib + NVFP4_BESIDE_GIB)
+
+
+def low_ram_by_size(ram: float, gib: float) -> bool:
+    """engine_low_ram because of the pack's size (the engine then leaves 10 GiB free instead of 6)."""
+    return ram >= NVFP4_ALL_RAM_GB and engine_low_ram(ram, gib)
 
 
 def nvfp4_verdict(family: str, gpu, hip: bool, ram: float, cuda_tk: int = 13) -> str:
@@ -5390,12 +5526,14 @@ def nvfp4_verdict(family: str, gpu, hip: bool, ram: float, cuda_tk: int = 13) ->
     if why:
         return f"not offered: {why}"
     gib = nvfp4_experts_gib(nvfp4_files(family)[0])
-    short = nvfp4_short(gpu, ram)
+    short = nvfp4_short(gpu, ram, family)
     if short:
         return f"does not fit: it {short}"
-    if engine_low_ram(ram):
-        return (f"fits in the engine's low-RAM mode (below {NVFP4_ALL_RAM_GB} GiB: of its {gib:.0f} GiB of experts "
-                "the ones outside VRAM stay in RAM as far as it holds them, the rest are read from the SSD)")
+    if engine_low_ram(ram, gib):
+        return ("fits in the engine's low-RAM mode (" + (f"its {gib:.0f} GiB of experts and {NVFP4_BESIDE_GIB} GiB "
+                "beside them do not fit" if low_ram_by_size(ram, gib) else f"below {NVFP4_ALL_RAM_GB} GiB") +
+                f": of its {gib:.0f} GiB of experts the ones outside VRAM stay in RAM as far as it holds them, the "
+                "rest are read from the SSD)")
     return f"fits (all {gib:.0f} GiB of experts in RAM)"
 
 
@@ -5607,7 +5745,7 @@ def nvfp4_install(a, family: str, gpu: dict, multi: list, cuda_tk: int, ram: flo
              "choose another model (--family qwen, swift, coder or unsloth), or update Strata once they are")
     ok(f"model: {fam['title']}")
     say(f"  Its license: {fam['license']}")
-    if a.model not in (None, NVFP4_MODEL):
+    if a.model not in (None, NVFP4_MODEL, nvfp4_size(family)):
         fail(f"{fam['title']} has one size: leave out --model {a.model}")
     if multi:
         warn(f"{fam['title']} runs on one GPU here (the engine's low-RAM mode and its growing K/V are one-GPU): "
@@ -5620,27 +5758,40 @@ def nvfp4_install(a, family: str, gpu: dict, multi: list, cuda_tk: int, ram: flo
                      f"choose a GGUF model (--family qwen), or --family {family} --yes to install it anyway")
         warn(f"installing {fam['title']} on a {gpu['vram_gb']:.0f} GB card, as you chose")
     gib = nvfp4_experts_gib(files)
-    if ram < NVFP4_MIN_RAM_GB:
+    need_ram, nominal = nvfp4_min_ram(family)
+    if ram < need_ram and nominal <= 64:
         confirm_risk(f"RAM: {ram:.0f} GB - {fam['title']} needs 64 GB or more: of its {gib:.0f} GiB of experts most "
                      "are read from the SSD while it answers (very slow), and it may run out of RAM", explicit, a.yes,
                      f"{fam['title']} needs 64 GB of RAM or more; this PC has {ram:.0f} GB",
                      f"choose a smaller GGUF model (--family coder), or --family {family} --yes to install it anyway")
         warn(f"installing {fam['title']} with {ram:.0f} GB of RAM, as you chose")
+    elif ram < need_ram:                               # 0.1.42-nvfp4.2: the Q8_0 packs, measured on 128 GB only
+        confirm_risk(f"RAM: {ram:.0f} GB - {fam['title']} is made for a {nominal} GB PC: with less the engine runs it "
+                     f"in its low-RAM mode, which was not measured with it - of its {gib:.0f} GiB of experts the ones "
+                     "the GPU and the RAM cannot hold are read from the SSD while it answers (slower)", explicit, a.yes,
+                     f"{fam['title']} needs {nominal} GB of RAM; this PC has {ram:.0f} GB",
+                     f"choose --family {NVFP4_DEFAULT} (64 GB or more), or --family {family} --yes to install it "
+                     "anyway")
+        warn(f"installing {fam['title']} with {ram:.0f} GB of RAM, as you chose")
     extra = {"on": ["--low-ram"], "resident": ["--low-ram"], "off": ["--no-low-ram"],
              "mmap": ["--mmap-experts"]}.get(a.low_ram, [])
     if a.resident_budget_gib is not None:
         extra = [x for x in extra if x != "--low-ram"] + ["--ram-budget", f"{a.resident_budget_gib:g}"]
-    if a.low_ram == "off" or (not engine_low_ram(ram) and not extra):
+    by_size = low_ram_by_size(ram, gib)
+    if a.low_ram == "off" or (not engine_low_ram(ram, gib) and not extra):
         ok(f"RAM: {ram:.1f} GiB - all {gib:.0f} GiB of experts are loaded into RAM"
            + (" (--low-ram off)" if a.low_ram == "off" else f" (the engine's low-RAM mode is for below "
-                                                             f"{NVFP4_ALL_RAM_GB} GiB)"))
-        if a.low_ram == "off" and engine_low_ram(ram):
+                                                             f"{NVFP4_ALL_RAM_GB} GiB, or where the experts and "
+                                                             f"{NVFP4_BESIDE_GIB} GiB more do not fit)"))
+        if a.low_ram == "off" and engine_low_ram(ram, gib):
             warn(f"--low-ram off with {ram:.0f} GB of RAM: every expert pinned in RAM may not fit, and the start can fail")
     else:
-        ok(f"RAM: {ram:.1f} GiB - the engine's low-RAM mode" + (f" ({' '.join(extra)})" if extra else
-                                                                f" (on by itself below {NVFP4_ALL_RAM_GB} GiB)")
-           + f": the experts the GPU does not hold, hottest first, stay in RAM (up to the free RAM less 6 GiB), the "
-             f"rest of the {gib:.0f} GiB are read from experts.bin on the SSD when needed")
+        ok(f"RAM: {ram:.1f} GiB - the engine's low-RAM mode" + (
+            f" ({' '.join(extra)})" if extra else f" (on by itself: its {gib:.0f} GiB of experts and {NVFP4_BESIDE_GIB} "
+            "GiB beside them do not fit)" if by_size else f" (on by itself below {NVFP4_ALL_RAM_GB} GiB)")
+           + ": the experts the GPU does not hold, hottest first, stay in RAM (up to the free RAM less "
+             f"{10 if by_size and not extra else 6} GiB), the rest of the {gib:.0f} GiB are read from experts.bin on "
+             "the SSD when needed")
     if a.gguf_dir:
         warn("--gguf-dir is for the GGUF models: not used")
     unc = uncensored_choice(a)
@@ -5707,7 +5858,7 @@ def nvfp4_install(a, family: str, gpu: dict, multi: list, cuda_tk: int, ram: flo
         uncensored = uncensor_default(a, unc)
         if uncensored is not None:
             extra += uncensor_args()
-    tag = fam["tag"] + NVFP4_MODEL
+    tag = fam["tag"] + nvfp4_size(family)
     cfg_path = ROOT / f"strata-{tag.lower()}.json"
     models_dir = Path(a.models_dir)
     cands = list(dict.fromkeys([models_dir, *[Path(r) / "models" for r in roots]]))
@@ -5807,7 +5958,7 @@ def nvfp4_install(a, family: str, gpu: dict, multi: list, cuda_tk: int, ram: flo
     if w:
         warn(w)                                        # #1445: a warning only, never a refusal
     cfg = {"exe": str(eng / EXE), "args": args, "cwd": str(ROOT), "tokenizer": str(paths["pack"] / "tokenizer"),
-           "model_name": f"{fam['name']}-{NVFP4_MODEL.lower()}", "log": str(ROOT / f"strata-{tag.lower()}.log"),
+           "model_name": f"{fam['name']}-{nvfp4_size(family).lower()}", "log": str(ROOT / f"strata-{tag.lower()}.log"),
            "lib_dirs": lib_dirs, "port": port, "gpu": gpu["index"], "gpus_asked": True}   # one card, not asked again
     if family in FAMILY_SAMPLING:                      # the model's recommended sampling (a request's own values win)
         cfg["sampling"] = dict(FAMILY_SAMPLING[family])
@@ -5850,7 +6001,8 @@ def nvfp4_install(a, family: str, gpu: dict, multi: list, cuda_tk: int, ram: flo
     say(f"  API (OpenAI):     http://127.0.0.1:{port}/v1   (any API key; model name: anything)")
     say(f"  API (Anthropic):  http://127.0.0.1:{port}/v1/messages")
     say(f"  Next time:        just run {'START-HERE.bat' if WIN else './setup.sh'} (or {script.name}) - it starts right away")
-    say("  The model is an abliterated fine-tune: it does not refuse. What it is used for is on whoever runs it.")
+    if uncensored:                                     # (the withdrawn fine-tunes' "it does not refuse" line: gone)
+        say("  Censorship is off by default (--uncensored on): what the model writes is on whoever runs it.")
     if PAGE_FILE_SHORT:                                # step 1's framed warning, repeated
         say(f"  [!]  {PAGE_FILE_SHORT}")
     if a.no_start:
@@ -5889,8 +6041,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--family", choices=[*NVFP4_FAMILIES, *NVFP4_WITHDRAWN, *FAMILIES],
                     help="qwen-nvfp4-gptq (this fork's default) or qwen-nvidia-nvfp4 (NVIDIA's) = the original, censored "
-                         "Qwen in NVFP4; qwen = Qwen3.8-Flash-Next, "
-                         "swift = Swift 1.5, coder, unsloth = the GGUF models")
+                         "Qwen in NVFP4; qwen-nvfp4-mix (NVFP4 + Q8_0) and qwen-q8 (Q8_0) = more exact, for a 128 GB "
+                         "PC; qwen = Qwen3.8-Flash-Next, swift = Swift 1.5, coder, unsloth = the GGUF models")
     ap.add_argument("--dry-run", action="store_true",
                     help="the NVFP4 models: show what setup would download, install and write, then stop (nothing is "
                          "downloaded, installed or changed)")
@@ -5913,7 +6065,7 @@ def main() -> int:
                          "the CPU): more reads small text and charts better, and takes longer to encode; remembered "
                          "for this model")
     ap.add_argument("--uncensored", choices=["on", "off"],
-                    help="qwen-nvfp4-gptq, qwen, unsloth: the default of the censorship switch (this fork's refusal-direction "
+                    help="qwen-nvfp4-gptq, qwen-nvfp4-mix, qwen-q8, qwen, unsloth: the default of the censorship switch (this fork's refusal-direction "
                          "projection, always loaded there; the web app and the API switch it per request): on = "
                          "the model no longer declines; off by default. Never for NVIDIA's model (its license)")
     ap.add_argument("--experimental-speed-projection", metavar="on|off|GGUF",
@@ -5979,8 +6131,9 @@ def main() -> int:
                          "this mode the experts the GPU does not hold are copied into RAM once when they fit (resident), "
                          "else read through the OS file cache (mmap); resident / mmap force one of the two")
     ap.add_argument("--resident-budget-gib", type=float, metavar="N",
-                    help="UD-Q4_K_XL, UD-IQ4_XS: the GiB of its experts kept in RAM (default: the RAM less 24 GB, 40 on 64 GB; "
-                         "more is kept as you choose, with a note)")
+                    help="Unsloth's files (UD-IQ4_XS, UD-Q3_K_XL, UD-Q4_K_XL): the RAM-budget mode with N GiB of its "
+                         "experts in RAM (default: all of them in RAM where they fit with 16 GiB more, else a budget of "
+                         "the RAM less 24 GB, 40 on 64 GB; more is kept as you choose, with a note)")
     ap.add_argument("--vram-reserve-mib", type=int, metavar="N",
                     help="VRAM in MiB the engine leaves free for other programs (a game, another model; the engine's "
                          "default: 700); the expert cache takes that much less")
@@ -6287,7 +6440,9 @@ def main() -> int:
             say(f"  {f:12s} {verdict}")
         for m, d in MODELS.items():
             verdict = "fits" if ram >= d["ram_gb"] else "tight" if ram >= d["ram_gb"] - 8 else "does not fit"
-            if d.get("budget"):
+            if d.get("budget") and not unsloth_budget(m, ram, gpu):     # 0.1.42-nvfp4.2: all of them in RAM
+                verdict = ("EXPERIMENTAL, " if d.get("experimental") else "") + "fits (all of its experts in RAM)"
+            elif d.get("budget"):
                 verdict = (("EXPERIMENTAL, " if d.get("experimental") else "") +
                            f"fits with {resident_budget_gib(m, ram)} GiB of its experts in RAM, the rest "
                            "read from the SSD" if ram >= d["ram_gb"] else "does not fit")
@@ -6327,11 +6482,11 @@ def main() -> int:
             inst = None
         # the NVFP4 default where the PC meets its requirements; a --model (a GGUF size) keeps the GGUF default
         rec_fam = inst if inst in nv + fams else STRIX_HALO_FAMILY if strix else NVFP4_DEFAULT \
-            if NVFP4_DEFAULT in nv and not a.model and nvfp4_short(gpu, ram) is None else fams[0]
+            if NVFP4_DEFAULT in nv and not a.model and nvfp4_short(gpu, ram, NVFP4_DEFAULT) is None else fams[0]
         fams = nv + fams
         for i, f in enumerate(fams, 1):
             d = NVFP4_FAMILIES.get(f) or FAMILIES[f]
-            short = nvfp4_short(gpu, ram) if f in NVFP4_FAMILIES else None
+            short = nvfp4_short(gpu, ram, f) if f in NVFP4_FAMILIES else None
             say(f"  {i}) {d['title']:20s} {d['by']} - {d['about']}" + ("   [experimental]" if d.get("experimental") else "")
                 + (f"   (recommended for Strix Halo: {STRIX_HALO_MODEL})" if f == rec_fam and strix else "")
                 + (f"   <- {short}" if short else ""))
@@ -6347,7 +6502,7 @@ def main() -> int:
         return nvfp4_install(a, family, gpu, multi, cuda_tk, ram, roots, adopted, port)
     if a.dry_run:
         fail("--dry-run shows the plan of this fork's NVFP4 models only",
-             "--family qwen-nvfp4-gptq or qwen-nvidia-nvfp4")
+             "--family " + ", ".join(NVFP4_FAMILIES))
     fam = FAMILIES[family]
     ok(f"model: {fam['title']}")
     if fam.get("license"):
@@ -6366,8 +6521,10 @@ def main() -> int:
         d = MODELS[m]
         fit = "" if ram >= d["ram_gb"] else f"   <- needs {d['ram_gb']} GB RAM, you have {ram:.0f}"
         if d.get("budget"):
-            say(f"  {i}) {m} {d['about']}; download {d['download_gb']:.0f} GB, keeps ~"
-                f"{resident_budget_gib(m, ram)} GB of its {d['arena_gb']:.0f} GB of experts in RAM{fit}")
+            keeps = (f"~{resident_budget_gib(m, ram)} GB" if unsloth_budget(m, ram, gpu, a.resident_budget_gib)
+                     else "all")
+            say(f"  {i}) {m} {d['about']}; download {d['download_gb']:.0f} GB, keeps {keeps} of its "
+                f"{d['arena_gb']:.0f} GB of experts in RAM{fit}")
             continue
         if low_ram_needed(m, ram) and low_ram_fits(m, ram, low_ram_vram(gpu)) and a.low_ram != "off":
             fit = (f"   <- fits in the low-RAM mode (the GPU holds ~{100 * low_ram_gpu_share(m, low_ram_vram(gpu)):.0f}%, "
@@ -6376,14 +6533,17 @@ def main() -> int:
     rec = str(names.index("IQ3_XXS") + 1) if ram >= 60 and "IQ3_XXS" in names else "1"
     model = a.model or names[int(ask("Which size?", [str(i) for i in range(1, len(names) + 1)], rec, a.yes)) - 1]
     budget, q4_split = None, False
+    in_budget = MODELS[model].get("budget") and unsloth_budget(model, ram, gpu, a.resident_budget_gib)
     if MODELS[model].get("budget"):
-        # Unsloth's UD-Q4_K_XL: a RAM budget of experts, the rest from the GGUF on the SSD - not the low-RAM mode (no
-        # experts.bin: it would be another 77 GB on the disk), and one GPU (the budget mode had no layer split) unless
-        # the RAM holds the GGUFs and 24 GB more: then several, without the budget, if asked for (#498).  #642: from
+        # Unsloth's files: 0.1.42-nvfp4.2 keeps all of their experts in RAM where they fit (unsloth_budget), as ISTA's.
+        # Else a RAM budget of experts, the rest from the GGUF on the SSD - not the low-RAM mode (no experts.bin: it
+        # would be another 77 GB on the disk), and one GPU (the budget mode had no layer split) unless the RAM holds
+        # the GGUFs and 24 GB more: then several, without the budget, if asked for (#498).  #642: from
         # RESIDENT_SPLIT_ENGINE several GPUs, when asked for, keep the budget (unsloth_together)
         if MODELS[model].get("experimental"):
-            warn(f"{model} is EXPERIMENTAL (docs/UNSLOTH_Q4.md): most of its experts are read from the SSD while it "
-                 "answers, so it is several times slower than the 2-3-bit models; quality checked against llama.cpp")
+            warn(f"{model} is EXPERIMENTAL (docs/UNSLOTH_Q4.md)" + (
+                ": most of its experts are read from the SSD while it answers, so it is several times slower than the "
+                "2-3-bit models" if in_budget else "") + "; quality checked against llama.cpp")
         if hip and MODELS[model].get("nvidia_only"):
             # #429 (jkuepker): checked before the 111 GB download.  The HIP engine has no prompt kernels for its
             # Q4_K / Q5_K experts (STRATA_MMQ_KQUANTS is CUDA-only) and it has not been run on AMD: asked, not refused
@@ -6392,7 +6552,7 @@ def main() -> int:
                          bool(a.model), a.yes, f"{model} is NVIDIA-only so far", "choose one of the 2-3-bit models, "
                          f"or --model {model} --yes to try it on AMD anyway", "  Try it anyway?")
             warn(f"installing {model} on an AMD card, as you chose (please report how it runs)")
-        if ram < MODELS[model]["ram_gb"]:
+        if in_budget and ram < MODELS[model]["ram_gb"]:
             confirm_risk(f"{model} needs {MODELS[model]['ram_gb']} GB of RAM or more; this PC has {ram:.0f} GB: "
                          f"its RAM budget would be {resident_budget_gib(model, ram)} GiB, so nearly every expert is "
                          "read from the SSD while it answers (very slow), and it may run out of RAM",
@@ -6400,17 +6560,23 @@ def main() -> int:
                          f"has {ram:.0f} GB", f"choose one of the 2-3-bit models, or --model {model} --yes to "
                          "install it anyway", "  Install it anyway?")
             warn(f"installing {model} with {ram:.0f} GB of RAM, as you chose")
-        budget = budget_choice(model, ram, a.resident_budget_gib)
-        if multi and not unsloth_together(a, model, ram, gpu, chosen):
-            multi, sel, chosen = [], [gpu["index"]], [gpu]
-        q4_split = bool(multi) and not resident_split()   # #498: on several GPUs without the RAM budget (#642: kept)
-        if not q4_split:
-            ok(f"RAM budget: {budget:g} GiB of {model}'s experts in RAM, the rest read from the model files on the SSD")
+        if in_budget:
+            budget = budget_choice(model, ram, a.resident_budget_gib)
+            if multi and not unsloth_together(a, model, ram, gpu, chosen):
+                multi, sel, chosen = [], [gpu["index"]], [gpu]
+            q4_split = bool(multi) and not resident_split()   # #498: on several GPUs without the RAM budget (#642: kept)
+            if not q4_split:
+                ok(f"RAM budget: {budget:g} GiB of {model}'s experts in RAM, the rest read from the model files on the SSD")
+        else:
+            ok(f"RAM: {ram:.1f} GiB - all of {model}'s experts ({MODELS[model]['arena_gb'] / 1.073741824:.0f} GiB) are "
+               f"kept in RAM, with {UNSLOTH_RESIDENT_BESIDE_GB} GiB beside them: faster prompts and answers than its "
+               "RAM budget, which reads them from the GGUF in place (--resident-budget-gib N chooses that instead)")
         if a.low_ram not in ("auto", "off"):
-            warn(f"--low-ram {a.low_ram} does not apply to {model}: it always reads part of its experts from the files")
+            warn(f"--low-ram {a.low_ram} does not apply to {model}: " + ("it always reads part of its experts from "
+                 "the files" if in_budget else "all of its experts fit in RAM"))
     elif a.resident_budget_gib is not None:
-        warn(f"--resident-budget-gib is for UD-Q4_K_XL and UD-IQ4_XS: {model} keeps all of its experts in RAM or in "
-             "the low-RAM mode")
+        warn(f"--resident-budget-gib is for Unsloth's files: {model} keeps all of its experts in RAM or in the low-RAM "
+             "mode")
     low_ram = low_ram_wanted(model, ram, a.low_ram)
     # #642: the engines from RESIDENT_SPLIT_ENGINE run the low-RAM mode on the chosen cards as on one (decided below)
     if low_ram and multi and not resident_split() and not low_ram_together(a, model, ram, gpu, chosen):
@@ -6643,7 +6809,8 @@ def main() -> int:
         lib_dirs = meta.get("lib_dirs") or meta.get("cuda_dirs") or cuda_lib_dirs(cuda_tk)
     engine_ver = version_tuple(meta.get("version"))
     need_engine = MODELS[model].get("engine", UNSLOTH_ENGINE)
-    if budget is not None and engine_ver < need_engine:      # checked before the 94-111 GB download
+    if MODELS[model].get("budget") and engine_ver < need_engine:   # checked before the 90-111 GB download (an
+                                                                   # Unsloth file, with its RAM budget or without)
         fail(f"{model} needs engine {'.'.join(map(str, need_engine))} or newer; this one is {meta.get('version')}",
              "update Strata (or compile the engine with --build) and run setup again")
     ok(f"engine: {eng / EXE}")

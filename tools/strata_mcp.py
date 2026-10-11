@@ -63,9 +63,13 @@ FALLBACK_MODELS = {
                    "arena_gb": 77.0, "families": ("unsloth",), "budget": True, "experimental": True,
                    "vision": True},                       # #967: images allowed (setup warns: untested with this file)
     "UD-IQ4_XS": {"about": "~4-bit i-quant (Unsloth Dynamic), between IQ3_S and UD-Q4_K_XL in quality; on a PC with "
-                           "less than ~80 GB of RAM part of its experts are read from the SSD",
+                           "less than ~72 GB of RAM part of its experts are read from the SSD",
                   "download_gb": 93.7, "ram_gb": 48, "arena_gb": 59.5, "families": ("unsloth",), "budget": True,
                   "vision": True},
+    "UD-Q3_K_XL": {"about": "~3.5-bit i-quant (Unsloth Dynamic): the fastest Unsloth file, below UD-IQ4_XS in quality; "
+                            "on a PC with less than ~68 GB of RAM part of its experts are read from the SSD",
+                   "download_gb": 90.0, "ram_gb": 48, "arena_gb": 55.8, "families": ("unsloth",), "budget": True,
+                   "vision": True},                       # setup warns: images untested with this file
 }
 FALLBACK_FAMILIES = {
     "qwen": {"title": "Qwen3.8-Flash-Next", "about": "the original model", "tag": ""},
@@ -73,9 +77,10 @@ FALLBACK_FAMILIES = {
                                              "authors' numbers)", "tag": "swift-"},
     "coder": {"title": "Qwen3.8-Flash-Next Coder", "about": "half the experts (code, tools, images kept): needs ~32 GB "
                                                             "of RAM, faster; weaker outside coding", "tag": "coder-"},
-    "unsloth": {"title": "Qwen3.8-Flash-Next (Unsloth)", "about": "UD-IQ4_XS: a 94 GB download; with less than ~80 GB "
+    "unsloth": {"title": "Qwen3.8-Flash-Next (Unsloth)", "about": "UD-IQ4_XS: a 94 GB download; with less than ~72 GB "
                                                                   "of RAM part of its experts are read from the SSD "
-                                                                  "(UD-Q4_K_XL, 111 GB: experimental)",
+                                                                  "(UD-Q3_K_XL, 90 GB: faster, less exact; UD-Q4_K_XL, "
+                                                                  "111 GB: experimental)",
                 "tag": "unsloth-", "vision": False},
 }
 FALLBACK_CONTEXTS = [8192, 32768, 65536, 131072, 204800, 262144, 393216, 524288]
@@ -712,7 +717,10 @@ class Strata:
                 if ram is not None:
                     verdict = "fits" if ram >= d["ram_gb"] else "tight" if ram >= d["ram_gb"] - 8 else "does not fit"
                     try:
-                        if d.get("budget"):
+                        if d.get("budget") and S and hasattr(S, "unsloth_budget") and not S.unsloth_budget(m, ram):
+                            # 0.1.42-nvfp4.2: setup keeps every expert in RAM where they fit with 16 GiB more
+                            verdict = ("experimental: " if d.get("experimental") else "") + "fits (all of its experts in RAM)"
+                        elif d.get("budget"):
                             verdict = (("experimental: " if d.get("experimental") else "")
                                        + "part of its experts in RAM, the rest read from the SSD"
                                        if ram >= d["ram_gb"] else "does not fit")
@@ -1231,8 +1239,10 @@ class Tools:
             usable = [g for g in hw.get("gpus", []) if g.get("usable")]
             vram = max((g["vram_gb"] for g in usable), default=12)
             context = 32768 if vram < 14 else 65536 if vram < 20 else 131072
-            if models[model].get("budget"):
-                context = 8192 if vram < 14 else 32768
+            S = s.setup_module()
+            if models[model].get("budget") and (S is None or not hasattr(S, "unsloth_budget") or
+                                                S.unsloth_budget(model, hw.get("ram_gb") or 0.0)):
+                context = 8192 if vram < 14 else 32768          # the RAM-budget mode (every expert in RAM: as above)
         if vision in ("yes", "gpu", "cpu") and models[model].get("vision", families[family].get("vision")) is False:
             raise ToolError(f"images are not available with {families[family]['title']} {model} yet: use vision=no")
         if vision is not None and backend == "hip" and vision != "no":

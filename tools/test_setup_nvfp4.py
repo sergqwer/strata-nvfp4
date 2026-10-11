@@ -898,7 +898,7 @@ class Uncensored(unittest.TestCase):
         self.assertEqual(setup.UNCENSOR_VECTOR.parent.name, "uncensor")
         self.assertTrue((setup.UNCENSOR_VECTOR.parent / "README.md").is_file())
         self.assertEqual(setup.UNCENSOR_LAYERS, (8, 33))
-        self.assertEqual(setup.UNCENSOR_FAMILIES, ("qwen-nvfp4-gptq", "qwen", "unsloth"))
+        self.assertEqual(setup.UNCENSOR_FAMILIES, ("qwen-nvfp4-gptq", "qwen-nvfp4-mix", "qwen-q8", "qwen", "unsloth"))
         self.assertIn("qwen-nvidia-nvfp4", setup.UNCENSOR_REFUSED)
 
     def want(self):

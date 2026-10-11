@@ -475,7 +475,7 @@ class KvStreaming(unittest.TestCase):
         code, out, cfg, _ = self.go("Q2_0", "--resident-budget-gib", "30")
         self.assertEqual(code, 0, out)
         self.assertNotIn("--resident-budget-gib", cfg["args"])
-        self.assertIn("--resident-budget-gib is for UD-Q4_K_XL", out)
+        self.assertIn("--resident-budget-gib is for Unsloth's files", out)
 
 
 class RulesAgreeWithTheWrittenConfig(unittest.TestCase):
