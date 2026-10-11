@@ -310,14 +310,13 @@ int arena_pin_cap_gib() {
     return v < 0 ? -1 : v;
 }
 
-namespace {
 #ifdef _WIN32
 // #243: how much of the arena the sliced registration may pin on Windows when the whole arena was refused.
 // Page-locked memory the GPU maps is charged to its shared (non-local) WDDM segment; pinned slice by slice until
 // the driver refused one (28 GiB of a 63 GB PC), that segment was left full and every later cudaMalloc failed
 // "out of memory".  4 GiB of the budget stay free for what the engine allocates after the arena; without the DXGI
 // numbers, RAM/2 - 8 GiB (the budget is about half the RAM).  False: no limit could be worked out.
-bool sliced_pin_limit(uint64_t& limit, std::string& why) {
+bool shared_pin_limit(uint64_t& limit, std::string& why) {
     constexpr uint64_t GiB = 1ull << 30;
     char buf[256];
     int dev = 0;
@@ -340,8 +339,13 @@ bool sliced_pin_limit(uint64_t& limit, std::string& why) {
     why = buf;
     return true;
 }
+#else
+bool shared_pin_limit(uint64_t& limit, std::string& why) {
+    limit = 0;
+    why = "no shared-memory budget outside Windows";
+    return false;
+}
 #endif
-}  // namespace
 
 namespace {
 std::vector<uint64_t> uniform_bounds(uint64_t bytes, uint64_t slice) {
@@ -395,7 +399,7 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds,
             // #243 (opt-in, STRATA_ARENA_PIN_GIB=auto): not up to the driver's refusal but below the shared-memory
             // budget, for a PC where the full sliced pin leaves WDDM refusing later allocations.  Not the default: a
             // 64 GB PC pins 30 GiB past that budget without trouble, and capping it at 26 cost ~20% prompt speed.
-            if (!capped && env_gib == -2) limited = sliced_pin_limit(limit, limit_why);
+            if (!capped && env_gib == -2) limited = shared_pin_limit(limit, limit_why);
 #endif
             for (size_t i = 0; i + 1 < bounds.size(); ++i) {
                 const uint64_t off = bounds[i], n = bounds[i + 1] - bounds[i];
