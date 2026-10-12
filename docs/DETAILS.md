@@ -1781,6 +1781,15 @@ the pairs in which the switched arm won). They are here so you can try them on y
   pageable when the driver refuses). Decode, median tok/s on, off, 6 pairs of whole runs: Tesla P100 with the RAM capped at
   24 GB (cgroup) 13.9 -> 15.0 (+8%, 6/6 pairs faster); RTX 5070 `--mmap-experts` +1.2% (5/6); RTX 3060 `--mmap-experts`
   -0.1% (5/6). Boxes that hold all experts in RAM never use the stage buffers.
+- **`STRATA_PREFILL_GROUP_GATHER=2`: prompt chunks below 1,024 tokens gather their experts by MMQ group too**, as the
+  streamed chunks do (one gather, one wait and one release for up to 16 experts instead of one each). A group keeps at
+  most the eight staging slots, and the open group is gathered before a transfer writes into a slot it holds. The same
+  bytes into the same group slots: with `STRATA_PREFILL_CPU_SHARE=0`, two runs each way wrote the same
+  `--window-hashes` file on a 600-token prompt (with the CPU share on, two runs of one setting already differ: the
+  share is measured). Core i7-13700K, RTX 5090, Windows 11, Swift 1.5 IQ3_S, twelve appended turns on a 52K
+  conversation: 6,268 and 6,304 ms of prompt reading without it, 5,921 and 5,924 ms with it; 140-150-token turns about
+  440 -> 355 ms, 355-380-token turns about 550 -> 475 ms, turns of 800 tokens and more unchanged. Not measured: other
+  cards, Linux, a non-native pack (the switch needs a native pack's layers).
 - **`STRATA_ADAPT_LAG=2`: the adaptive tier's copies are waited for one window later** (#764). Decode, 6 pairs: Tesla P100
   (PCIe 3.0 x16) +3.5% (6/6 pairs faster), RTX 5070 +0.2% (4/6), RTX 3060 -1.3% (0/6), so it stays opt-in.
 - **`STRATA_ADAPT_OVERLAP` (`=1` turns it on, on every backend; the startup log names the state and, when it cannot run, why): the adaptive tier's copies land while the next
