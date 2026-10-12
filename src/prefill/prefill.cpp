@@ -124,14 +124,16 @@ inline bool swiglu_quant_on() {
     }();
     return on;
 }
-// STRATA_PREFILL_GROUP_GATHER=0: one gather, one wait and one record per expert (the streamed walk's MMQ groups)
-inline bool group_gather_env() {
-    static const bool on = [] {
+// STRATA_PREFILL_GROUP_GATHER=0: one gather, one wait and one record per expert (the streamed walk's MMQ groups).
+// =2 (opt-in, Xiaomi2008 d339aee4): the staged walk (chunks below stream_all_min()) gathers by group too.
+inline int group_gather_mode() {
+    static const int mode = [] {
         const char* v = std::getenv("STRATA_PREFILL_GROUP_GATHER");
-        return v == nullptr || std::atoi(v) != 0;
+        return v == nullptr ? 1 : std::atoi(v);
     }();
-    return on;
+    return mode;
 }
+inline bool group_gather_env() { return group_gather_mode() != 0; }
 // STRATA_PREFILL_IN_PLACE=0: every MMQ group gathered (see in_place in the streamed walk)
 inline bool in_place_env() {
     static const bool on = [] {
@@ -3107,11 +3109,12 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     const int mmq_dt = lay.native ? lay.fmt[(size_t) l].d_type : 42;
                     // the streamed walk's MMQ groups: gathered in one launch each; in place (no gather) where the
                     // products can read each expert where it lies; then gate/up's activations once per token
-                    const bool group_gather_l = group_gather_env() && stream_all && use_mmq && lay.native &&
-                                                MMQ_GROUP <= mmq::kGatherGroupMax;
+                    // STRATA_PREFILL_GROUP_GATHER=2: the staged walk's groups too, always gathered (never in place)
+                    const bool group_gather_l = group_gather_env() && (stream_all || group_gather_mode() == 2) && use_mmq &&
+                                                lay.native && MMQ_GROUP <= mmq::kGatherGroupMax;
                     // (not with --peer-device: set_peer can decline a pack and leave m.pp null, the peer's slots and
                     // buffers sized for the gathered groups all the same)
-                    const bool in_place_l = in_place_env() && group_gather_l && lay.fmt[(size_t) l].tail_off &&
+                    const bool in_place_l = in_place_env() && group_gather_l && stream_all && lay.fmt[(size_t) l].tail_off &&
                                             swiglu_quant_on() && mmq::swiglu_quant_ok(mmq_dt) &&
                                             mmq::direct_ok(mmq_gt) && mmq::direct_ok(mmq_dt) &&
                                             !core::peer_portable() && !(m.pp && m.pp->peer);
@@ -3902,12 +3905,18 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             m.stager->start(std::move(js));
                         }
                         StagerDone stager_done{stream_all ? nullptr : m.stager.get()};
+                        // STRATA_PREFILL_GROUP_GATHER=2 (Xiaomi2008 d339aee4): the staged walk's open MMQ group holds its
+                        // staging slots until its one gather (`flush` below); a slot the next transfer needs is given
+                        // back first
+                        unsigned held_slots = 0;
+                        std::function<void()> flush_held;
                         auto stage_one = [&](size_t j) -> bool {
                             const int32_t e = order[j];
                             const bool resident = m.host_res && m.cache && m.host_res[(size_t) l * m.g->n_expert + e] >= 0;
                             if (resident) return true;
                             const int sl = stage_next;
                             stage_next = (stage_next + 1) % STAGE;
+                            if ((held_slots >> sl) & 1u) flush_held();
                             const auto th = Clock::now();
                             const bool pinned = m.src->pinned(l, e);   // pinned: never transient
                             const uint8_t* b = pinned ? m.src->blob_stable(l, e) : nullptr;
@@ -3938,6 +3947,11 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                         // entry the routing skipped inside an open group first gathers what the group holds so far
                         // (`flush`), so no more than a group's entries are ever held back from the issuer.
                         // STRATA_PREFILL_GROUP_GATHER=0: one gather, one wait and one record per expert.
+                        // STRATA_PREFILL_GROUP_GATHER=2 (opt-in, Xiaomi2008 d339aee4): the staged walk (chunks below
+                        // stream_all_min()) gathers by group too.  Its copies are issued in order as well, so the group's
+                        // last copy covers the others; a group keeps at most the STAGE staging slots, and stage_one
+                        // gathers the open group before it writes into a slot the group still holds.  The same bytes
+                        // into the same group slots.
                         const bool group_gather = group_gather_l;
                         // In place: a group's products read each expert's blob where it lies (its ring slot or cache
                         // slot) through a pointer per expert, with no gather; its ring slots are released after the
@@ -3976,7 +3990,9 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             }
                             gg_nslots = 0;
                             gg.first = gg.n;
+                            held_slots = 0;
                         };
+                        flush_held = [&] { flush(0); };
                         // one expert's products from its blob on the device; `slot` (a ring slot, or -1 for a resident
                         // expert) is released once the blob is read
                         auto compute = [&](size_t j, const uint8_t* blob_dev, int slot) -> bool {
@@ -3990,7 +4006,10 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                                 if (group_gather) {
                                     gg.blob[q] = blob_dev;
                                     gg.n = (int) q + 1;
-                                    if (slot >= 0) gg_slots[gg_nslots++] = slot;
+                                    if (slot >= 0) {
+                                        gg_slots[gg_nslots++] = slot;
+                                        if (!stream_all) held_slots |= 1u << slot;   // a staging slot (the staged walk)
+                                    }
                                     if (!last_of_group) return true;
                                     if (!in_place) {
                                         flush(MMQ_TAIL);
