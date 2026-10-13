@@ -7694,6 +7694,10 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "strata generate: experts via mmap (%s; %s)\n",
                      ram_fallback_taken ? "not enough RAM for the expert arena: the same source as --mmap-experts" : "--mmap-experts",
                      src.gguf_mode() ? "the GGUF shards in place, no experts.bin" : "the A/B arm of R2.1");
+        // #1905 pins the arena's experts; here the RAM copy is pinned instead (PIN: hottest first, in slices)
+        if (const char* pn = std::getenv("STRATA_PIN_BY_NEED"); pn != nullptr && pn[0] != '\0' && pn[0] != '0')
+            std::fprintf(stderr, "strata generate: pin by need: off (the expert arena only; with --mmap-experts / the "
+                                 "low-RAM mode the RAM copy is pinned instead, in slices from its hottest experts)\n");
         // #286: with a RAM budget the hottest experts live in it, and the rest are read from the drive unbuffered
         // when the file cache could not keep them beside the budget anyway (a 32 GB PC) - the mapped reads' page
         // faults are small requests on the critical path, and their pages take the RAM the budget was sized for
