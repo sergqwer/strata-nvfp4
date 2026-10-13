@@ -762,6 +762,24 @@ print(r.choices[0].message.content)
   end-of-turn token with no `</think>`: the content is empty and an agent stops. `"reasoning_close_retry": true` in
   `strata-<model>.json` closes the thinking once (as the thinking budget does) and continues, once per request, only for
   a reply that ended that way with no answer and no tool call. Off by default.
+- **A stop token the model writes about is text (on by default).** Asked to write `<|im_end|>` or `<|endoftext|>`
+  from memory, the model writes the token's special id rather than its text, and the reply used to end right there:
+  an agent explaining why llama.cpp does not stop, or grepping a tokenizer config for the token, was cut off
+  mid-sentence, and a tool call holding the token was lost. Measured on Qwen3.8 NVFP4 at temperature 0
+  (`tools/eos_literal_repro.py`, both APIs, with and without thinking): a backtick then id 248046, `"` then 248046, a
+  space then 248046, 248046 closing a ChatML turn the model wrote out in a code block or in its thinking, 248046
+  inside a tool call's argument, 248044 after a backtick - all 16 requests that ask for the token from memory ended
+  there (a token already in the prompt is copied as text and was fine). Where no turn ends - inside a tool call's
+  argument, right after the backtick that opens inline code or after an opening quotation mark, right after a space
+  (the chat template trims every message, so the model never saw an end of turn after whitespace), or closing a turn
+  of the chat format the model writes out after its own `<|im_start|>` in a code block or in its thinking - the
+  server writes the token's text in place of the id, all but its last piece `>`, and the engine goes on from there.
+  The model writes the `>` itself, together with the closing backtick, quote or comma (each is one token with it); with
+  the whole text written for it, the quote stayed open in 4 of the 7 replies that had one (`grep -rn '<|im_end|>`).
+  At most 64 times per reply; the window prints one line each time. After the change 28 of the 29 repro requests end
+  as asked (in the 29th the model declined to print the token). Everywhere else the id ends the turn as before: 31
+  ordinary requests had no rewrite. A client's `stop` / `stop_sequences` naming the token's text still stops there.
+  `"stop_token_text": false` in `strata-<model>.json` turns it off.
 - **A reply stuck on one token is ended (0.1.39, #606).** When a reply repeats the same token 256 times in a row, the
   server ends it there with `finish_reason` `"length"` and says so in its window: a model in a loop, or a broken
   state that answers one token forever (#606 saw 36,689 tokens of `!`). `"repeat_stop_tokens": N` in

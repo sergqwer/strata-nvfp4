@@ -57,7 +57,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT))   # run as a script (run-<model>.bat) as well as a module
 from serve.frontend import (THINK_END, ChatTemplate, Event, OutputParser, anthropic_to_messages,  # noqa: E402
-                            forced_call, images_of, literal_tags, mark_think_literals, openai_to_messages,
+                            EXAMPLE_TURN, forced_call, images_of, literal_tags, mark_think_literals, openai_to_messages,
                             tool_choice_of, unmark_think_literals)
 from serve.mcp import McpCancelled, hub_from_config  # noqa: E402
 from serve import runconfig  # noqa: E402
@@ -150,6 +150,12 @@ ANSWER_RESERVE_MIN = 512      # #984: the tokens kept for the answer when a thin
 # #1053 (opt-in "reasoning_close_retry": true): a reply that ends on its stop token still inside <think>, with no answer
 # and no call, is continued once with the thinking closed (the same way the budget's wrap-up closes it)
 REASONING_CLOSE = "\n</think>\n\n"
+# EOS literal: a model asked to write <|im_end|> or <|endoftext|> from memory writes the token's special id, not its
+# text - measured on Qwen3.8 at temperature 0: "`" then 248046, `"` then 248046, " " then 248046, the id closing a
+# ChatML turn it wrote out in a code block, inside a tool call's argument and inside its thinking - and the reply ended
+# there.  Where no turn ends (OutputParser.literal_context) the id is written as the token's text and the reply goes
+# on; at most this many times per reply.  The config's "stop_token_text": false turns it off.
+STOP_TEXT_MAX = 64
 REASONING_WRAP_UP = "\n\nI have thought about this long enough; time to give my answer.\n</think>\n\n"
 # #728: opt-in handling of reasoning that repeats whole passages (which the single-token guard above cannot see).
 # "reasoning_loop_recovery": "stop" ends the reply there; "recover" (or true) goes on from the same output with the
@@ -3025,6 +3031,9 @@ class Service:
         self.tool_name_repair = False                     # opt-in: undeclared tool-call names repaired (OutputParser)
         self.stop_ids = set(tokenizer.encode(IM_END, parse_special=True) +
                             tokenizer.encode("<|endoftext|>", parse_special=True))
+        self.stop_token_text = True                       # EOS literal (STOP_TEXT_MAX): the config's "stop_token_text"
+        start = tokenizer.encode("<|im_start|>", parse_special=True)
+        self.im_start_id = start[0] if len(start) == 1 else None
         # #567 (#1852): a prompt re-encodes only what follows the last special token it shares with a recent prompt
         # (the same ids as a full encode: tools/strata_tokenizer.py PromptEncoder).  Tokenizers without resume points
         # encode in full.
@@ -3951,6 +3960,21 @@ class Service:
                     s["phase"] = "tool call complete"
                 s["tail"] = ((s.get("tail") or "") + (ev.text or ""))[-600:]
 
+    def stop_as_text(self, t, parser, detok, room, literals, examples):
+        """EOS literal: stop id `t` came where no turn ends (OutputParser.literal_context; `examples`: <|im_start|>
+        ids the model wrote in its thinking or in a code block, still open) -> (the ids of the token's text, where it
+        was), to write in its place; None: `t` ends the reply, as always.  `room`: the output tokens left in place
+        of `t` (the text and at least one more token must fit)."""
+        if not self.stop_token_text or literals >= STOP_TEXT_MAX or detok.pending():
+            return None
+        why = parser.literal_context(example=examples > 0)
+        if why is None:
+            return None
+        ids = self.tok.encode(self.tok.decode([t]))     # without parse_special: the text's ordinary pieces
+        if not ids or len(ids) + 1 > room or any(i in self.stop_ids for i in ids):
+            return None
+        return ids, why
+
     def _progress(self, last_print, every=1.0, st=None):
         """A progress line in the server window every `every` seconds while a request runs."""
         now = time.time()
@@ -4027,6 +4051,24 @@ class Service:
                     out.append(Event("content", held))
                 out.append(ev)
             return out
+        def written(ids):
+            """EOS literal: ids the server writes into the reply as output - the parser, the stream and the count
+            see them as the model's."""
+            nonlocal n, tail, thinking_n, reasoning_text, answered
+            for x in ids:
+                n += 1
+                raw_ids.append(x)
+                thinking_n += parser.state in ("reasoning", "rcall")
+                piece = detok.push(x)
+                tail = (tail + piece)[-2:]
+                evs = cut(parser.feed(piece))
+                self._note(n, evs, st, rate)
+                for ev in evs:
+                    if self.reasoning_loop_recovery and ev.kind == "reasoning":
+                        reasoning_text += ev.text or ""
+                    if ev.kind in ("content", "tool_start", "tool_call"):
+                        answered = True
+                    yield "event", ev
         opening = []                                    # without thinking the prompt ends with the forced opening:
         if force and not thinking:                      # the parser reads it as if the model had written it
             opening, force = parser.feed(force), None
@@ -4037,6 +4079,9 @@ class Service:
         recovery_count, reasoning_text, repeat_coverage = 0, "", 0.0
         looped, next_loop_check = False, LOOP_CHECK_EVERY       # #728: reasoning that repeats whole passages
         raw_ids = []                                    # every generated id (STRATA_DEBUG: dump raw model text)
+        literals, relit = 0, False                      # EOS literal: stop ids written as text; this pass ended on one
+        owed = None                                     # EOS literal: the text's last piece, which the model writes
+        examples = 0                                    # <|im_start|> ids written in the thinking or a code block, open
         emb, self.embeddings.path = getattr(self.embeddings, "path", None), None   # this run's to delete now
         # Only a DONE line replaces engine.last, so a request that died, errored or was disconnected must not have
         # the PREVIOUS request's decode figures recorded as its own: each pass keeps its own DONE (a segment) if
@@ -4148,11 +4193,39 @@ class Service:
                                     if force and parser.state == "reasoning" and parser.buf == THINK_END:
                                         opens = True    # #537: the held </think> was the end: the call opens there
                                         break
+                                    if owed:            # EOS literal: it ends right after the text it began: the
+                                        n -= 1          # text's last piece, then the end
+                                        yield from written(owed)
+                                        n += 1
+                                        owed = None
+                                    got = self.stop_as_text(t, parser, detok, max_new - n + 1, literals, examples)
+                                    if got is not None:
+                                        # EOS literal: the token's text in place of its id, and the reply goes on
+                                        # from there (the next pass's prompt ends with that text).  The text's last
+                                        # piece (">") is left to the model, so it can write the closing quote,
+                                        # backtick or comma with it (">`", ">'", '>",'), as it does after the text
+                                        lit, why = got
+                                        lit, owed = (lit[:-1], lit[-1:]) if len(lit) > 1 else (lit, None)
+                                        literals += 1
+                                        examples -= why == EXAMPLE_TURN
+                                        print(f"[strata] the model wrote {self.tok.decode([t])}'s id {why}: kept as "
+                                              "its text and the reply goes on (stop_token_text)", flush=True)
+                                        n -= 1
+                                        yield from written(lit)
+                                        seg.extend(lit)
+                                        if stops is not None and stops.hit is not None:
+                                            finish = "stop"     # the client's stop string was that text
+                                        else:
+                                            relit = True
+                                        break
                                     finish = "stop"
                                     raw_ids.append(t)
                                     break
+                                owed = None             # the model wrote the text's last piece (or went on without it)
                                 raw_ids.append(t)
                                 seg.append(t)
+                                if t == self.im_start_id and parser.example_place():
+                                    examples += 1       # EOS literal: a turn of the format written out as an example
                                 thinking_n += parser.state in ("reasoning", "rcall")
                                 run_len = run_len + 1 if t == run_tok else 1
                                 run_tok = t
@@ -4271,6 +4344,11 @@ class Service:
                                   f"(coverage={repeat_coverage:.3f}); resuming the same output with the low-effort "
                                   "instruction (reasoning_loop_recovery)", flush=True)
                             continue
+                        if relit:                       # EOS literal: go on after the token's text
+                            relit = False
+                            if not cancel.is_set():
+                                prompt = prompt + seg
+                                continue
                         if (self.reasoning_close_retry and thinking and finish == "stop" and not close_retried
                                 and not answered and not wrap and not opens and parser.state == "reasoning"
                                 and parser.buf != THINK_END         # #537: not after a held </think>, the end
@@ -4408,6 +4486,7 @@ class Service:
                                       "strata-<model>.json for every request) leaves room to answer", flush=True)
                             if os.environ.get("STRATA_DEBUG") and raw_ids:
                                 print(f"[strata] raw: {self.tok.decode(raw_ids)!r}", flush=True)
+                                print(f"[strata] raw ids: {raw_ids}", flush=True)
                         st["busy"] = False
                         st.pop("tail", None)                     # #212: the answer's end is not kept once it is done
                         st.pop("tool", None)
@@ -6659,6 +6738,9 @@ def main() -> int:
                   sampling_defaults=sampling_defaults,
                   fit_max_tokens=a.fit_max_tokens or cfg.get("fit_max_tokens") is True)
     svc.reasoning_close_retry = cfg.get("reasoning_close_retry") is True    # #1053: opt-in, off by default
+    if cfg.get("stop_token_text") is not None and not isinstance(cfg["stop_token_text"], bool):
+        raise SystemExit(f"[strata] config \"stop_token_text\" must be true or false, not {cfg['stop_token_text']!r}")
+    svc.stop_token_text = cfg.get("stop_token_text") is not False   # EOS literal: on unless the config says false
     if cfg.get("prevent_sleep") is not None and not isinstance(cfg["prevent_sleep"], bool):
         raise SystemExit(f"[strata] config \"prevent_sleep\" must be true or false, not {cfg['prevent_sleep']!r}")
     from serve.keepawake import KeepAwake
