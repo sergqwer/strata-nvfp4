@@ -4840,6 +4840,19 @@ int main(int argc, char** argv) {
         mtp.set_hnorm_per_stream(o.mtp_hnorm_stream);   // --mtp-hnorm stream (opt-in), before any capture
         mtp.set_q4(o.mtp_q4 == "all" || o.mtp_q4 == "proj", o.mtp_q4 == "all" || o.mtp_q4 == "head");   // before load
         if (!o.mtp_draft_vocab.empty()) mtp.set_draft_vocab(o.mtp_draft_vocab);
+        // This fork, #7: a native token embedding that could not be page-locked sits in the VRAM of the card that
+        // loaded it (native_head.cpp), and the drafter - and E-9's batch, STRATA_SPLIT_MTP_BATCH - gathers from it on
+        // the last stage's card, which faulted later ("mtp prefill: an illegal memory access").  Refused here.
+        if (!o.mtp.empty() && last_st != nullptr && native_embed.vram_device() >= 0 &&
+            native_embed.vram_device() != last_st->dev) {
+            std::fprintf(stderr, "strata generate: the native token embedding (%.0f MiB) could not be page-locked, so it "
+                                 "sits in CUDA%d's VRAM, but the draft head runs on CUDA%d, the layer split's last card, "
+                                 "which cannot read it.  The driver page-locks too little host memory for this split (WSL2: "
+                                 "about 1 GiB; issue #7): run the engine natively (Windows or Linux) or on one GPU - a "
+                                 "smaller --prefill does not help\n", (double) native_embed.bytes() / 1048576.0,
+                         native_embed.vram_device(), last_st->dev);
+            return 1;
+        }
         // the draft layer is the canonical model's MTP head (512 experts) even when the target is pruned,
         // so it always sees the canonical geometry; `static` because MtpDrafter keeps a reference
         // with a layer split across GPUs the drafter reads the last stage's residual: it lives on that device

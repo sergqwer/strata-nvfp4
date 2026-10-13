@@ -53,10 +53,14 @@ public:
     void gather_one(int64_t token, float* out, void* stream) const;
     uint64_t bytes() const { return bytes_; }
     int type() const { return type_; }
+    /// This fork (#7): the device whose VRAM holds the table when it could not be mapped from host memory, else -1
+    /// (mapped: every device reads it).
+    int vram_device() const { return vram_dev_; }
 
 private:
     void* host_ = nullptr;
     const void* dev_ = nullptr;
+    int vram_dev_ = -1;
     uint64_t bytes_ = 0;
     size_t row_ = 0;
     int64_t n_embd_ = 0, n_vocab_ = 0;
