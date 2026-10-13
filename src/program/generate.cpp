@@ -10897,7 +10897,23 @@ int main(int argc, char** argv) {
                                  "nothing to take, so it is not armed by default (STRATA_PREFILL_CPU_SHARE=auto forces it)\n",
                          (long long) xcache.slots(), (long long) (g.n_layers * g.n_expert));
         if (share_pool && stages.empty() && !multi_gpu && share_has_work && !share_default_ok()) share_has_work = false;   // H11
-        strata::prefill::Prefill::arm_cpu_share(share_pool, share_pool && stages.empty() && !multi_gpu && share_has_work);
+        // extras/mgpu-fixes: a layer split arms it by default too (STRATA_SPLIT_CPU_SHARE=0: off, as before).  One GPU
+        // always had it for chunks below cpu_share_max(); a split did not, so a short prompt streamed every expert its
+        // stages do not hold through the GPUs alone (4x 4090 rental, 16 GB cards, CUDA1 at 2 GB/s: 2K at 854 tok/s on
+        // the pair against 1,055 on one of the cards).  The stages take the pool one at a time (Prefill::set_cpu_pool).
+        // Work = some stage's cache holds fewer than all of its layers' experts.
+        bool split_share = false;
+        if (share_pool && multi_gpu && !stages.empty()) {
+            static const bool split_share_ok = [] {
+                const char* v = std::getenv("STRATA_SPLIT_CPU_SHARE");
+                return v == nullptr || v[0] != '0';
+            }();
+            bool work = (int64_t) xcache.slots() < split_at[0] * g.n_expert;
+            for (const auto& st : stages) work = work || (int64_t) st->cache.slots() < (st->le - st->lb) * g.n_expert;
+            split_share = split_share_ok && work && share_default_ok();
+        }
+        strata::prefill::Prefill::arm_cpu_share(share_pool, share_pool && ((stages.empty() && !multi_gpu && share_has_work) ||
+                                                                           split_share));
         void* borrow = nullptr;
         uint64_t borrow_bytes = 0;
         int32_t lend_first = -1;          // the first slot the prompt path may borrow (its largest chunk)
