@@ -323,6 +323,23 @@ inline bool place_off_host() {
     return sched_setaffinity(0, sizeof to, &to) == 0;
 }
 
+/// extras/wddm-pin: a bulk-copy thread (the prompt path's stager and stream issuer) goes where place_off_host puts a
+/// thread (every CPU the process had at start except the host's and the pool workers' own): on Linux a thread inherits
+/// its creator's mask, and these are created by the host thread, pinned to ONE CPU - so all the stager's copy threads
+/// and the issuer shared the host's CPU (a 2x RTX 4090 split with 88% of the arena unpinned staged ~3.7 GB/s per stage,
+/// and 8 threads gave nothing over 4).  Owned afterwards: the sweep leaves it there.  False (nothing changed) before
+/// set_topology named the host's CPU; the caller then places it as before.
+inline bool spread_current_thread() {
+    {
+        detail::State& s = detail::state();
+        std::lock_guard<std::mutex> lk(s.mu);
+        if (s.host_cpu < 0) return false;
+    }
+    if (!place_off_host()) return false;
+    note_owned_thread();
+    return true;
+}
+
 /// Called on the host thread: every other thread that runs on exactly the host's CPUs (it inherited them: the prefill
 /// copy threads started by the first prompt, a helper the host started) goes where place_off_host puts a thread.  The
 /// pool's workers and the host threads are never moved.  Returns how many moved.
@@ -413,6 +430,7 @@ inline bool configure(const std::string& spec, std::string& err) {
 inline void note_owned_thread() {}
 inline int sweep() { return 0; }
 inline void pin_current_thread() {}
+inline bool spread_current_thread() { return false; }
 inline int restore() { return 0; }
 inline void set_enabled(bool) {}
 inline bool enabled() { return false; }
