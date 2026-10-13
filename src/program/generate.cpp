@@ -567,6 +567,9 @@ struct Options {
     bool batch_groups_set = false;    ///< --batch-groups was given (a number or auto): no default then
     bool batch_groups_auto = false;   ///< --batch-groups auto (#417 stage 1): one group per stage of a layer split, if it divides --batch
     bool batch_mtp = false;      ///< --batch-mtp / STRATA_BATCH_MTP=1 (opt-in): one MTP proposal per batch slot
+    /// This fork (opt-in): the batch slots' sessions are carved for this many cells instead of --max-context (0 =
+    /// --max-context).  A request whose prompt and max_new do not fit a slot runs on the solo path, alone.
+    int64_t batch_max_context = 0;
     std::string spec_oracle;
     int spec_corrupt = 0;
     /// Benchmarks and A/B checks (eddoursul's fork, F19): the run emits this continuation (token ids) instead of
@@ -802,6 +805,9 @@ void usage() {
                  "                       window (STRATA_BATCH_MTP=1 does the same); works on one GPU and on a layer split (the\n"
                  "                       slot drafters sit on the last stage's GPU; not with --batch-groups); needs VRAM per slot\n"
                  "  --batch-groups G     --batch with a layer split: the slots in G groups pipelined through the GPUs\n"
+                 "  --batch-max-context N  --batch (this fork, opt-in): each slot's session holds N cells instead of\n"
+                 "                       --max-context (a 262144-cell slot takes ~3.6 GiB of the expert cache at int8 K/V);\n"
+                 "                       a request longer than a slot (prompt + max_new) runs alone on the solo path\n"
                  "  --pipeline-windows N --serve with a layer split on two GPUs (on by default for 3+ stages on AMD gfx12;\n"
                  "                       STRATA_PIPELINE_AUTO=0 or N=0 turns it off): one conversation's verify windows\n"
                  "                       with the GPUs overlapped - 1 = the prompt's short reads, 2 = decode as well\n"
@@ -2138,6 +2144,7 @@ int main(int argc, char** argv) {
             else o.batch_groups = std::atoi(bgv);
         }
         else if (a == "--batch-mtp") o.batch_mtp = true;
+        else if (a == "--batch-max-context") o.batch_max_context = std::max(0LL, std::atoll(next("--batch-max-context")));
         else if (a == "--spec-oracle") o.spec_oracle = next("--spec-oracle");
         else if (a == "--spec-corrupt") o.spec_corrupt = std::atoi(next("--spec-corrupt"));
         else if (a == "--spec-follow") o.spec_follow = next("--spec-follow");
@@ -4622,14 +4629,17 @@ int main(int argc, char** argv) {
             bool remote = false;
             for (const int r : o.expert_cache_remote) remote = remote || r > 0;
             const bool asked = ev != nullptr && ev[0] != '\0' ? ev[0] != '0' : o.kv_grow;
+            // (--batch: the main session's K/V is elastic as without it; the batch slots carve theirs whole, with the
+            // elastic switch off while they and their drafters are made - this fork, parallel dialogs.  Before, --batch
+            // turned the elastic K/V off and the main session's 262K K/V took 3.35 GiB of the expert cache for good.)
             const bool on = asked && !multi_gpu && o.kv_resident <= 0 &&
                             !o.expert_profile.empty() && !o.resident_cpu_experts && o.expert_cache != 0 && !remote &&
                             strata::core::vmm_available() &&
-                            // the batch slots carve their own K/V and --vram-elastic's cache is not one VMM range
-                            o.batch == 0 && !o.vram_elastic && o.peer_device < 0;
+                            // --vram-elastic's cache is not one VMM range
+                            !o.vram_elastic && o.peer_device < 0;
             if (asked && !on && (o.kv_grow_given || (ev != nullptr && ev[0] != '\0')))
                 std::fprintf(stderr, "strata generate: --kv-grow is off (one GPU, a profile, the whole K/V in VRAM, "
-                                     "every expert in RAM, no --batch, --vram-elastic or --peer-device)\n");
+                                     "every expert in RAM, no --vram-elastic or --peer-device)\n");
             const char* iv = std::getenv("STRATA_KV_GROW_INIT");
             strata::core::qsa_set_kv_elastic(on, iv != nullptr && std::atoll(iv) > 0 ? std::atoll(iv) : 16384);
             strata::core::ExpertCache::set_vmm(on);
@@ -4740,6 +4750,9 @@ int main(int argc, char** argv) {
         }
     }
     std::vector<std::vector<std::unique_ptr<strata::core::SessionState>>> bslot_ss;
+    // --batch-max-context (this fork, opt-in): the cells each slot's session holds; --max-context without it
+    const int64_t batch_slot_ctx = o.batch_max_context > 0 ? std::min<int64_t>(o.batch_max_context, o.max_context)
+                                                           : o.max_context;
     if (o.batch != 0) {
         const int cap = strata::kernels::kVerifyMaxT;
         const char* off = !o.serve ? "it needs --serve" : o.batch < 2 ? "it needs 2 or more slots"
@@ -4782,17 +4795,21 @@ int main(int argc, char** argv) {
         bslot_ss.resize(1 + stages.size());
         int fit = o.batch;   // the slots every stage could carve
         uint64_t bytes0 = 0;
+        // the elastic K/V is the main session's alone (it grows with the requests it reads): a slot's K/V is carved
+        // whole for the slot's context (--batch-max-context), so the switch is off while the slots are made
+        const bool kv_elastic_main = strata::core::qsa_kv_elastic();
+        if (kv_elastic_main) strata::core::qsa_set_kv_elastic(false, 0);
         for (size_t k = 0; k < bslot_ss.size(); ++k) {
             const int dev = k == 0 ? 0 : stages[k - 1]->dev;
             const int64_t lo = k == 0 ? 0 : stages[k - 1]->lb;
             const int64_t hi = k == 0 ? (multi_gpu ? split_at[0] : -1) : stages[k - 1]->le;
             const strata::core::OnDevice on_k(dev);
-            const uint64_t bytes = strata::core::session_bytes(g, o.max_context, K, lo, hi);
+            const uint64_t bytes = strata::core::session_bytes(g, batch_slot_ctx, K, lo, hi);
             if (k == 0) bytes0 = bytes;
             for (int b = 0; b < fit; ++b) {
                 auto u = std::make_unique<strata::core::SessionState>();
                 void* buf = nullptr;
-                if (cudaMalloc(&buf, bytes) != cudaSuccess || strata::core::session_init(g, o.max_context, K, buf, *u, lo, hi) == 0) {
+                if (cudaMalloc(&buf, bytes) != cudaSuccess || strata::core::session_init(g, batch_slot_ctx, K, buf, *u, lo, hi) == 0) {
                     cudaGetLastError();
                     if (buf != nullptr) cudaFree(buf);
                     size_t fb = 0, tb = 0;
@@ -4809,9 +4826,12 @@ int main(int argc, char** argv) {
             cudaDeviceSynchronize();
             size_t fb = 0, tb = 0;
             cudaMemGetInfo(&fb, &tb);
-            std::fprintf(stderr, "strata generate: --batch: %d slot sessions on CUDA%d (%.2f GiB each); %.2f GiB free\n",
-                         (int) bslot_ss[k].size(), dev, (double) bytes / 1073741824.0, (double) fb / 1073741824.0);
+            std::fprintf(stderr, "strata generate: --batch: %d slot sessions on CUDA%d (%.2f GiB each, %lld cells%s); %.2f GiB "
+                                 "free\n", (int) bslot_ss[k].size(), dev, (double) bytes / 1073741824.0,
+                         (long long) batch_slot_ctx, batch_slot_ctx < o.max_context ? ", --batch-max-context" : "",
+                         (double) fb / 1073741824.0);
         }
+        if (kv_elastic_main) strata::core::qsa_set_kv_elastic(true, 0);
         for (auto& v : bslot_ss) if ((int) v.size() > fit) v.resize((size_t) fit);   // the same count on every stage
         if (fit < 2) {
             std::fprintf(stderr, "strata generate: WARNING: --batch is off: not two slot sessions fit (a smaller "
@@ -4873,6 +4893,9 @@ int main(int argc, char** argv) {
             // LAST stage's slot-b session (bslot_ss.back(): stage 0's on one GPU): it borrows that session's context
             // length and RoPE table, which are on that device.  Its PLE history is the first stage's slot session: PLE
             // runs on the first stage, as for the solo drafter (`mtp.set_ple_session(&ss)` above).
+            const bool kv_elastic_main = strata::core::qsa_kv_elastic();   // (the slots' drafters: whole, as the slots)
+            if (kv_elastic_main) strata::core::qsa_set_kv_elastic(false, 0);
+            struct ElasticBack { bool on; ~ElasticBack() { if (on) strata::core::qsa_set_kv_elastic(true, 0); } } elastic_back{kv_elastic_main};
             for (int b = 0; b < o.batch; ++b) {
                 auto d = std::make_unique<strata::core::MtpDrafter>();
                 if (!d->load(o.mtp, draft_geometry, *bslot_ss.back()[(size_t) b], o.spec, err, o.mtp_window, &mtp)) {
@@ -9712,7 +9735,8 @@ int main(int argc, char** argv) {
                         (long long) o.tail_role_token, xcache.segmented() ? 1 : 0,
                         o.batch > 0 ? (" batch_slots=" + std::to_string(o.batch) +
                                        " slot_cache=" + std::to_string(o.prompt_cache > 0 ? 1 : 0) +
-                                       " batch_groups=" + std::to_string(o.batch_groups)).c_str() : "");
+                                       " batch_groups=" + std::to_string(o.batch_groups) +
+                                       " batch_ctx=" + std::to_string((long long) batch_slot_ctx)).c_str() : "");
         }
         // issue #29: a request whose heartbeat (tokens, prompt chunks, verify windows) stops for this long is stuck on
         // a flag nobody will raise - end the engine with where it was, so the server starts it again instead of the
@@ -10933,6 +10957,14 @@ int main(int argc, char** argv) {
                             (long long) max_new, (long long) o.max_context);
                 continue;
             }
+            // --batch-max-context: a slot holds batch_slot_ctx cells; the server sends a longer request to the solo
+            // path (INFO batch_ctx), this refusal is the engine's own guard (nothing has been read or changed yet)
+            if (admit_slot >= 0 && n + admit_max_new + 8 > batch_slot_ctx) {
+                std::printf("ERR BGEN-LONG: prompt (%lld tokens) + max_new (%lld) does not fit a batch slot (%lld cells, "
+                            "--batch-max-context)\n", (long long) n, (long long) admit_max_new, (long long) batch_slot_ctx);
+                std::fflush(stdout);
+                continue;
+            }
             bool bad = false;
             for (int64_t t : ids) bad = bad || t < 0 || t >= n_vocab;
             if (bad) { std::printf("ERR a token id is outside the vocabulary\n"); continue; }
@@ -11749,7 +11781,9 @@ int main(int argc, char** argv) {
                         // read left), text only, and into a slot that is not decoding
                         const bool can = ys < (int) bs.size() && !bs[(size_t) ys].active &&
                                          (admit_slot < 0 || ys == admit_slot) && req_imgs.empty() && o.prompt_cache > 0 &&
-                                         b0 - q > std::max<int64_t>(C, o.short_read);
+                                         b0 - q > std::max<int64_t>(C, o.short_read) &&
+                                         // --batch-max-context: it goes on from the slot later, so all of it must fit there
+                                         n + (admit_slot >= 0 ? (int64_t) admit_max_new : (int64_t) max_new) + 8 <= batch_slot_ctx;
                         std::string ye;
                         const auto ty = Clock::now();
                         std::vector<int32_t> pre(ids.begin(), ids.begin() + q);

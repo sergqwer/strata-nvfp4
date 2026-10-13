@@ -769,6 +769,10 @@ class StrataEngine:
         # it runs (INFO batch_slots=N: it may have fewer than asked, or none, when they do not fit)
         asked = next((int(args[args.index(k) + 1]) for k in ("--batch", "--slots") if k in args), 0)
         self.batch = int(self.info.get("batch_slots") or 0)
+        # this fork, --batch-max-context: the cells a slot holds (INFO batch_ctx; 0 = an older engine, --max-context);
+        # a request whose prompt and max_tokens do not fit runs alone on the solo path (generate_batched)
+        self.batch_ctx = int(self.info.get("batch_ctx") or 0) if self.batch else 0
+        self.long_held = self.__dict__.get("long_held", 0)   # long requests waiting for, or on, the solo path
         if asked and self.batch != asked:
             print(f"[strata] parallel requests: {asked} asked, the engine runs {self.batch or 'one at a time'} "
                   "(its log says why)", flush=True)
@@ -1328,7 +1332,7 @@ class StrataEngine:
                 not (self.info or {}).get("slot_cache") or os.environ.get("STRATA_PARALLEL_SOLO") == "0"):
             return False
         with self.slot_cv:
-            return sum(1 for b in self.slot_busy if b) == 1 and self.waiting == 0
+            return sum(1 for b in self.slot_busy if b) == 1 and self.waiting == 0 and not self.long_held
 
     def _shorter_waiting(self, plen: int) -> bool:
         """#656: someone waits for the control lines with a prompt under half this one's: worth giving way to."""
@@ -1364,6 +1368,11 @@ class StrataEngine:
         stop_sent = False
         yields, solo_again, refused = 0, 0, 0
         admit_wait, admit_since, admit_said = False, 0.0, False   # #1603: waiting for a slot, since when, said
+        # this fork, --batch-max-context: a request whose prompt and max_tokens do not fit a slot cannot continue in
+        # one, so it runs on the solo path alone: it keeps the control lines (no new admission starts), waits for the
+        # slots to finish their answers, is never STOPped for another request and never gives its read away (BYIELD)
+        long_req = bool(self.batch_ctx) and len(prompt) + left + 8 > self.batch_ctx
+        long_counted = relong = False
         try:
             while True:   # a request in a slot that is left alone goes back to the solo path
                 if not holding:
@@ -1371,9 +1380,22 @@ class StrataEngine:
                     if not ok:
                         return
                     holding, born = True, self.gen                  # (the engine it now has the control lines of)
+                if long_req and not long_counted:
+                    long_counted = True
+                    with self.slot_cv:
+                        self.long_held += 1
+                    btrace("long request: waits for the slots to finish")
+                while long_req:
+                    with self.slot_cv:
+                        if not any(self.slot_busy):
+                            break
+                        self.slot_cv.wait(timeout=1.0)
+                    if cancel.is_set():
+                        return
+                    yield None
                 with self.slot_cv:
-                    alone = not any(self.slot_busy) and self.waiting == 0
-                if alone and left > 1:
+                    alone = not any(self.slot_busy) and (self.waiting == 0 or long_req)
+                if alone and (left > 1 or long_req):     # (a long request has no slot to go to, even for 1 token)
                     head = f"GENI {left}{keys} {embeddings}" if embeddings else f"GEN {left}{keys}"
                     self._last_done = None                  # (#879: this request's DONE decides below)
                     self._send(f"{head} {','.join(str(int(t)) for t in prompt)}")
@@ -1381,6 +1403,8 @@ class StrataEngine:
                     self._ctl_mode, self._ctl_result, self._yielded = "solo", None, None
                     self._ctl_erred = False
                     def others():
+                        if long_req:                        # it cannot move to a slot: the others wait for it
+                            return False
                         with self.slot_cv:
                             return self.waiting > 0
                     for x in self._control(cancel, pending.append, stop_when=others):
@@ -1390,7 +1414,7 @@ class StrataEngine:
                             yield t
                         if x is None:                       # a heartbeat (False: a token, flushed above)
                             if (reserved is None and not out and not embeddings and yields < self.YIELDS_MAX and
-                                    self._shorter_waiting(len(prompt))):
+                                    not long_req and self._shorter_waiting(len(prompt))):
                                 with self.slot_cv:          # the slot the part read will wait in
                                     reserved = self.pick_slot(prompt)
                                     if reserved is not None:
@@ -1506,6 +1530,19 @@ class StrataEngine:
                                     asked = True
                                 yield None
                     except ValueError as e:
+                        if self._ctl_erred and str(e).startswith("BGEN-LONG:") and not cancel.is_set():
+                            # this fork, --batch-max-context: longer than a slot - alone on the solo path (above)
+                            print(f"[strata] parallel: {e}; it runs alone on the solo path", flush=True)
+                            self.slot_live[slot] = None
+                            with self.slot_cv:
+                                self.slot_busy[slot] = False
+                                self.slot_claims.discard(slot)
+                                self.slot_cv.notify_all()
+                            slot = None
+                            phase = "none"
+                            self._ctl_erred = False
+                            long_req = relong = True
+                            break
                         # #1994: the engine says this slot is not free (its view and ours differ for a moment, or a
                         # slot it still holds).  That is not the request's fault and nothing was read: park the slot
                         # for a moment (busy here too), and wait for another one - never a 400 for the conversation.
@@ -1535,6 +1572,9 @@ class StrataEngine:
                     if not cont and self._yielded is not None and self._yielded[0] == slot and not cancel.is_set():
                         continue                            # gave way: again once the shorter request is in
                     break
+                if relong:                                  # BGEN-LONG: alone on the solo path (the lines are held)
+                    relong = False
+                    continue
                 self.ctl.release()
                 holding = False
                 if not cont:
@@ -1625,6 +1665,10 @@ class StrataEngine:
                 self.last = add_carry(carry, self.last)
             if holding:
                 self.ctl.release()
+            if long_counted:
+                with self.slot_cv:
+                    self.long_held = max(0, self.long_held - 1)
+                    self.slot_cv.notify_all()
             if admit_wait:
                 with self.slot_cv:
                     self.admitting = max(0, self.admitting - 1)
