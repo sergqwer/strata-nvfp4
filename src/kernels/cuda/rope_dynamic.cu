@@ -149,7 +149,7 @@ __global__ void rerotate_k_kernel(RopeKPool k, long long rows, Delta d, const in
     const int lane = threadIdx.x;
     const long long cell = r / k.n_kv_heads;
     const int h = (int) (r % k.n_kv_heads);
-    const long long page = (long long) k.page_table[cell / k.page_size];
+    const long long page = k.page_table != nullptr ? (long long) k.page_table[cell / k.page_size] : cell / k.page_size;
     if (page < 0) return;
     const long long row = (page * k.n_kv_heads + h) * k.page_size + cell % k.page_size;
     const int groups = 256 / 64;
