@@ -44,7 +44,17 @@ def install_xe_reader():
         xe = _XeGpu(index)
         return xe if xe.ok() else orig(index, amd)
 
+    orig_count = T.gpu_count
+
+    def gpu_count(amd=False):
+        """The Monitor's GPU list: the Intel cards (sysfs order, as setup numbers them), else the stock count."""
+        n = 0
+        while n < 16 and _XeGpu(n).ok():
+            n += 1
+        return n or orig_count(amd)
+
     T.gpu_reader = gpu_reader
+    T.gpu_count = gpu_count
 
 
 def install_shared_embeddings():

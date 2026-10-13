@@ -136,6 +136,12 @@
         <!-- filled by app.js: Speed, GPU load, VRAM, GPU temp, Power, PCIe, CPU, Disk read -->
       </div>
 
+      <div class="st-card gpu-card" id="gpu-card" hidden>
+        <div class="req-head"><span class="card-title" id="gpu-title">GPU</span><span class="muted small" id="gpu-sum"></span></div>
+        <div class="gpu-list" id="gpu-list"></div>
+        <p class="muted small gpu-note" id="gpu-note"></p>
+      </div>
+
       <div class="monitor-row">
         <div class="st-card ctx-card">
           <span class="card-title">Context fill</span>
