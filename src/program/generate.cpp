@@ -10062,11 +10062,25 @@ int main(int argc, char** argv) {
             int64_t pos[strata::kernels::kVerifyMaxT] = {};
             int first[strata::kernels::kVerifyMaxT] = {}, active[strata::kernels::kVerifyMaxT] = {};
             static size_t next_slot = 0;
+            // This fork: the control vector (--control-vector-scaled, the per-request "uncensored" projection) is one
+            // device flag for the whole window, so a window carries the slots of one setting only.  With both settings
+            // among the active slots the windows alternate between them; a request read between windows gets its own
+            // setting back before its next chunk (cvec_restore below).  Without a control vector nothing changes.
+            const bool cvec_on = strata::kernels::cvec().loaded();
+            bool win_cvec = true;
+            if (cvec_on) {
+                static bool last_cvec = false;
+                bool has[2] = {false, false};
+                for (const BSlot& sl : bs) if (sl.active) has[sl.cvec ? 1 : 0] = true;
+                win_cvec = has[0] && has[1] ? !last_cvec : has[1];
+                last_cvec = win_cvec;
+                if (strata::kernels::cvec_enabled() != win_cvec) strata::kernels::cvec_set_enabled(win_cvec);
+            }
             // Each MTP slot uses two rows; rotate slots when more than four are active.
             int A = 0;
             for (size_t offset = 0; offset < bs.size() && S + (batch_mtp ? 2 : 1) <= strata::kernels::kVerifyMaxT; ++offset) {
                 const int b = (int) ((next_slot + offset) % bs.size());
-                if (bs[(size_t) b].active) {
+                if (bs[(size_t) b].active && (!cvec_on || bs[(size_t) b].cvec == win_cvec)) {
                     first[A] = S;
                     active[A++] = b;
                     rows[S] = b;
@@ -11771,6 +11785,10 @@ int main(int argc, char** argv) {
                         if (!batch_step()) { in_prompt_read = false; batch_fatal = true; e = "a batch window failed"; return false; }
                     } while (batch_on() && std::chrono::duration<double, std::milli>(Clock::now() - td).count() < budget);
                     in_prompt_read = false;
+                    // this fork: the windows may have set the control vector for their slots; the prompt's own setting
+                    // (the one it is being read with) is back before its next chunk
+                    if (strata::kernels::cvec().loaded() && strata::kernels::cvec_enabled() != cvec_cached)
+                        strata::kernels::cvec_set_enabled(cvec_cached);
                     ++il_parts;
                     il_ms += std::chrono::duration<double, std::milli>(Clock::now() - td).count();
                     if (trace) {
