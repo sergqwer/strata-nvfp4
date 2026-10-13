@@ -374,6 +374,51 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### Upstream 0.1.43.1 (2026-10-13, release 0.1.43.1-nvfp4.1)
+
+- **The port.** rel/0.1.42's first-parent chain since v0.1.42 holds 121 commits; 120 are carried (the 121st is the
+  `merge -s ours` of the last release), none dropped: upstream 0.1.43 / 0.1.43.1 took none of this fork's open pull
+  requests (#1284 and #1516 / #1517 / #1525 conflict with the new main, #1367 / #1368 / #1370 merge cleanly). Merged by
+  hand: upstream's adaptive overlap (`STRATA_ADAPT_OVERLAP`, opt-in in 0.1.43.1) beside this fork's tier eviction sync
+  and `STRATA_ADAPT_FETCH=2` (the per-layer landing tick inside the swap loop, the dirty list after it); upstream's
+  pinned bounce slots for pageable uploads (#1712, #1996) beside the PLE batch readers' trace and the CPU rows' scales;
+  upstream's NaN guard (#879) before the fork's `STRATA_DBG_NAN_VERIFY` check; `--calibrate --model` (#2036) beside the
+  fork's setup functions; and the route tail skip's 0.1.43 rules (#1884: no default from 90% of the experts cached;
+  `decode_defaults_arch_ok()` for HIP gfx12) under this fork's own: no default with this fork's packs.
+- **The PLE probe** (#1984, #2040) now only warns on every platform; `STRATA_PLE_AUTO_MMAP=1` switches to mapped reads
+  as 0.1.42 did. Upstream's new body runs inside this fork's deferred probe (after the expert arena, 256-token batches):
+  this fork's arena loads on its own thread, so the probe would otherwise time the arena's reads (a false "slow").
+  Measured in every run of this port: 781,093-827,342 rows/s, "fine".
+- **#567's prompt encoder** is its author's current head (#1852): a prompt replaces only the kept prompt whose text it
+  mostly reuses (every rendered prompt shares the template's head, so a subagent beside the main conversation evicted
+  it and both re-encoded in full), one kept prompt per `--conversation-cache-slots`, a token count stores nothing, a
+  prompt refused for the context is forgotten. Its tests against the old copy: 5 of 7; now 7 of 7, the tokenizer's 18
+  and the server's 8.
+- **Issue #7 (WSL2, two RTX 5060 Ti):** the driver under WSL2 page-locks only about 1 GiB of RAM. Setup frames a
+  warning under WSL2 (`--check` and the install). In the engine, three layer-split fixes; one GPU is byte-identical:
+  - the expert arena's own thread (#285's part 3, kept by this fork) runs with one GPU only; a layer split, a peer
+    device or helper caches open the arena where upstream does, after the later cards' contexts (CUDA1's context
+    could be refused while the arena held the pinned memory);
+  - a refused hand-off buffer (two of `chunk x 40 KiB`, page-locked: 1.22 GiB at 15,616 tokens) reads "do not fit"
+    with the CUDA error, so the start steps the chunk down to 512 tokens instead of exiting;
+  - a token embedding that could not be page-locked stays in the first card's VRAM; the drafter on the split's last
+    card read it there ("mtp prefill: an illegal memory access"). The start now refuses that case and says why.
+  Not run on two GPUs (one card here): the refusal and the step-down were not executed.
+- **Checks** (RTX 5090 + Ryzen 9 9950X3D, 128 GB; references of 0.1.42-nvfp4.2's engine ddd78216 made with it on
+  `qwen-nvfp4-gptq`, the same bits as 0.1.42-nvfp4.1's):
+  - 2K and 32K give the same logits and 32 tokens (`--pcie-frac 0.25`, the CPU share 0.5, 6,000 slots), on the port's
+    first build (f2ba8a5c) and on the release build 925c7326 with the #7 fixes;
+  - through the server, the tail skip left unset, the 12 KL texts' rows and logpos files are byte for byte those of
+    ddd78216 (normal mode, 8,000 slots): the start line says the skip is off for this fork's packs; upstream's IQ2_XS
+    GGUF still starts with it on (72.8% of its experts cached, under #1884's line);
+  - with every fork default off the logits equal upstream 0.1.43.1's on IQ2_XS (32K, 12,000 slots);
+  - tests: 116 of 119 engine tests pass (the 3 others need model files this PC does not have); the server's 751 OK
+    (16 skipped); setup's and the tools' 821, all but `test_iq_pack` (no `yaml` in that venv).
+- **Decode speed**, 5 interleaved pairs (`bench_prompt.txt`, 1,000 tokens, `--stop-eos`, cache auto): 0.1.42-nvfp4.2's
+  engine 178.1 tokens/s (median; mean 168.0 +- 22.9), this one 179.2 (174.1 +- 11.6), the ratio per pair 1.008
+  (median); the same misses per layer (2.18) and cache hits (92.9%). Two outlier runs, one on each side, had a slow
+  CPU pool or ring wait (other jobs on the CPU).
+
 ### Q8_0 for a 128 GB PC (2026-10-11, release 0.1.42-nvfp4.2)
 
 - **Two packs of the original Qwen with Q8_0 experts**, in this fork's pack format, on Hugging Face (public, every

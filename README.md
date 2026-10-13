@@ -2,7 +2,7 @@
 
 **Qwen3.8-Flash-Next (125B hybrid MoE) with NVFP4 experts on one RTX 20, 30, 40 or 50 card (12 GB of VRAM or more)
 and 64 GB of RAM or more, text and pictures.** A fork of [Niko1221/Strata](https://github.com/Niko1221/Strata), on
-upstream 0.1.42. Setup installs, ready-made from Hugging Face, the original Qwen in NVFP4 (our GPTQ, or NVIDIA's
+upstream 0.1.43.1. Setup installs, ready-made from Hugging Face, the original Qwen in NVFP4 (our GPTQ, or NVIDIA's
 checkpoint converted), censored as Qwen ships it; on ours an opt-in switch turns the censorship off. Upstream's GGUF
 models are still offered.
 
@@ -51,6 +51,37 @@ files by hand.
 
 ## What's new
 
+- **On upstream 0.1.43.1 (0.1.43.1-nvfp4.1).** Upstream's changes that matter here
+  ([the port and its checks](docs/NVFP4.md#upstream-01431-2026-10-13-release-01431-nvfp41)):
+  - **Non-finite logits are caught** (#879, #1892): when a decode window's logits turn NaN, the server sends none of
+    its tokens, drops the damaged caches and reads the prompt again from token 0, instead of answering "!". On by
+    default (`STRATA_NAN_GUARD=0` turns it off); this fork's fresh engine after a "!" reply stays as a backstop.
+  - **The PLE probe only warns** (#1984, #2040): a drive it measures slow keeps the direct reads
+    (`STRATA_PLE_AUTO_MMAP=1` brings back 0.1.42's switch to mapped reads). Here it still runs once the expert arena
+    is in, so the arena's own reads cannot make the SSD look slow.
+  - **Windows: the stall watchdog no longer ends the engine** while it parks a conversation or waits for a draft with
+    little free VRAM (#2049, #2065).
+  - **A request's smaller prompt chunk no longer ends the engine** when its slot loan does not fit: the chunk is
+    halved instead (#2090).
+  - **Server fixes:** a quoted `</tool_call>` in a message stays text (#2026); a JSON tool call in a Markdown fence
+    inside `<tool_call>` is read (#2037); a client that leaves while its pictures load stops the work (#1999).
+  - **Unsloth's files in the RAM-budget mode on Windows** read the experts outside RAM in parallel: the GGUF views
+    are closed once the file tier reads unbuffered (NTFS ran those reads one at a time).
+  - **`BENCH.bat` / `./bench.sh`** (in a clone): measures your install through the HTTP API in about 10 minutes and
+    writes a report you can share.
+  - The route tail skip stays off for this fork's packs. For the GGUF models upstream now leaves it off when 90% or
+    more of the experts are in VRAM (#1884). Upstream's adaptive overlap (`STRATA_ADAPT_OVERLAP=1`) is opt-in.
+- **Also in 0.1.43.1-nvfp4.1:**
+  - **The server's prompt encoder keeps one prompt per conversation** (#1852, by gputier): a second conversation,
+    such as a Claude Code subagent beside the main one, no longer pushes out the main conversation's kept prompt, so
+    its next turn is not tokenized from the start again.
+  - **Not for WSL2:** setup now frames a warning under WSL2, in `--check` and at install: the driver there
+    page-locks only about 1 GB of RAM ([Requirements](#requirements), [#7](https://github.com/sergqwer/strata-nvfp4/issues/7)).
+  - **Two GPUs (layer split, #7):** the expert arena loads on its own thread only with one GPU, so on a split it no
+    longer takes page-locked memory before the second card's context exists; a refused hand-off buffer between the
+    cards makes the prompt chunk smaller instead of stopping the start; and when the token embedding cannot be
+    page-locked and the draft head runs on the other card, the engine says so at start instead of failing later with
+    an illegal memory access. One GPU runs exactly as before.
 - **Two more exact models for a 128 GB PC, and Unsloth's files faster (0.1.42-nvfp4.2).**
   - **`--family qwen-nvfp4-mix`**: our GPTQ NVFP4 with Q8_0 experts in 38 of its 48 layers. It picks Q8_0's top token
     95.0% of the time (GPTQ: 93.6%), at about half GPTQ's speed (91-95 tokens/s on an RTX 5090). Every expert stays
@@ -196,6 +227,13 @@ page).
 
 ## Requirements
 
+- **System: Windows 10/11 or Linux, run natively. Not WSL2.** Under WSL2 the NVIDIA driver page-locks only about 1 GB
+  of RAM ([NVIDIA's known limitation](https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications):
+  "pinned system memory ... availability for applications is limited"), and this fork needs page-locked RAM for the
+  experts' RAM copy, for the GPU's reads of missed experts over PCIe, for KV streaming and for a layer split's
+  hand-offs. Under WSL2 none of that can be pinned: the KV cache must stay in VRAM, every miss goes to the CPU, and a
+  two-GPU layer split does not start ([#7](https://github.com/sergqwer/strata-nvfp4/issues/7)). On a Windows PC run
+  `START-HERE.bat` in Windows itself.
 - **GPU:** an NVIDIA RTX 20, 30, 40 or 50 card with 12 GB of VRAM or more, driver 580 or newer (CUDA 13). The
   release engine has code for sm_75, 86, 89 and 120, and the optional FP4 x FP4 prompt unit for 120a (RTX 50); the
   other cards read prompts on int8 tensor cores instead. The dense weights, the draft head and the K/V come first and
@@ -408,9 +446,12 @@ The switches kept only for A/B runs (each gives the same bits or a measured alte
 
 A long Claude Code conversation once turned into "!" mid-reply (token 0, what the sampler gives when no logit is
 finite), and the cause is not found yet
-([docs](docs/NVFP4.md#-after-a-long-conversation-2026-10-05-release-0139-nvfp42)). The server starts a fresh engine
-at the next request after such a reply. To find out what was damaged, give the engine `STRATA_BANG_AUDIT=1`
-(`"env": {"STRATA_BANG_AUDIT": "1"}` in `strata-<family>.json`). It costs nothing until a reply turns into token 0;
+([docs](docs/NVFP4.md#-after-a-long-conversation-2026-10-05-release-0139-nvfp42)). Since 0.1.43.1-nvfp4.1
+upstream's guard (#879) catches non-finite logits first: the window's tokens are not sent, the caches are dropped, the
+prompt is read again and the engine log has a `non-finite logits (#879)` line. The server still starts a fresh engine
+at the next request after a reply of "!". To find out what was damaged, give the engine `STRATA_BANG_AUDIT=1` and
+`STRATA_NAN_GUARD=0` (`"env": {"STRATA_BANG_AUDIT": "1", "STRATA_NAN_GUARD": "0"}` in `strata-<family>.json`; with
+the guard on, a reply never turns into "!", so the audit never runs). It costs nothing until a reply turns into token 0;
 then, once, it compares every expert in the VRAM cache with its RAM copy and with `experts.bin` and logs what
 differs (`strata kvg audit` lines). Please send us the engine log (`strata-<family>.log`) from the engine's start to
 the end of those lines ([Upstream 0.1.41](docs/NVFP4.md#upstream-0141-2026-10-08-release-0141-nvfp41)).
@@ -430,6 +471,7 @@ the end of those lines ([Upstream 0.1.41](docs/NVFP4.md#upstream-0141-2026-10-08
   (`STRATA_EMULATE_CC`, `--vram-reserve-mib`, a RAM ballast, `STRATA_FORCE_AVX2=1`, `--pool-workers`), not on the
   real hardware.
 - The NVFP4 model runs on one GPU: the low-RAM mode and the growing K/V are one-GPU.
+- Not for WSL2: the driver there page-locks only about 1 GB of RAM ([Requirements](#requirements)).
 - The low-RAM mode's unbuffered reads are Windows-only; elsewhere it reads through the page cache.
 - Decode is bound by host RAM bandwidth: the CPU pool and the PCIe share read the same DDR5 (~84 of ~90 GB/s here).
   More VRAM for the expert cache or faster RAM is what moves it
