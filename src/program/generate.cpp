@@ -131,6 +131,7 @@
 #include <sstream>
 #include <string>
 #include <set>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -8356,37 +8357,19 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "strata serve: conversation disk: %s save: %s\n", why, what.c_str());
                 failed = true;
             };
-            // the parked conversations first, least recently active first (the next to leave RAM)
-            for (size_t i = 0; i < conversations.size() && !failed; ++i) {
-                const auto& img = conversations.at(i);
-                if (img.disk_id != 0 && conv_disk.has(img.disk_id)) continue;
-                if (cancel && cancel()) return false;
-                uint64_t id = 0;
-                bool cancelled = false;
-                std::string e;
-                if (conv_disk.write_now(img, nullptr, cancel, id, e, &cancelled)) {
-                    conversations.set_disk_id(conversations.serial_at(i), id);
-                    ++wrote;
-                } else if (cancelled) {
-                    return false;
-                } else {
-                    fail("a parked conversation of " + std::to_string(img.live.ids.size()) + " tokens: " + e);
-                }
-            }
-            if (!failed && live_wants_sync()) {
+            // the live conversation first: the one most likely to be continued (the main agent, usually)
+            if (live_wants_sync()) {
                 if (cancel && cancel()) return false;
                 std::string e;
-                if (!ver.wait_commit(e)) { fail(e); goto done; }   // the next request meets the same error
+                if (!ver.wait_commit(e)) { fail(e); goto done; }   // the next request meets the same error (no device reads)
                 {
                     strata::core::SavedConversation meta;
                     std::vector<strata::core::SessionKvSource> sources;
                     const std::vector<ConvCheckpoint> none;   // the checkpoints are lent below, not copied
                     const strata::core::ConversationView view{live, live_imgs, none, cvec_cached};
                     try {
-                        if (!strata::core::conversation_snapshot_sources(meta, sources, view, ss, g, mtp.kv_state(), e)) {
-                            fail("the live conversation: " + e);
-                            goto done;
-                        }
+                        if (!strata::core::conversation_snapshot_sources(meta, sources, view, ss, g, mtp.kv_state(), e))
+                            throw std::runtime_error(e);
                         meta.checkpoints = std::move(checks);
                         struct GiveBack {
                             std::vector<ConvCheckpoint>& from; std::vector<ConvCheckpoint>& to;
@@ -8403,8 +8386,29 @@ int main(int argc, char** argv) {
                             fail("the live conversation of " + std::to_string(live.size()) + " tokens: " + e);
                         }
                     } catch (const std::bad_alloc&) {
-                        fail("out of memory");
+                        fail("the live conversation: out of memory");
+                    } catch (const std::runtime_error& x) {
+                        fail(std::string("the live conversation: ") + x.what());
                     }
+                }
+            }
+            // then the parked conversations, least recently active first (the next to leave RAM); a live one that
+            // failed (over the budget, say) does not keep them from the disk
+            for (size_t i = 0; i < conversations.size(); ++i) {
+                const auto& img = conversations.at(i);
+                if (img.disk_id != 0 && conv_disk.has(img.disk_id)) continue;
+                if (cancel && cancel()) return false;
+                uint64_t id = 0;
+                bool cancelled = false;
+                std::string e;
+                if (conv_disk.write_now(img, nullptr, cancel, id, e, &cancelled)) {
+                    conversations.set_disk_id(conversations.serial_at(i), id);
+                    ++wrote;
+                } else if (cancelled) {
+                    return false;
+                } else {
+                    fail("a parked conversation of " + std::to_string(img.live.ids.size()) + " tokens: " + e);
+                    break;
                 }
             }
         done:
