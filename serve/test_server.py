@@ -1874,6 +1874,14 @@ class GpuChoice(unittest.TestCase):
         self.assertEqual(ordered_gpus({**base, "backend": "hip"}, fast_first), [2, 0])           # AMD: same rule
         self.assertEqual(ordered_gpus({**base, "backend": "hip"}, {0: 7.0, 2: 7.0}), [0, 2])      # identical cards (the R9700s)
         self.assertEqual(ordered_gpus(base, {0: 1.0}), [0, 2])                               # a card unmeasured
+        # extras/mgpu-fixes: a card on a link at most half the fastest one's goes last
+        same = {0: 5.0, 2: 5.0}
+        self.assertEqual(ordered_gpus(base, same, links={0: 7.9, 2: 31.5}), [2, 0])           # x4 Gen4 first -> last
+        self.assertEqual(ordered_gpus(base, same, links={0: 31.5, 2: 7.9}), [0, 2])           # already last
+        self.assertEqual(ordered_gpus(base, same, links={0: 31.5, 2: 20.0}), [0, 2])          # not half: kept
+        self.assertEqual(ordered_gpus(base, same, links={0: 31.5}), [0, 2])                   # a link unknown
+        self.assertEqual(ordered_gpus(base, {0: 106.0, 2: 100.0}, links={0: 31.5, 2: 7.9}), [0, 2])  # speed says 2,0; 2 slow
+        self.assertEqual(ordered_gpus({**base, "gpu_order": "as_given"}, same, links={0: 7.9, 2: 31.5}), [0, 2])
         self.assertEqual(ordered_gpus({"gpu": 1, "args": []}, {1: 1.0}), [1])
         self.assertEqual(ordered_gpus({"gpu": [0, 1, 2], "args": []}, {0: 3.0, 1: 9.0, 2: 6.0}), [0, 2, 1])
         self.assertEqual(ordered_gpus({"gpu": [0, 1, 2], "args": []}, {0: 3.0, 1: 3.0, 2: 3.0}), [0, 1, 2])
