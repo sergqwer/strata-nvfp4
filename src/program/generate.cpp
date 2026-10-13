@@ -6164,10 +6164,13 @@ int main(int argc, char** argv) {
         }
         // extras/mgpu-fixes: THE CLOCK ATTRIBUTE IS THE RATED ONE.  cudaDevAttrClockRate does not move under a power
         // limit (nvidia-smi -pl) or locked clocks (-lgc), so a held-back card was priced as a full-speed one.  Each card
-        // now runs a short FP16 GEMM probe (strata::prefill::compute_probe_ms); on cards of one architecture (the probe
+        // now runs a short FP32 FMA probe (strata::prefill::compute_probe_ms); on cards of one architecture (the probe
         // compares like with like) a card more than 15% slower per (SM x rated GHz) than the best one has its per-layer
-        // cost scaled by that ratio, so the search gives it fewer layers.  Mixed architectures: the formula as before.
-        // STRATA_SPLIT_COMPUTE_PROBE=0: off.
+        // cost scaled by the SQUARE ROOT of that ratio (a decode window is partly memory- and latency-bound, so a lower
+        // clock slows it less than it slows arithmetic): the search gives it fewer layers.  Measured on the 4x 4090
+        // rental, CUDA1 at -lgc 900 (the release blind, K=24: decode 106.9, 32K 2745; the full ratio x2.34 -> K=38:
+        // decode 99.7, 32K 5087).  Mixed architectures: the formula as before.  STRATA_SPLIT_COMPUTE_PROBE=0: off;
+        // STRATA_SPLIT_COMPUTE_POW (0.5): the exponent on the ratio.
         {
             static const bool cprobe_on = [] {
                 const char* v = std::getenv("STRATA_SPLIT_COMPUTE_PROBE");
@@ -6186,19 +6189,23 @@ int main(int argc, char** argv) {
                 else if (cc0 != ma * 10 + mi) same_arch = false;
                 const double t = strata::prefill::compute_probe_ms(dev);
                 if (!(t > 0.0)) all_ok = false;
-                per[(size_t) i] = t / layer_ms[(size_t) i];   // ms per GEMM per unit of the rated per-layer cost
+                per[(size_t) i] = t / layer_ms[(size_t) i];   // probe ms per unit of the rated per-layer cost
             }
             if (all_ok && same_arch) {
+                static const double cpow = [] {
+                    const char* v = std::getenv("STRATA_SPLIT_COMPUTE_POW");
+                    return v != nullptr ? std::clamp(std::atof(v), 0.0, 1.0) : 0.5;
+                }();
                 const double best = *std::min_element(per.begin(), per.end());
                 for (int i = 0; i < ns; ++i) {
                     const int dev = i == 0 ? 0 : stages[(size_t) i - 1]->dev;
-                    const double x = per[(size_t) i] / best;
-                    if (x >= 1.15) layer_ms[(size_t) i] *= x;
-                    std::fprintf(stderr, "strata generate: layer split auto: CUDA%d compute probe %.2f ms per GEMM -> "
-                                         "x%.2f of the fastest per rated clock%s\n", dev, per[(size_t) i] * layer_ms[(size_t) i] /
-                                         (x >= 1.15 ? x : 1.0), x,
-                                 x >= 1.15 ? " (held below its rated clock: a power or clock limit?) - its layers cost more"
-                                           : "");
+                    const double x = per[(size_t) i] / best, t = per[(size_t) i] * layer_ms[(size_t) i];
+                    const double f = x >= 1.15 ? std::pow(x, cpow) : 1.0;
+                    layer_ms[(size_t) i] *= f;
+                    std::fprintf(stderr, "strata generate: layer split auto: CUDA%d compute probe %.3f ms per 1024 blocks -> "
+                                         "x%.2f of the fastest per rated clock%s%.2f\n", dev, t, x,
+                                 x >= 1.15 ? " (held below its rated clock: a power or clock limit?) - its layers cost x"
+                                           : ", layer cost x", f);
                 }
             }
         }
