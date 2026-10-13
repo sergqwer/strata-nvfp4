@@ -656,6 +656,17 @@ int64_t pool_slots_mapped(const ElasticPool& p) {
 bool pool_grow(ElasticPool& p, int64_t cells, const std::function<strata::core::VmmChunk()>& take) {
     const uint64_t G = strata::core::vmm_granularity();
     const int64_t slots = pool_slots(p, cells);
+    // batch-vram: a layer split's slot pools live on their stage's GPU: the clearing memsets run there
+    struct DevBack {
+        int cur = -1;
+        ~DevBack() { if (cur >= 0) cudaSetDevice(cur); }
+    } back;
+    {
+        int cur = 0;
+        if (p.range.device() >= 0 && cudaGetDevice(&cur) == cudaSuccess && cur != p.range.device() &&
+            cudaSetDevice(p.range.device()) == cudaSuccess)
+            back.cur = cur;
+    }
     for (size_t a = 0; a < p.off.size(); ++a) {
         const int64_t c0 = (int64_t) (p.off[a] / G), c1 = c0 + pool_chunks(p, a, slots);
         std::vector<int64_t> fresh;
@@ -705,9 +716,22 @@ int64_t qsa_kv_elastic_need(int64_t cells, int owner) {
     return n;
 }
 bool qsa_kv_elastic_grow(int64_t cells, const std::function<strata::core::VmmChunk()>& take, int owner) {
-    for (auto& p : g_pools)
-        if (p->owner == owner && !pool_grow(*p, cells, take)) return false;
-    return cudaDeviceSynchronize() == cudaSuccess;
+    int cur = 0;
+    (void) cudaGetDevice(&cur);
+    std::vector<int> other;   // (a layer split's slot pools: their GPUs are synchronised too)
+    for (auto& p : g_pools) {
+        if (p->owner != owner) continue;
+        if (!pool_grow(*p, cells, take)) return false;
+        if (p->range.device() >= 0 && p->range.device() != cur &&
+            std::find(other.begin(), other.end(), p->range.device()) == other.end())
+            other.push_back(p->range.device());
+    }
+    bool ok = true;
+    for (const int d : other) {
+        ok = cudaSetDevice(d) == cudaSuccess && cudaDeviceSynchronize() == cudaSuccess && ok;
+        cudaSetDevice(cur);
+    }
+    return cudaDeviceSynchronize() == cudaSuccess && ok;
 }
 int64_t qsa_kv_elastic_shrink(int64_t cells, const std::function<void(strata::core::VmmChunk)>& give, int owner) {
     const uint64_t G = strata::core::vmm_granularity();
