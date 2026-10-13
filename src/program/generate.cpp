@@ -4941,6 +4941,9 @@ int main(int argc, char** argv) {
                      (long long) g.n_layers, stages[0]->dev);
         return true;
     }();
+    // split_fast: CUDA0's K/V is elastic as on one GPU (kvg_ensure grows it from CUDA0's cache); the later stage's
+    // session, its cache and the drafter on its card are made with the switches off (carved whole, as before)
+    bool split_fast_elastic = false;
     // ---- CUDA0's session, and the stages' sessions: sized to each device's own layer range (the carve).  A
     // stage that runs [lb, le) carves only those layers' GDN rows and QSA pools - before the carve every stage
     // held all 48 layers' state whatever layers it ran, which is the same disease the chunked-QSA-prefill PR
@@ -4958,7 +4961,7 @@ int main(int argc, char** argv) {
             // (--batch: the main session's K/V is elastic as without it; the batch slots carve theirs whole, with the
             // elastic switch off while they and their drafters are made - this fork, parallel dialogs.  Before, --batch
             // turned the elastic K/V off and the main session's 262K K/V took 3.35 GiB of the expert cache for good.)
-            const bool on = asked && !multi_gpu && o.kv_resident <= 0 &&
+            const bool on = asked && (!multi_gpu || split_fast) && o.kv_resident <= 0 &&
                             !o.expert_profile.empty() && !o.resident_cpu_experts && o.expert_cache != 0 && !remote &&
                             strata::core::vmm_available() &&
                             // --vram-elastic's cache is not one VMM range
@@ -4969,6 +4972,10 @@ int main(int argc, char** argv) {
             const char* iv = std::getenv("STRATA_KV_GROW_INIT");
             strata::core::qsa_set_kv_elastic(on, iv != nullptr && std::atoll(iv) > 0 ? std::atoll(iv) : 16384);
             strata::core::ExpertCache::set_vmm(on);
+            split_fast_elastic = on && split_fast && strata::core::qsa_kv_elastic();
+            if (split_fast_elastic)
+                std::fprintf(stderr, "strata serve: split prompt fast: CUDA0's K/V is elastic (grows from its expert cache "
+                                     "as on one GPU); CUDA%d's session is carved whole\n", stages[0]->dev);
         }
         if (cudaMalloc(&sbuf, strata::core::session_bytes(g, o.max_context, K, 0, hi0)) != cudaSuccess) {
             std::fprintf(stderr, "strata generate: session state allocation failed\n");
@@ -5006,8 +5013,11 @@ int main(int argc, char** argv) {
         GpuStage& st = *stages[i];
         const strata::core::OnDevice on(st.dev);
         void* sbuf_s = nullptr;
-        if (cudaMalloc(&sbuf_s, strata::core::session_bytes(g, o.max_context, K, st.lb, st.le)) != cudaSuccess ||
-            strata::core::session_init(g, o.max_context, K, sbuf_s, st.ss, st.lb, st.le) == 0) {
+        if (split_fast_elastic) strata::core::qsa_set_kv_elastic(false, 0);   // CUDA0's alone (see split_fast_elastic)
+        const bool sess_ok = cudaMalloc(&sbuf_s, strata::core::session_bytes(g, o.max_context, K, st.lb, st.le)) == cudaSuccess &&
+                             strata::core::session_init(g, o.max_context, K, sbuf_s, st.ss, st.lb, st.le) != 0;
+        if (split_fast_elastic) strata::core::qsa_set_kv_elastic(true, 0);
+        if (!sess_ok) {
             std::fprintf(stderr, "strata generate: layer split, CUDA%d: the session state failed\n", st.dev);
             return 1;
         }
@@ -5212,7 +5222,10 @@ int main(int argc, char** argv) {
         // the next window's drafts), and the round/step graphs carry the forcing kernel
         const int mtp_t = o.pipeline_windows >= 2 ? strata::kernels::kVerifyMaxT : o.spec;
         if (o.pipeline_windows >= 2) mtp.set_force_capture(true);
-        if (!o.mtp.empty() && !mtp.load(o.mtp, draft_geometry, last_st ? last_st->ss : ss, mtp_t, err, o.mtp_window)) { std::fprintf(stderr, "strata generate: %s%s\n", err.c_str(), vram_free_note().c_str()); return 1; }
+        if (split_fast_elastic) strata::core::qsa_set_kv_elastic(false, 0);   // the drafter is on the later card
+        const bool mtp_ok = o.mtp.empty() || mtp.load(o.mtp, draft_geometry, last_st ? last_st->ss : ss, mtp_t, err, o.mtp_window);
+        if (split_fast_elastic) strata::core::qsa_set_kv_elastic(true, 0);
+        if (!mtp_ok) { std::fprintf(stderr, "strata generate: %s%s\n", err.c_str(), vram_free_note().c_str()); return 1; }
         mtp.set_ple_session(&ss);
         if (batch_mtp) {
             // Slot b's drafter lives where the solo drafter does (the guard above: the last stage's GPU), carved from the
@@ -5992,8 +6005,10 @@ int main(int argc, char** argv) {
         // try said.  Nothing changes when the first open works.
         bool stage_open = false;
         for (int attempt = 0; !sized.empty(); ++attempt) {
+            if (split_fast_elastic) strata::core::ExpertCache::set_vmm(false);   // as without the elastic K/V
             stage_open = native_pack ? st.cache.open_sized(sized, g.n_layers, g.n_expert, err)
                                      : st.cache.open((int64_t) sized.size(), g.n_layers, g.n_expert, (int64_t) lay.max_blob, err);
+            if (split_fast_elastic) strata::core::ExpertCache::set_vmm(true);
             if (stage_open || attempt >= 3) break;
             (void) cudaGetLastError();
             const size_t keep = sized.size() * 9 / 10;
@@ -7176,6 +7191,10 @@ int main(int argc, char** argv) {
     // the adaptive tier's swaps (a swap in flight could still be writing a slot given up here).
     auto kvg_ensure = [&](int64_t cells, const std::function<void()>& quiesce) -> bool {
         if (!kvg.on || cells <= kvg.cells) return true;
+        const strata::core::OnDevice on_kvg(split_fast ? 0 : -1);   // split_fast: CUDA0's K/V and cache
+        // a layer split's table names the later stages' slots in their rows: CUDA0's slots are in its own layers' rows
+        const size_t own_rows = multi_gpu ? std::min(host_res.size(), (size_t) split_at[0] * (size_t) g.n_expert)
+                                          : host_res.size();
         const int64_t target = std::min<int64_t>(o.max_context, (cells + kvg.step - 1) / kvg.step * kvg.step);
         const int64_t need = strata::core::qsa_kv_elastic_need(target);
         if (need == 0) { kvg.cells = strata::core::qsa_kv_elastic_cells(); return true; }
@@ -7205,12 +7224,12 @@ int main(int argc, char** argv) {
         while ((int64_t) kvg.spare.size() + freeable() < need && kvg.lo > kvg.floor) {
             if (owner.empty()) {
                 owner.assign((size_t) xcache.slots(), -1);
-                for (size_t i = 0; i < host_res.size(); ++i)
+                for (size_t i = 0; i < own_rows; ++i)
                     if (host_res[i] >= 0 && host_res[i] < xcache.slots()) owner[(size_t) host_res[i]] = (int32_t) i;
                 rank.assign(host_res.size(), (int32_t) profile.size());
                 for (size_t r = 0; r < profile.size(); ++r)
                     rank[(size_t) profile[r].first * (size_t) g.n_expert + (size_t) profile[r].second] = (int32_t) r;
-                for (size_t i = 0; i < host_res.size(); ++i)
+                for (size_t i = 0; i < own_rows; ++i)
                     if (host_res[i] >= kvg.top) cold.emplace_back(heat((int32_t) i), (int32_t) i);
                 std::sort(cold.begin(), cold.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
             }
@@ -7285,6 +7304,7 @@ int main(int argc, char** argv) {
     // profile's hottest experts the GPU does not hold.  Run on a quiet device (as kvg_ensure's `quiesce`).
     auto kvg_trim = [&](int64_t cells, int64_t hold) -> bool {   // `hold`: the cells a parked conversation could need
         if (!kvg.on) return true;
+        const strata::core::OnDevice on_kvg(split_fast ? 0 : -1);   // split_fast: CUDA0's K/V and cache (its profile share)
         // #1128: a parked conversation comes back through kvg_ensure's grow, so a K/V that fell to a short request's
         // size is grown again (its experts shuffled again) after every short request in between: the K/V keeps the
         // longest parked conversation's cells while it is parked
