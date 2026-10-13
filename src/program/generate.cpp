@@ -5921,7 +5921,10 @@ int main(int argc, char** argv) {
         if (!pcie_given && native_pack) {
             std::string bursts;
             const double bw = probe_pcie_h2d_gbps(&bursts);
-            if (bw > 0.0) st.pcie_frac = pcie_frac_for_gbps(bw, 0.55);
+            // the pack's base as on CUDA0: 0.25 for NVFP4 experts (2.76 MB, twice the i-quants' 0.55 was measured on)
+            const auto& lay0 = strata::kernels::cpu::expert_layout();
+            const bool nvfp4_pack = !lay0.fmt.empty() && lay0.fmt[0].gu_type == 40;
+            if (bw > 0.0) st.pcie_frac = pcie_frac_for_gbps(bw, nvfp4_pack ? 0.25 : 0.55);
             st.link_gbps = bw;
             std::fprintf(stderr, "strata generate: layer split: CUDA%d PCIe probe %.1f GB/s (best of %s) -> pcie_frac "
                                  "%.2f\n", st.dev, bw, bursts.c_str(), st.pcie_frac);
