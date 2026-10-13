@@ -6330,6 +6330,7 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
     pinned_bytes_ = a->registered_bytes;
     // plan v0.3 P6: device aliases of the mapped registration, for the PCIe share of the misses
     dev_slice_.clear();
+    pinned_layer_.clear();
     slice_bytes_ = a->slice_bytes;
     pin_start_.clear(); pin_end_.clear(); pin_dev_.clear(); layer_pcie_.clear();
     ranges_ = false;
@@ -6358,6 +6359,22 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
                 for (int64_t e = 0; e < n_expert && !layer_pcie_[(size_t) l]; ++e)
                     layer_pcie_[(size_t) l] = pinned(l, e) ? 1 : 0;
         }
+    } else if (a->scattered && a->slice_pinned.size() == (size_t) n_layers) {
+        // extras/mgpu-fixes (D7): one slice per layer, registered in the split's order - a device alias per pinned
+        // layer, null for the others (pinned() answers from pinned_layer_)
+        pinned_layer_.assign(a->slice_pinned.begin(), a->slice_pinned.end());
+        dev_slice_.assign((size_t) n_layers, nullptr);
+        for (size_t k = 0; k < a->slice_starts.size() && k < a->slice_index.size(); ++k) {
+            void* d = nullptr;
+            if (cudaHostGetDevicePointer(&d, (void*) (base_ + a->slice_starts[k]), 0) != cudaSuccess) {
+                (void) cudaGetLastError();
+                pinned_layer_[(size_t) a->slice_index[k]] = 0;
+                continue;
+            }
+            dev_slice_[(size_t) a->slice_index[k]] = (const uint8_t*) d;
+        }
+    } else if (a->scattered) {
+        pinned_bytes_ = 0;   // slices that are not one per layer: claim nothing pinned rather than a wrong prefix
     } else if (a->registered_bytes > 0) {
         std::vector<uint64_t> starts = a->slice_bytes > 0 ? a->slice_starts : std::vector<uint64_t>{0};
         for (uint64_t off : starts) {
@@ -6451,6 +6468,7 @@ bool ArenaExpertSource::pcie_layer(int64_t layer) const {
 
 bool ArenaExpertSource::pinned(int64_t layer, int64_t expert) const {
     if (base_ == nullptr || layer < 0 || expert < 0 || expert >= n_expert_) return false;
+    if (!pinned_layer_.empty()) return (size_t) layer < pinned_layer_.size() && pinned_layer_[(size_t) layer] != 0;
     const auto& lay = strata::kernels::cpu::expert_layout();
     if (ranges_) return pin_range_of(arena_off(layer, expert), lay.blob_bytes(layer)) >= 0;   // the whole blob inside ONE registered range
     return lay.blob_offset(layer, expert) + lay.blob_bytes(layer) <= pinned_bytes_;
@@ -6468,7 +6486,7 @@ const uint8_t* ArenaExpertSource::device_alias(int64_t layer, int64_t expert) co
     const auto& lay = strata::kernels::cpu::expert_layout();
     if (slice_bytes_ == 0) return dev_slice_[0] + lay.blob_offset(layer, expert);
     // one registration slice per layer
-    if ((size_t) layer >= dev_slice_.size()) return nullptr;
+    if ((size_t) layer >= dev_slice_.size() || dev_slice_[(size_t) layer] == nullptr) return nullptr;
     return dev_slice_[(size_t) layer] + (uint64_t) expert * lay.blob_bytes(layer);
 }
 
