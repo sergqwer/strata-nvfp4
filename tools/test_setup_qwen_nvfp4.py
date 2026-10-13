@@ -67,7 +67,7 @@ class AsCommitted(unittest.TestCase):
         code, out, cfg, _ = run(ram, found, ["--no-start"], repos=setup.NVFP4_REPOS, answers="")
         self.assertEqual(code, 0, out[-3000:])
         lines = menu_lines(out)
-        self.assertEqual(len(lines), 4 + len(setup.FAMILIES))
+        self.assertEqual(len(lines), 4 + len(setup.FAMILIES) + len(setup.OWN_PATH_FAMILIES))   # + upstream's Qwen3.6
         self.assertTrue(lines[0].startswith("1) Qwen3.8-Flash-Next (NVFP4, GPTQ)"), lines)
         self.assertTrue(lines[1].startswith("2) Qwen3.8-Flash-Next (NVIDIA's NVFP4)"), lines)
         self.assertTrue(lines[2].startswith("3) Qwen3.8-Flash-Next (NVFP4 + Q8_0 mix)"), lines)   # 0.1.42-nvfp4.2
@@ -110,7 +110,7 @@ class Published(unittest.TestCase):
         code, out, cfg, _ = run(ram, found, ["--no-start"], repos=ALL, answers="")
         self.assertEqual(code, 0, out[-3000:])
         lines = menu_lines(out)
-        self.assertEqual(len(lines), 2 + len(setup.FAMILIES))
+        self.assertEqual(len(lines), 2 + len(setup.FAMILIES) + len(setup.OWN_PATH_FAMILIES))
         self.assertTrue(lines[0].startswith("1) Qwen3.8-Flash-Next (NVFP4, GPTQ)"), lines)
         self.assertTrue(lines[1].startswith("2) Qwen3.8-Flash-Next (NVIDIA's NVFP4)"), lines)
         for i in (0, 1):
