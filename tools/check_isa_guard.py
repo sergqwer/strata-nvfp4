@@ -36,8 +36,10 @@ WIDE_PUBLIC = {
     "iq256_rows_v", "iq4nl256_down_rows", "iq4nl256_down_rows_v", "q2_0_gguf_rows_multi_avx2",
     "q2_0_gguf_rows_multi_avx2_v", "q2_0_gguf_rows_multi_avx2_legacy", "q2_0_gguf_rows_multi_avx2_bitplane",
     "act_quant_q8_1_avx2", "q8k_quant_avx2", "kq256_gu_rows", "kq256_rows", "bf16_rows_dot_multi",
+    # this fork's NVFP4 expert rows (native_expert.cpp calls them only when cpu_avx512_ok())
+    "nvfp4_512_gu_rows", "nvfp4_512_rows",
 }
-WIDE_OBJECTS = ("expert.cpp", "iq_avx512.cpp", "iq_avx2.cpp", "q2_avx2.cpp", "kq_avx2.cpp")
+WIDE_OBJECTS = ("expert.cpp", "iq_avx512.cpp", "iq_avx2.cpp", "q2_avx2.cpp", "kq_avx2.cpp", "nvfp4_avx512.cpp")
 
 # An instruction is "wide" if it is EVEX encoded (first byte 0x62 in 64-bit mode), or one of these VEX / legacy
 # extensions that an AVX2 CPU may lack.  AVX-VNNI is VEX encoded (vpdpbusd, vpdpwssd ...).
