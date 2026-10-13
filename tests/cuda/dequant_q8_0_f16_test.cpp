@@ -3,9 +3,9 @@
 // Random blocks with scales from zero and subnormal to large, row slices (row0), padded rows (ld), and an output
 // pointer that is not 16-byte aligned (the generic kernel).  Exit 77 without a CUDA device.
 #include "strata/kernels/dequant_bf16.hpp"
+#include "strata/kernels/f16_bits.hpp"
 
 #include <cuda_runtime.h>
-#include <immintrin.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -15,8 +15,10 @@
 
 namespace {
 
-float h2f(uint16_t h) { return _mm_cvtss_f32(_mm_cvtph_ps(_mm_cvtsi32_si128(h))); }
-uint16_t f2h(float f) { return (uint16_t) _mm_extract_epi16(_mm_cvtps_ph(_mm_set_ss(f), _MM_FROUND_TO_NEAREST_INT), 0); }
+// the tree's exact FP16 conversions (round-to-nearest-even, as F16C's _MM_FROUND_TO_NEAREST_INT), not the F16C
+// intrinsics: gcc refuses those without -mf16c, MSVC compiled them without a flag
+float h2f(uint16_t h) { return strata::kernels::f32_from_f16(h); }
+uint16_t f2h(float f) { return strata::kernels::f16_from_f32(f); }
 
 int run_case(int64_t rows_total, int64_t cols, int64_t row0, int64_t rows, int64_t ld, int64_t out_off, uint32_t seed) {
     std::mt19937 rng(seed);
