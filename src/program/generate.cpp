@@ -4905,6 +4905,7 @@ int main(int argc, char** argv) {
         }
     }
     std::vector<std::vector<std::unique_ptr<strata::core::SessionState>>> bslot_ss;
+    bool batch_kv_elastic = false;   // batch-vram: the slots' K/V grow on their own (owner 1 + slot)
     // --batch-max-context (this fork, opt-in): the cells each slot's session holds; --max-context without it
     const int64_t batch_slot_ctx = o.batch_max_context > 0 ? std::min<int64_t>(o.batch_max_context, o.max_context)
                                                            : o.max_context;
@@ -4950,10 +4951,17 @@ int main(int argc, char** argv) {
         bslot_ss.resize(1 + stages.size());
         int fit = o.batch;   // the slots every stage could carve
         uint64_t bytes0 = 0;
-        // the elastic K/V is the main session's alone (it grows with the requests it reads): a slot's K/V is carved
-        // whole for the slot's context (--batch-max-context), so the switch is off while the slots are made
+        // batch-vram: with the elastic K/V (one GPU) each slot's K/V is elastic too, its own owner (1 + slot): it maps
+        // STRATA_BATCH_KV_INIT cells (8192) now and grows from the expert cache as its context grows (slot_kv_ensure).
+        // Before, 4 slots x 262K cells took 14.6 GiB of a 24 GB card's cache.  Without it a slot is carved whole.
         const bool kv_elastic_main = strata::core::qsa_kv_elastic();
-        if (kv_elastic_main) strata::core::qsa_set_kv_elastic(false, 0);
+        const int64_t slot_kv_init = [] {
+            const char* v = std::getenv("STRATA_BATCH_KV_INIT");
+            return v != nullptr && std::atoll(v) > 0 ? std::atoll(v) : (long long) 8192;
+        }();
+        const bool slot_elastic = kv_elastic_main && std::getenv("STRATA_BATCH_KV_WHOLE") == nullptr;
+        if (kv_elastic_main && !slot_elastic) strata::core::qsa_set_kv_elastic(false, 0);
+        if (slot_elastic) strata::core::qsa_set_kv_elastic(true, slot_kv_init);
         for (size_t k = 0; k < bslot_ss.size(); ++k) {
             const int dev = k == 0 ? 0 : stages[k - 1]->dev;
             const int64_t lo = k == 0 ? 0 : stages[k - 1]->lb;
@@ -4964,6 +4972,7 @@ int main(int argc, char** argv) {
             for (int b = 0; b < fit; ++b) {
                 auto u = std::make_unique<strata::core::SessionState>();
                 void* buf = nullptr;
+                if (slot_elastic) strata::core::qsa_set_kv_elastic_owner(1 + b);
                 if (cudaMalloc(&buf, bytes) != cudaSuccess || strata::core::session_init(g, batch_slot_ctx, K, buf, *u, lo, hi) == 0) {
                     cudaGetLastError();
                     if (buf != nullptr) cudaFree(buf);
@@ -4981,12 +4990,27 @@ int main(int argc, char** argv) {
             cudaDeviceSynchronize();
             size_t fb = 0, tb = 0;
             cudaMemGetInfo(&fb, &tb);
+            if (slot_elastic) {
+                strata::core::qsa_set_kv_elastic_owner(0);
+                for (size_t b = 0; b < bslot_ss[k].size(); ++b)
+                    bytes0 += strata::core::qsa_kv_elastic_mapped_bytes(1 + (int) b) / bslot_ss[k].size();
+                std::fprintf(stderr, "strata generate: --batch: %d slot sessions on CUDA%d (%.2f GiB each: an elastic K/V "
+                                     "of %lld of %lld cells, %.2f GiB at the full context, grows with the slot's context); "
+                                     "%.2f GiB free\n", (int) bslot_ss[k].size(), dev, (double) bytes0 / 1073741824.0,
+                             (long long) strata::core::qsa_kv_elastic_cells(1), (long long) batch_slot_ctx,
+                             (double) strata::core::qsa_kv_elastic_full_bytes(1) / 1073741824.0, (double) fb / 1073741824.0);
+            } else
             std::fprintf(stderr, "strata generate: --batch: %d slot sessions on CUDA%d (%.2f GiB each, %lld cells%s); %.2f GiB "
                                  "free\n", (int) bslot_ss[k].size(), dev, (double) bytes / 1073741824.0,
                          (long long) batch_slot_ctx, batch_slot_ctx < o.max_context ? ", --batch-max-context" : "",
                          (double) fb / 1073741824.0);
         }
-        if (kv_elastic_main) strata::core::qsa_set_kv_elastic(true, 0);
+        batch_kv_elastic = slot_elastic && !bslot_ss.empty() && !bslot_ss[0].empty();
+        if (slot_elastic) {   // the main session's own first cells again (its drafter is made after this)
+            const char* iv = std::getenv("STRATA_KV_GROW_INIT");
+            strata::core::qsa_set_kv_elastic(true, iv != nullptr && std::atoll(iv) > 0 ? std::atoll(iv) : 16384);
+        } else if (kv_elastic_main)
+            strata::core::qsa_set_kv_elastic(true, 0);
         for (auto& v : bslot_ss) if ((int) v.size() > fit) v.resize((size_t) fit);   // the same count on every stage
         if (fit < 2) {
             std::fprintf(stderr, "strata generate: WARNING: --batch is off: not two slot sessions fit (a smaller "
@@ -5324,12 +5348,20 @@ int main(int argc, char** argv) {
     const bool auto_cache = o.expert_cache < 0;
     bool reserve_adapted = false;   // #496: the auto sizing lowered the reserve so a small card's cache fits
     // --pipeline-windows: what it allocates on CUDA0 after the cache (see kPipeWindowMib)
-    const int64_t pipe_first = o.pipeline_windows <= 0 ? 0
+    const int64_t pipe_only = o.pipeline_windows <= 0 ? 0
         : (kPipeWindowMib << 20) + (o.pipeline_windows >= 2 ? 2 * (int64_t) gdn_snapshot_bytes(ss) : 0);
-    if (pipe_first > 0)
+    if (pipe_only > 0)
         std::fprintf(stderr, "strata generate: --pipeline-windows %d: %lld MiB of CUDA0 kept out of the expert cache "
-                             "(the second verifier%s)\n", o.pipeline_windows, (long long) (pipe_first >> 20),
+                             "(the second verifier%s)\n", o.pipeline_windows, (long long) (pipe_only >> 20),
                      o.pipeline_windows >= 2 ? ", the GDN snapshots" : "");
+    // batch-vram: --batch slots capture a graph pair per layout of active slots (15-30 MiB each); a 24 GB 4090 with
+    // parallel 4 was left ~130 MiB and failed a capture.  64 MiB a slot stays free for them beside the reserve (not with
+    // a reserve given on the command line: that one is the user's).
+    const int64_t batch_graphs = o.batch > 0 && !o.vram_reserve_given ? (int64_t) o.batch * (64ll << 20) : 0;
+    if (batch_graphs > 0)
+        std::fprintf(stderr, "strata generate: --batch %d: %lld MiB of CUDA0 kept out of the expert cache (the slots' "
+                             "window graphs)\n", o.batch, (long long) (batch_graphs >> 20));
+    const int64_t pipe_first = pipe_only + batch_graphs;
     // The MiB the prompt path's OWN buffers (no loan) take, which the cache sizing leaves out.  0.1.39's rule is
     // 160 + chunk * 680 / 1024 (~16 GiB at 24576 against ~2.4 GiB really allocated); STRATA_OWNED_PRICE=exact prices the
     // real allocation instead (Prefill::bytes_needed_owned: 2 MiB pages, the ring in one piece, as PR #796 measured)
@@ -7003,11 +7035,13 @@ int main(int argc, char** argv) {
     std::function<void(const char*, bool)> kvg_audit;
     // Room for `cells` cells (rounded up to a step).  `quiesce` must leave nothing running on the device and land
     // the adaptive tier's swaps (a swap in flight could still be writing a slot given up here).
-    auto kvg_ensure = [&](int64_t cells, const std::function<void()>& quiesce) -> bool {
-        if (!kvg.on || cells <= kvg.cells) return true;
-        const int64_t target = std::min<int64_t>(o.max_context, (cells + kvg.step - 1) / kvg.step * kvg.step);
-        const int64_t need = strata::core::qsa_kv_elastic_need(target);
-        if (need == 0) { kvg.cells = strata::core::qsa_kv_elastic_cells(); return true; }
+    // (batch-vram: `owner` 1 + b grows batch slot b's K/V, up to its own context; 0 is the main session's)
+    auto kvg_ensure = [&](int64_t cells, const std::function<void()>& quiesce, int kv_owner = 0) -> bool {
+        if (!kvg.on || cells <= (kv_owner == 0 ? kvg.cells : strata::core::qsa_kv_elastic_cells(kv_owner))) return true;
+        const int64_t target = std::min<int64_t>(kv_owner == 0 ? o.max_context : batch_slot_ctx,
+                                                 (cells + kvg.step - 1) / kvg.step * kvg.step);
+        const int64_t need = strata::core::qsa_kv_elastic_need(target, kv_owner);
+        if (need == 0) { if (kv_owner == 0) kvg.cells = strata::core::qsa_kv_elastic_cells(); return true; }
         quiesce();
         strata::core::VmmRange& r = *xcache.vmm_range();
         const uint64_t G = strata::core::vmm_granularity();
@@ -7094,13 +7128,16 @@ int main(int argc, char** argv) {
             const strata::core::VmmChunk h = kvg.spare.back();
             kvg.spare.pop_back();
             return h;
-        });
+        }, kv_owner);
         kvg.fresh += fresh;
-        kvg.cells = strata::core::qsa_kv_elastic_cells();
+        if (kv_owner == 0) kvg.cells = strata::core::qsa_kv_elastic_cells();
         ++kvg.grows;
-        std::fprintf(stderr, "strata: K/V grown to %lld cells (%.2f GiB); the expert cache gave %lld slots for it, "
-                             "%lld hotter experts moved to colder ones' slots (%lld of %lld slots hold experts)%s\n",
-                     (long long) kvg.cells, (double) strata::core::qsa_kv_elastic_mapped_bytes() / 1073741824.0,
+        char who[48] = "K/V";
+        if (kv_owner != 0) std::snprintf(who, sizeof who, "batch slot %d's K/V", kv_owner - 1);
+        std::fprintf(stderr, "strata: %s grown to %lld cells (%.2f GiB); the expert cache gave %lld slots for it, "
+                             "%lld hotter experts moved to colder ones' slots (%lld of %lld slots hold experts)%s\n", who,
+                     (long long) strata::core::qsa_kv_elastic_cells(kv_owner),
+                     (double) strata::core::qsa_kv_elastic_mapped_bytes(kv_owner) / 1073741824.0,
                      (long long) gave, (long long) moved, (long long) (kvg.lo + (xcache.slots() - kvg.top)),
                      (long long) xcache.slots(),
                      fresh > 0 ? " - and new VRAM, the cache being at its floor" : "");
@@ -7112,16 +7149,18 @@ int main(int argc, char** argv) {
     };
     // A request that needs far fewer cells than the K/V holds gives the rest back: the slots refill with the
     // profile's hottest experts the GPU does not hold.  Run on a quiet device (as kvg_ensure's `quiesce`).
-    auto kvg_trim = [&](int64_t cells, int64_t hold) -> bool {   // `hold`: the cells a parked conversation could need
+    auto kvg_trim = [&](int64_t cells, int64_t hold, int kv_owner = 0) -> bool {   // `hold`: the cells a parked conversation could need
         if (!kvg.on) return true;
         // #1128: a parked conversation comes back through kvg_ensure's grow, so a K/V that fell to a short request's
         // size is grown again (its experts shuffled again) after every short request in between: the K/V keeps the
         // longest parked conversation's cells while it is parked
         const int64_t want = std::max<int64_t>(cells, hold);
         const int64_t target = std::max<int64_t>(kvg.step, (want + kvg.step - 1) / kvg.step * kvg.step);
-        if (kvg.cells < target + 2 * kvg.step || kvg.lo >= kvg.top) return true;
-        strata::core::qsa_kv_elastic_shrink(target, [&](strata::core::VmmChunk h) { kvg.spare.push_back(h); });
-        kvg.cells = strata::core::qsa_kv_elastic_cells();
+        if ((kv_owner == 0 ? kvg.cells : strata::core::qsa_kv_elastic_cells(kv_owner)) < target + 2 * kvg.step ||
+            kvg.lo >= kvg.top)
+            return true;
+        strata::core::qsa_kv_elastic_shrink(target, [&](strata::core::VmmChunk h) { kvg.spare.push_back(h); }, kv_owner);
+        if (kv_owner == 0) kvg.cells = strata::core::qsa_kv_elastic_cells();
         strata::core::VmmRange& r = *xcache.vmm_range();
         const uint64_t G = strata::core::vmm_granularity();
         const int64_t c1 = (int64_t) (xcache.slot_offset(kvg.top) / G);
@@ -7176,8 +7215,13 @@ int main(int argc, char** argv) {
         for (const strata::core::VmmChunk h : kvg.spare) strata::core::vmm_chunk_free(h);   // new ones, if any
         kvg.spare.clear();
         ++kvg.trims;
-        std::fprintf(stderr, "strata: K/V trimmed to %lld cells; %lld slots back to the expert cache, refilled from "
-                             "the profile\n", (long long) kvg.cells, (long long) (kvg.lo - lo0));
+        if (kv_owner == 0)
+            std::fprintf(stderr, "strata: K/V trimmed to %lld cells; %lld slots back to the expert cache, refilled from "
+                                 "the profile\n", (long long) kvg.cells, (long long) (kvg.lo - lo0));
+        else
+            std::fprintf(stderr, "strata: batch slot %d's K/V trimmed to %lld cells; %lld slots back to the expert cache, "
+                                 "refilled from the profile\n", kv_owner - 1,
+                         (long long) strata::core::qsa_kv_elastic_cells(kv_owner), (long long) (kvg.lo - lo0));
         if (kvg_audit) kvg_audit("trim", true);
         return true;
     };
@@ -7196,9 +7240,15 @@ int main(int argc, char** argv) {
             for (int64_t c = c0; c < c1; ++c) k += r.mapped(c) ? 1 : 0;
             return k;
         };
+        int64_t n = 0;
+        while (!kvg.spare.empty() && n < want) {   // out of the cache and not in a K/V: straight back
+            strata::core::vmm_chunk_free(kvg.spare.back());
+            kvg.spare.pop_back();
+            ++n;
+        }
         std::vector<int32_t> owner;
         int64_t gave = 0;
-        while (freeable() < want && kvg.lo > kvg.floor) {
+        while (n + freeable() < want && kvg.lo > kvg.floor) {
             if (owner.empty()) {
                 owner.assign((size_t) xcache.slots(), -1);
                 for (size_t i = 0; i < host_res.size(); ++i)
@@ -7212,7 +7262,6 @@ int main(int argc, char** argv) {
             }
         }
         if (gave > 0 && res_put(d_res) != cudaSuccess) return 0;   // (it waits for its copy)
-        int64_t n = 0;
         const int64_t c0 = (int64_t) ((xcache.slot_offset(kvg.lo) + G - 1) / G);
         const int64_t c1 = (int64_t) (xcache.slot_offset(kvg.top) / G);
         for (int64_t c = c0; c < c1 && n < want; ++c)
@@ -10363,9 +10412,44 @@ int main(int argc, char** argv) {
             in_lines.pop_front();
             return true;
         };
+        // batch-vram: slot b's elastic K/V holds `cells` cells before a window or a copy writes them: grown from the
+        // expert cache (kvg_ensure, owner 1 + b) or, with no cache slots to lend, from new VRAM.  `trim`: a slot that
+        // holds far more than that (a long conversation before) gives the rest back to the cache.
+        auto slot_kv_fit = [&](int b, int64_t cells, bool trim, std::string& e) -> bool {
+            if (!batch_kv_elastic) return true;   // carved whole
+            const int owner = 1 + b;
+            cells = std::min<int64_t>(cells, batch_slot_ctx);
+            const int64_t have = strata::core::qsa_kv_elastic_cells(owner);
+            if (cells <= have) {
+                if (trim && kvg.on && have >= cells + 3 * kvg.step) {
+                    cudaDeviceSynchronize();
+                    apply_pending(true);
+                    if (!kvg_trim(cells, 0, owner)) { e = "batch slot K/V: giving cells back failed"; return false; }
+                }
+                return true;
+            }
+            bool ok;
+            if (kvg.on)
+                ok = kvg_ensure(cells, [&] { cudaDeviceSynchronize(); apply_pending(true); }, owner);
+            else {
+                const int64_t target = std::min<int64_t>(batch_slot_ctx, (cells + 8191) / 8192 * 8192);
+                ok = cudaDeviceSynchronize() == cudaSuccess &&
+                     strata::core::qsa_kv_elastic_grow(target, []() -> strata::core::VmmChunk { return 0; }, owner);
+                if (ok) std::fprintf(stderr, "strata: batch slot %d's K/V grown to %lld cells from new VRAM\n", b,
+                                     (long long) strata::core::qsa_kv_elastic_cells(owner));
+            }
+            if (!ok || strata::core::qsa_kv_elastic_cells(owner) < cells) {
+                (void) cudaGetLastError();
+                e = "out of memory: batch slot " + std::to_string(b) + "'s K/V cannot grow to " + std::to_string(cells) +
+                    " cells";
+                return false;
+            }
+            return true;
+        };
         // the session a request just left behind (its prompt) -> slot b's sessions, on every stage
         auto copy_to_slot = [&](int b, const std::vector<int32_t>& ids, std::string& e) -> bool {
             const int64_t upto = (int64_t) ids.size();
+            if (!slot_kv_fit(b, upto + 64, true, e)) return false;
             for (size_t k = 0; k < bslot_ss.size(); ++k) {
                 strata::core::SessionState& from = k == 0 ? ss : stages[k - 1]->ss;
                 strata::core::SessionState& to = *bslot_ss[k][(size_t) b];
@@ -10529,6 +10613,22 @@ int main(int argc, char** argv) {
                 bt_cpu_ent0 = drive.d.multi_entries; bt_off_ent0 = drive.d.offload_entries;
                 bt_a_rounds0 = a_rounds; bt_a_swapped0 = a_swapped;
             }
+            for (int a = 0; a < A && batch_kv_elastic; ++a)   // batch-vram: each slot's K/V holds this window's cells
+                if (!slot_kv_fit(active[a], pos[first[a]] + (batch_mtp ? 2 : 1) + 64, false, err)) {
+                    // no VRAM for it (the cache at its floor): this slot ends as #879's do, the engine goes on
+                    BSlot& sl = bs[(size_t) active[a]];
+                    std::fprintf(stderr, "strata batch: %s: slot %d ends here (BDONE nonfinite), the engine goes on\n",
+                                 err.c_str(), active[a]);
+                    const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
+                    std::printf("BDONE %d %lld nonfinite %.1f\n", active[a], (long long) sl.produced, ms);
+                    std::fflush(stdout);
+                    sl.active = false;
+                    sl.cached = false;
+                    sl.checks.clear();
+                    strata::core::progress().busy.store(was_busy);
+                    err.clear();
+                    return true;   // the next window takes the other slots
+                }
             const Clock::time_point w0 = Clock::now();
             if (!ver.run_slot_rows(rows, S, tok, pos, win_pool_fn, win_pool_user, outb, err) || drive.d.failed) {
                 // batch-oom: a window graph that found no VRAM after every graph and cache slot that could go went (a
