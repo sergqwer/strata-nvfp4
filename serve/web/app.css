@@ -153,11 +153,16 @@ main { flex: 1; min-height: 0; display: flex; }
 .cc-note { margin: 0; }
 .cc-note:empty { display: none; }
 .mcp-card { display: flex; flex-direction: column; gap: var(--st-s-3); }
-.cfg-form { display: grid; grid-template-columns: minmax(180px, max-content) minmax(0, 1fr); gap: var(--st-s-3) var(--st-s-4);
+/* label | control: a max-content label column took the card's width (a long help) and pushed the controls out */
+.cfg-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, 280px); gap: var(--st-s-3) var(--st-s-5);
             align-items: center; }
-.cfg-form label { font-size: var(--st-fs-sm); font-weight: var(--st-fw-medium); }
+.cfg-form label { font-size: var(--st-fs-sm); font-weight: var(--st-fw-medium); min-width: 0; overflow-wrap: anywhere; }
 .cfg-form label code { font: 400 12px var(--st-font-mono); color: var(--st-ink-muted); display: block; }
-.cfg-form .st-input { height: 38px; width: 100%; max-width: 360px; }
+.cfg-form .st-input { height: 38px; width: 100%; min-width: 0; }
+.cfg-section { grid-column: 1 / -1; margin: var(--st-s-3) 0 0; padding-top: var(--st-s-4); border-top: 1px solid var(--st-line-soft);
+               font-size: var(--st-fs-xs); font-weight: var(--st-fw-bold); letter-spacing: .04em; text-transform: uppercase;
+               color: var(--st-ink-muted); }
+.cfg-section:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
 .cfg-actions { display: flex; align-items: center; gap: var(--st-s-3); }
 .mcp-server { display: flex; flex-direction: column; gap: var(--st-s-2); padding-top: var(--st-s-3); border-top: 1px solid var(--st-line-soft); }
 .mcp-server:first-child { padding-top: 0; border-top: 0; }
@@ -199,8 +204,6 @@ main { flex: 1; min-height: 0; display: flex; }
   .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .monitor-row { grid-template-columns: 1fr; }
   .cc-bars { grid-template-columns: 1fr; }
-  .cfg-form { grid-template-columns: 1fr; gap: 4px; }
-  .cfg-form .st-input { margin-bottom: var(--st-s-2); }
   .gpu-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   .gpu-vitals { flex-direction: row; align-items: baseline; gap: var(--st-s-4); }
 }
@@ -215,5 +218,7 @@ main { flex: 1; min-height: 0; display: flex; }
   .monitor, .about { padding: var(--st-s-4); }
   .facts { grid-template-columns: 1fr; gap: 2px; }
   .facts dd { margin-bottom: var(--st-s-2); }
+  .cfg-form { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .cfg-form .st-input { margin-bottom: var(--st-s-2); }
   .gpu-row { grid-template-columns: minmax(0, 1fr); }
 }

@@ -43,6 +43,9 @@ EDITABLE = [
      "VRAM in MiB the engine leaves free for other programs (engine default 700)"),
 ]
 SPEC = {k: kind for k, kind, _ in EDITABLE}
+# the view's headings: the first key of each group -> its title
+SECTIONS = {"sampling.temperature": "Sampling defaults", "reasoning_budget_tokens": "Requests",
+            "idle_unload_s": "Loading and the engine"}
 NO_PROJECTION = ("this model loads no refusal projection (--control-vector-scaled): setup loads it for the original "
                  "Qwen's families only, never for NVIDIA's model (its license does not allow bypassing the model's "
                  "safety guardrails), nor for Swift 1.5 or the Coder")
@@ -81,7 +84,8 @@ def view(cfg: dict, path: str | Path) -> dict:
         out.append({"key": key, "value": value_of(cfg, key), "help": help_ + (f" - not available: {NO_PROJECTION}"
                                                                                  if off else ""),
                     "kind": "number" if k in ("sampling", "arg", "int>=0", "num>=0") else k,
-                    **({"choices": kind[1]} if k == "enum" else {}), **({"available": False} if off else {})})
+                    **({"choices": kind[1]} if k == "enum" else {}), **({"available": False} if off else {}),
+                    **({"section": SECTIONS[key]} if key in SECTIONS else {})})
     return {"file": Path(path).name, "keys": out,
             "note": "Saved to the run config; used from the next start of the model."}
 
