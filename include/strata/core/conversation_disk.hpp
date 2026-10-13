@@ -4,6 +4,15 @@
 // By default only this process reads its files back, and the folder's files of this tier are removed at start and at
 // the end.  `persist`: the files are bound to the session files' identity (model and settings) instead, a small index
 // file beside each conversation lists its tokens, and the next start picks them up (no time limit, the budget only).
+// (xrip, upstream PR #1937 + b0c4d361 / 65f3fd00.)
+//
+// strata-nvfp4 additions (extras/dialog-park): an engine killed without QUIT (the tray stops it with taskkill /F /T)
+// never reaches the QUIT-time save, so the engine also writes on its own while it is idle (write_now: on the
+// caller's thread, given up within one 16 MiB block when a request arrives) - the live conversation and every parked
+// one that has no copy on the disk yet.  An entry a request reads back may stay on the disk (take(..., keep)): it is
+// still a valid resume point if the engine dies before its next save, and a newer copy of the same conversation
+// removes it once that copy is written (supersede, the RAM cache's #342 rule).  The index carries a hash.  The
+// background writer starts a job only while the engine is idle (set_busy) unless RAM is waited for.
 #pragma once
 
 #include "strata/core/conversation_cache.hpp"
@@ -40,6 +49,7 @@ struct ConversationDiskOptions {
 struct ConversationDiskStats {
     size_t queued = 0, written = 0, write_failed = 0, ram_hits = 0, disk_hits = 0, read_failed = 0;
     size_t expired = 0, evicted = 0, waits = 0;
+    size_t synced = 0, sync_cancelled = 0, superseded = 0, kept = 0;   ///< write_now; supersede; take(keep)
     uint64_t bytes_written = 0, bytes_read = 0;
     uint64_t tokens_back = 0;                 ///< prompt tokens given back (not read again) by ram or disk hits
     double write_ms = 0, read_ms = 0, wait_ms = 0;
@@ -96,13 +106,30 @@ public:
     /// when it is still queued, else from the disk (waiting for its write when it is being written).  `admit(need,
     /// why)` is asked before each file's payload is allocated (session_file_read's RAM preflight).  `tokens` is what
     /// the request reuses (diagnostics).  On failure `out` is empty and `error` says why.
+    /// `keep`: an entry on the disk stays there (its files are read, not removed) and becomes the newest - a request
+    /// that borrows a sibling's prefix, or (persist) a resume point that must outlive a crash until a newer copy of
+    /// the conversation is written.  A queued entry still leaves the queue (its RAM image is handed over).
     bool take(uint64_t id, int64_t tokens, SavedConversation& out, std::string& error,
-              const std::function<bool(uint64_t need_bytes, std::string& why)>& admit = {});
+              const std::function<bool(uint64_t need_bytes, std::string& why)>& admit = {}, bool keep = false);
+
+    /// Writes `image` NOW on the caller's thread (no queue), then registers it, makes room for the budget and removes
+    /// the older entries it supersedes - in that order, so a crash at any point leaves at least one copy.  `sources`
+    /// (optional): the first stage's K/V streamed from the device instead of `image.kv` (session_file_write's
+    /// streaming form; `image.kv` must then be empty).  `cancel` is asked before every 16 MiB block: true gives the
+    /// write up (`*cancelled`, temporary files removed, nothing registered).  An entry with exactly these keys already
+    /// on the disk is not written again: its id comes back.  `id` = the entry.  False with `error` on a failure.
+    bool write_now(const SavedConversation& image, const std::vector<SessionKvSource>* sources,
+                   const std::function<bool()>& cancel, uint64_t& id, std::string& error, bool* cancelled = nullptr);
+    /// Whether entry `id` is on the disk (or queued / being written).
+    bool has(uint64_t id) const;
+    /// The engine runs a request (true) or is idle (false): the background writer starts a queued job only while
+    /// idle, or when someone waits for it (wait_idle, take).
+    void set_busy(bool busy);
 
     /// Whether images wait in the queue or are being written (their RAM is not back yet).
     bool pending() const;
-    /// Blocks until the queue is empty and no write runs.
-    void wait_idle();
+    /// Blocks until the queue is empty and no write runs; returns the ms it waited.
+    double wait_idle();
     /// #879: every conversation goes - queued, being written (waited for) and on the disk, files too.  Returns how many.
     size_t clear();
 
@@ -135,8 +162,14 @@ private:
     };
     void writer();
     void write(Job& job);                                    // without the lock
+    // the files of `img` (one per stage) under entry `e`'s id; `sources`: stage 0's K/V streamed; without the lock
+    bool write_files(Entry& e, const SavedConversation& img, const std::vector<SessionKvSource>* sources,
+                     const std::function<bool()>& cancel, std::string& error);
+    // a written entry joins the list: the budget and the entries it supersedes go after it (m_ held); log part back
+    std::string publish_locked(Entry&& e, size_t& made_room, size_t& dropped);
     void remove_locked(size_t index, bool delete_files);     // m_ held
     size_t expire_locked();                                  // m_ held
+    size_t find_locked(uint64_t id) const;                   // m_ held; entries_.size() when absent
     void log(const std::string& line) const;
     SessionFileIdentity file_identity() const;
     bool write_index(Entry& e, std::string& error) const;
@@ -153,6 +186,9 @@ private:
     std::deque<Job> queue_;       ///< waiting for the writer, oldest first
     bool writing_ = false;        ///< the writer holds a job (writing_entry_ is its keys)
     Entry writing_entry_;
+    bool busy_ = false;           ///< set_busy: the engine runs a request; the writer starts no job then
+    int urgent_ = 0;              ///< callers waiting for the writer (wait_idle, take): it starts a job even when busy
+    uint64_t reading_ = 0;        ///< take(keep) reads this entry's files: the budget and supersede leave it alone
     bool stop_ = false;
     std::thread thread_;
     ConversationDiskStats stats_;
