@@ -790,7 +790,8 @@ async function loadConfig() {
       input = `<input class="st-input" id="${id}" ${k.kind === "number" ? 'type="number" step="any" min="0"' : 'type="text"'} ` +
         `value="${esc(text)}" placeholder="default" autocomplete="off">`;
     }
-    return `<label for="${id}" title="${esc(k.help)}">${esc(k.help)}<code>${esc(k.key)}</code></label>${input}`;
+    return (k.section ? `<h3 class="cfg-section">${esc(k.section)}</h3>` : "") +
+      `<label for="${id}" title="${esc(k.help)}">${esc(k.help)}<code>${esc(k.key)}</code></label>${input}`;
   }).join("");
   $("cfg-card").hidden = false;
 }
