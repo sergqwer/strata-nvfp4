@@ -6416,6 +6416,48 @@ int main(int argc, char** argv) {
             }
             return parts;
         };
+        // extras/mgpu-fixes: A CARD ON A SLOW LINK HOLDS ALL EXPERTS OF ITS LAYERS.  Measured on 2x RTX 4090 at 16 GB with
+        // CUDA1's link at 2 GB/s: the miss cost above (x9.7) already gave CUDA1 only 7 layers, but its cache held 3146 of
+        // their 3584 experts and the prompt path borrowed 2591 of those slots - every chunk streamed them over the slow
+        // link and refilled them after: 32K at 1,592 tok/s against 3,882 on ONE of the cards.  A stage whose link is at
+        // most 10 GB/s and at most half the fastest one's now gets only placements where its cache holds every expert
+        // of its layers AND it keeps room for its own prompt buffers (a STRATA_SPLIT_SLOW_CHUNK-token chunk, default
+        // 8192, with the 384-slot ring and serve's 1.5 GiB headroom): its link then carries the hand-offs only - no
+        // decode misses, no adaptive-tier copies, no prompt streaming, no refill.  Serve keeps its buffers out of its
+        // cache (slow_own below).  With no such placement the search runs as before.  STRATA_SPLIT_SLOW_RESIDENT=0: off.
+        std::vector<char> slow_stage((size_t) ns, 0);
+        bool any_slow = false, slow_gate_on = true;
+        {
+            static const bool slow_res_ok = [] {
+                const char* v = std::getenv("STRATA_SPLIT_SLOW_RESIDENT");
+                return v == nullptr || v[0] != '0';
+            }();
+            const double lo = *std::min_element(link_scale.begin(), link_scale.end());
+            for (int i = 0; slow_res_ok && native_pack && i < ns; ++i)
+                if (link_scale[(size_t) i] >= 2.0 && link_scale[(size_t) i] >= 2.0 * lo) slow_stage[(size_t) i] = 1, any_slow = true;
+        }
+        const int64_t slow_chunk = [] {
+            const char* v = std::getenv("STRATA_SPLIT_SLOW_CHUNK");
+            return v != nullptr ? (int64_t) std::max(256, std::atoi(v)) : (int64_t) 8192;
+        }();
+        std::vector<int64_t> layer_pairs((size_t) g.n_layers, 0);
+        for (const auto& pr : profile)
+            if (pr.first >= 0 && pr.first < g.n_layers) ++layer_pairs[(size_t) pr.first];
+        // after `predict(at)`: every slow stage holds all its layers' profiled pairs and has room for its own buffers
+        auto slow_ok = [&](const std::vector<int64_t>& cuts) -> bool {
+            for (int i = 0; i < ns; ++i) {
+                if (!slow_stage[(size_t) i]) continue;
+                const int64_t lb = i == 0 ? 0 : cuts[(size_t) i - 1], le = i + 1 < ns ? cuts[(size_t) i] : g.n_layers;
+                int64_t pairs = 0;
+                for (int64_t l = lb; l < le; ++l) pairs += layer_pairs[(size_t) l];
+                if (held_cnt[(size_t) i] < pairs) return false;
+                const int64_t left = stage_left(i, lb, le) - used[(size_t) i];
+                const int64_t need = (int64_t) chunk_bytes(lb, slow_chunk) +
+                                     384 * (int64_t) strata::kernels::cpu::expert_layout().max_blob + (3ll << 29);
+                if (left < need) return false;
+            }
+            return true;
+        };
         bool gate_on = true;   // off only when no placement can start (below): then the best one is kept and a warning said
         int64_t min_stage_layers = 1;   // #1616: 3 in the second pass below, when the first pick has a one- or two-layer stage
         std::vector<int64_t> stage_floors;   // #2644: each stage's share of the room, in the share pass below (empty: off)
@@ -6430,6 +6472,7 @@ int main(int argc, char** argv) {
             double hm = 0;
             int64_t held = 0;
             const double ms = predict(at, hm, held);
+            if (any_slow && slow_gate_on && !slow_ok(at)) return;   // extras/mgpu-fixes: slow link = fully resident
             ++tried;
             if (ns <= 3) priced.emplace_back(ms, at);
             const double mx = stage_max(at);
@@ -6556,11 +6599,30 @@ int main(int argc, char** argv) {
         }
         };
         search();
+        if (any_slow) {
+            if (best.empty() || ns == 4) {
+                if (ns != 4)
+                    std::fprintf(stderr, "strata generate: layer split auto: no placement lets the slow-link card hold "
+                                         "all experts of its layers and its own prompt buffers; choosing as before\n");
+                slow_gate_on = false;
+                if (best.empty()) search();
+            } else {
+                std::string sl;
+                for (int i = 0; i < ns; ++i)
+                    if (slow_stage[(size_t) i])
+                        sl += (sl.empty() ? "CUDA" : ", CUDA") + std::to_string(i == 0 ? 0 : stages[(size_t) i - 1]->dev);
+                std::fprintf(stderr, "strata generate: layer split auto: %s on a slow link holds every expert of its "
+                                     "layers and its own prompt buffers (a %lld-token chunk): its link carries the "
+                                     "hand-offs only (STRATA_SPLIT_SLOW_RESIDENT=0: off)\n", sl.c_str(),
+                             (long long) slow_chunk);
+            }
+        }
         // ---- #1616: a stage with one or two layers holds a handful of expert slots (a 12 GB 3060: 512), and the
         // prompt chunk of every card is clamped to what the smallest cache can lend.  When the pick has such a
         // stage, look again among placements that give every stage at least kMinStageLayers layers; keep the new
         // pick if there is one, and say so.  Recommend, never force: with none startable the first pick stays.
-        if (!best.empty() && strata::program::split_rules::restriction_possible(g.n_layers, ns) &&
+        // (not when a slow-link stage keeps its own buffers: it lends nothing, so it clamps no chunk)
+        if (!best.empty() && !(any_slow && slow_gate_on) && strata::program::split_rules::restriction_possible(g.n_layers, ns) &&
             strata::program::split_rules::has_tiny_stage(best, g.n_layers)) {
             const std::vector<int64_t> first = best;
             const double first_ms = best_ms;
@@ -10819,6 +10881,8 @@ int main(int argc, char** argv) {
             int32_t first_now = -1;        // where its buffers are laid out now
             int64_t lent_chunk = 0;
             std::vector<std::pair<int32_t, int32_t>> lent;
+            bool slow_own = false;         // extras/mgpu-fixes: a slow-link stage whose cache holds all its experts
+            int64_t own_room = 0;          // its free VRAM less a given reserve, for its own prompt buffers
         };
         // bytes -> slots for one cache: exact when it knows its per-slot offsets (a native pack's blobs differ
         // per layer), otherwise max_blob each.
@@ -10850,11 +10914,47 @@ int main(int argc, char** argv) {
             pf_parts.push_back({&xcache, &ss, &sp, -1, 0, multi_gpu ? split_at[0] : g.n_layers, -1, -1, 0, {}});
             for (auto& st : stages)
                 pf_parts.push_back({&st->cache, &st->ss, &st->sp, st->dev, st->lb, st->le, -1, -1, 0, {}});
+            // extras/mgpu-fixes: a stage on a slow link (<= 10 GB/s and at most half the fastest, probed) whose cache
+            // holds every expert of its layers lends nothing: a lent slot would be streamed over that link during every
+            // chunk and refilled after the prompt (2x 4090, CUDA1 at 2 GB/s: 32K at 1,592 tok/s, one card 3,882).  It
+            // keeps its own buffers instead, and the chunk is the largest the other stages can lend AND it can afford
+            // (free VRAM less a given reserve and serve's 1.5 GiB headroom).  STRATA_SPLIT_SLOW_RESIDENT=0: off.
+            if (pf_parts.size() > 1) {
+                static const bool slow_res_ok = [] {
+                    const char* v = std::getenv("STRATA_SPLIT_SLOW_RESIDENT");
+                    return v == nullptr || v[0] != '0';
+                }();
+                auto bw_of = [&](const PfPart& p) -> double {
+                    if (p.dev < 0) return o.pcie_probe_gbps;
+                    for (auto& st : stages) if (st->dev == p.dev) return st->link_gbps;
+                    return 0.0;
+                };
+                double max_bw = 0.0;
+                for (const PfPart& p : pf_parts) max_bw = std::max(max_bw, bw_of(p));
+                for (PfPart& p : pf_parts) {
+                    const double bw = bw_of(p);
+                    if (!slow_res_ok || !(bw > 0.0) || bw > 10.0 || 2.0 * bw > max_bw) continue;
+                    if (p.cache->slots() < (p.le - p.lb) * g.n_expert) continue;   // not all its experts resident
+                    const strata::core::OnDevice on(p.dev);
+                    size_t fb = 0, tb = 0;
+                    if (cudaMemGetInfo(&fb, &tb) != cudaSuccess) { (void) cudaGetLastError(); continue; }
+                    const int64_t given_mib = p.dev < 0 ? (o.vram_reserve_given ? o.vram_reserve_mib : 0)
+                                              : o.vram_reserve_later_mib >= 0 ? o.vram_reserve_later_mib
+                                              : (o.vram_reserve_given ? o.vram_reserve_mib : 0);
+                    p.own_room = (int64_t) fb - (3ll << 29) - (std::max<int64_t>(0, given_mib) << 20);
+                    p.slow_own = true;
+                    std::fprintf(stderr, "strata serve: layer split: CUDA%d (link %.1f GB/s) holds all experts of its "
+                                         "layers: it lends nothing, its prompt buffers are its own (%.2f GiB free for them)\n",
+                                 p.dev < 0 ? 0 : p.dev, bw, (double) std::max<int64_t>(0, p.own_room) / 1073741824.0);
+                }
+            }
             // The two tests plan_lend makes for CUDA0 alone, one participant at a time: a loan must leave the
             // 128-slot floor.  The percentage cap is an AUTO-chunk rule and only the auto scan applies it - an
             // explicit --prefill is the operator's number, and a loan of it only has to fit.  With one participant
             // (no split) this reduces to plan_lend exactly, so the single-GPU loan is unchanged from main.
             auto fits_one = [&](const PfPart& p, int64_t c, bool cap) -> bool {
+                if (p.slow_own)
+                    return (int64_t) strata::prefill::Prefill::bytes_needed(g, *p.ses, c, srcp != nullptr) <= p.own_room;
                 const int64_t k = part_slots(p, c);
                 if (k <= 0 || k + g_lend_keep > p.cache->slots()) return false;
                 return !(cap && k * 100 > kAutoLendPct * p.cache->slots());
@@ -10885,6 +10985,7 @@ int main(int argc, char** argv) {
                 int64_t room = cap;
                 for (const PfPart& p : pf_parts) {
                     if (only != nullptr && &p != only) continue;
+                    if (p.slow_own) continue;   // lends nothing (its own buffers are checked by fits_one)
                     // clamped at 0: a cache under 128 slots has a negative lend budget, and `slots - budget` is
                     // then `slots`, which is off_[slots] - the end of the prefix sum, so that cache lends 0 bytes
                     // rather than reading one entry past its offsets
@@ -11074,7 +11175,7 @@ int main(int argc, char** argv) {
                                          "every expert cache\n", (long long) o.prefill_chunk, (long long) chunk);
                 o.prefill_chunk = chunk;
                 for (PfPart& p : pf_parts) {
-                    p.first = (int32_t) (p.cache->slots() - part_slots(p, chunk));
+                    p.first = p.slow_own ? -1 : (int32_t) (p.cache->slots() - part_slots(p, chunk));
                     p.first_now = p.first;
                 }
                 // #340: a split stage whose card still has room for the chunk's buffers (its cache already holds
