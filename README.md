@@ -91,6 +91,14 @@ files by hand.
     local files work as before.
   - **A NaN stays a NaN** in the PLE and prompt path's BF16 conversions, so the NaN guard sees it (sebastianrcnt);
     every other value converts to the same bits.
+  - **A stop token the model writes as text no longer cuts the reply:** asked to write `<|im_end|>`, the model
+    writes the token itself; where no turn can end (a tool call's argument, after an opening backtick or quote, after
+    a space) it is now that token's text and the reply goes on (`"stop_token_text": false` turns it off).
+  - **Parallel dialogs** (`--batch` with `--conversation-cache-mib`): conversation-cache and batch fixes from upstream
+    pull requests #1503, #1163, #1164 (s.anastasiou, BlueKingMuch) and opt-in `--prompt-cache-spread` (#1959, xrip)
+    ([Several dialogs at once](docs/NVFP4.md#several-dialogs-at-once-2026-10-13-branch-extrasparallel-dialogs)).
+    One dialog runs as before.
+  - **A warning** when `--max-context` is past the model's trained 262,144 tokens without rope scaling.
   - **The Monitor shows every GPU:** its role (layer-split stage, peer tier, helper cache, image encoder), VRAM, load,
     temperature, power and PCIe link (current / max, with the engine's measured bandwidth); the Disk card reads the
     model's drives. The Windows bundle's server env gets `psutil` (`update.cmd` installs it).

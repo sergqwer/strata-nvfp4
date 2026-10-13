@@ -452,6 +452,16 @@ Tried and dropped:
   refused; `mmq_nvfp4_parity` builds outside `STRATA_BUILD_TESTS`), `check_isa_guard` knowing `nvfp4_avx512.cpp`,
   setup tests that pin the Windows asset, and a raw NUL byte upstream 0.1.43 put in a char literal of
   `expert_source.cpp` (now `'\0'`, the same code; git had taken the file for binary). Not run on Linux here.
+- **A stop token written as text** (serve): asked to write `<|im_end|>` or `<|endoftext|>`, the model writes the
+  token's id, and the engine stopped on it (16 of 16 such requests cut off, a tool call holding it lost). Where the
+  chat template never ends a turn - inside a tool call's parameter value, after an opening backtick or quotation mark,
+  after a space or tab, closing a ChatML turn the model writes out after its own `<|im_start|>` - the id is written
+  as the token's text and the engine goes on (at most 64 a reply); everywhere else it ends the reply as before (31
+  ordinary requests: no rewrite). `"stop_token_text": false` in the config turns it off.
+- **Parallel dialogs:** see [Several dialogs at once](#several-dialogs-at-once-2026-10-13-branch-extrasparallel-dialogs)
+  (upstream PRs #1503, #1163, #1164, #1959 and the fork's batch fixes; the default single-dialog path is unchanged).
+- **A warning** when `--max-context` is past the model's trained context (262,144) and no rope scaling is active; it
+  names `--rope-scaling yarn --rope-scale <ratio>`. Setup's and the tray's configs stay at 262,144: no new line.
 - **The Monitor** lists every GPU: its engine device and role (layer-split stage and layers, peer tier, helper cache,
   image encoder, unused), VRAM, load, temperature, power and PCIe link (current / max, with the engine's measured
   bandwidth); the Disk card reads the model's drives. The Windows bundle's `.venv-serve` gets `psutil==7.2.2`
@@ -459,14 +469,15 @@ Tried and dropped:
 - **Checks** (RTX 5090 + Ryzen 9 9950X3D, 128 GB; references of 0.1.42-nvfp4.2's engine ddd78216 made with it on
   `qwen-nvfp4-gptq`, the same bits as 0.1.42-nvfp4.1's):
   - 2K and 32K give the same logits and 32 tokens (`--pcie-frac 0.25`, the CPU share 0.5, 6,000 slots), on the port's
-    first build (f2ba8a5c), on 925c7326 with the #7 fixes and on the release build ecdf7aa9 (+ the commits above);
+    first build (f2ba8a5c), on 925c7326 with the #7 fixes, on ecdf7aa9 and 079bf90c with the commits above, and on
+    the release build 81049f34 (every branch above merged);
   - through the server, the tail skip left unset, the 12 KL texts' rows and logpos files are byte for byte those of
     ddd78216 (normal mode, 8,000 slots): the start line says the skip is off for this fork's packs; upstream's IQ2_XS
     GGUF still starts with it on (72.8% of its experts cached, under #1884's line);
   - with every fork default off the logits equal upstream 0.1.43.1's on IQ2_XS (32K, 12,000 slots);
-  - tests: 116 of 119 engine tests pass (the 3 others need model files this PC does not have); the server's 827 OK
-    (17 skipped; 751 before the commits above); setup's and the tools' 821, all but `test_iq_pack` (no `yaml`
-    in that venv).
+  - tests (81049f34): 116 of 119 engine tests pass (the 3 others need model files this PC does not have); the
+    server's 849 OK (17 skipped; 751 before the commits above); setup's and the tools' 821, all but `test_iq_pack`
+    (no `yaml` in that venv).
 - **Decode speed**, 5 interleaved pairs (`bench_prompt.txt`, 1,000 tokens, `--stop-eos`, cache auto): 0.1.42-nvfp4.2's
   engine 178.1 tokens/s (median; mean 168.0 +- 22.9), this one 179.2 (174.1 +- 11.6), the ratio per pair 1.008
   (median); the same misses per layer (2.18) and cache hits (92.9%). Two outlier runs, one on each side, had a slow
