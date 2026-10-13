@@ -11411,6 +11411,16 @@ int main(int argc, char** argv) {
                     own_rewind = true;   // the session holds the checkpoint's tokens: its own conversation
                     for (int64_t i = 0; i < resume && own_rewind; ++i)
                         own_rewind = live[(size_t) i] == (int32_t) ids[(size_t) i];
+                    // ...and resumes from its LAST checkpoint (its own last turn): a sibling that shares only an
+                    // earlier one - the system prompt's root - is another conversation, parked as before.  Without
+                    // this, every sub-agent of up to N tokens past the shared root was dropped when the next one
+                    // started (strata-nvfp4 DLG: 8K sub-agents were never parked with N = 8192).
+                    for (const ConvCheckpoint& c : checks)
+                        if ((int64_t) c.ids.size() > resume) own_rewind = false;
+                    if (own_rewind)
+                        std::fprintf(stderr, "strata serve: conversation cache: not parked: its own last turn again "
+                                             "(%lld tokens left behind, STRATA_PARK_REWIND_MAX=%lld)\n",
+                                     (long long) ((int64_t) live.size() - resume), (long long) rewind_max);
                 }
             }
             if (borrow) {
