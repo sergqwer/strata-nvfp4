@@ -1384,6 +1384,9 @@ class UnfinishedToolCall(unittest.TestCase):
         """(finish reason, the call's arguments) from OpenAI and Anthropic, whole and streamed, for the model's `script`."""
         tok = ByteTokenizer()
         svc = Service(MockEngine(tok, script, max_context=CTX), tok, ChatTemplate(ROOT / "serve/chat_template.jinja"))
+        # the cut is the end-of-turn id inside the call's argument, which stop_token_text writes as the token's text
+        # (test_stop_token_text); off, it ends the output there, as it still does past STOP_TEXT_MAX
+        svc.stop_token_text = False
         httpd = serve(svc, port=0)
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
         tools = {"openai": [{"type": "function", "function": {"name": "write", "parameters": {

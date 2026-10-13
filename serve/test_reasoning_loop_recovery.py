@@ -31,6 +31,9 @@ class ReasoningLoopRecovery(unittest.TestCase):
             '<|im_end|>\n<|im_start|>user\nSolve this unchanged task<|im_end|>\n'
             '<|im_start|>assistant\n<think>\n', parse_special=True)
         self.loop = 'Need maybe Agent support agent seven b. ' * 700
+        # a reply that runs to its end has no whitespace before its end-of-turn token, as the chat template
+        # writes every message (an end after a space is the model writing the token's text: stop_token_text)
+        self.whole = self.loop.rstrip()
 
     def test_repetition_and_novel_work(self):
         self.assertEqual(reasoning_repeat_coverage(' '.join(str(i) for i in range(4000))), 0)
@@ -55,7 +58,7 @@ class ReasoningLoopRecovery(unittest.TestCase):
         self.assertNotIn('</think>', self.tok.decode(prompt))
 
     def run_case(self, enabled):
-        engine = RecordingEngine(self.tok, [self.loop,
+        engine = RecordingEngine(self.tok, [self.whole,
             'I have verified the solution.\n</think>\nComplete solution.'])
         service = Service(engine, self.tok, None)
         service.answer_room = False      # these cases test the loop guards at the cap itself
@@ -161,7 +164,7 @@ class ReasoningLoopRecovery(unittest.TestCase):
         self.assertEqual(events[-1][1]['reasoning_recoveries'], 1)
 
     def test_repeated_final_text_does_not_change_sampler_or_prompt(self):
-        engine = RecordingEngine(self.tok, [self.loop])
+        engine = RecordingEngine(self.tok, [self.whole])
         service = Service(engine, self.tok, None)
         service.answer_room = False      # these cases test the loop guards at the cap itself
         service.reasoning_loop_recovery = True
@@ -170,7 +173,7 @@ class ReasoningLoopRecovery(unittest.TestCase):
         self.assertEqual(events[-1][1]['reasoning_recoveries'], 0)
 
     def test_missing_native_high_hint_skips_recovery(self):
-        engine = RecordingEngine(self.tok, [self.loop])
+        engine = RecordingEngine(self.tok, [self.whole])
         service = Service(engine, self.tok, None)
         service.answer_room = False      # these cases test the loop guards at the cap itself
         service.reasoning_loop_recovery = True

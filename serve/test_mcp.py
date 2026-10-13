@@ -302,6 +302,7 @@ class ToolLoop(unittest.TestCase):
         """#211: the model's turn ends inside an MCP call: nothing runs (it used to run with no arguments)."""
         script = call_script("fake__echo", text="hello from the tool")
         self.start(script[:script.index("from the tool")], "</think>\n\nnever")
+        self.svc.stop_token_text = False    # that end-of-turn id inside the argument is text with it on
         code, text = self.post({"strata_mcp": True})
         self.assertEqual(code, 200, text)
         cs = self.chunks(text)
