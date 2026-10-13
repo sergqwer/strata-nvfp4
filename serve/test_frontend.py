@@ -302,6 +302,37 @@ class QuotedToolCallCloser(unittest.TestCase):
         self.assertEqual(ids, self.tok.encode(text, parse_special=True))
 
 
+class WrappedToolResultWithPicture(unittest.TestCase):
+    """This fork (from its port of #1840, Mert Ozkan): a user message that is a wrapped tool result with a picture
+    between the pair keeps the pair as the markers, as the text-only forms do (#2026 follow-up): the template renders
+    the picture as its vision markers and still reads the turn as a tool result."""
+
+    def test_the_template_reads_it_as_before(self):
+        from serve.frontend import ChatTemplate, LITERAL_TAGS, mark_think_literals, unmark_think_literals
+        tpl = ChatTemplate(Path(__file__).resolve().parent / "chat_template.jinja")
+        wrapped = [{"type": "text", "text": "<tool_response>\nsee "}, {"type": "image", "source": "a.png"},
+                   {"type": "text", "text": "\n</tool_response>"}]
+        messages = [{"role": "user", "content": "run it"},
+                    {"role": "assistant", "content": "", "reasoning_content": "thinking about it",
+                     "tool_calls": [{"function": {"name": "sh", "arguments": {"cmd": "x"}}}]},
+                    {"role": "user", "content": wrapped}]
+        marked, _, _ = mark_think_literals(messages, None, LITERAL_TAGS)
+        self.assertEqual(marked[2]["content"][0]["text"], "<tool_response>\nsee ")      # the pair stays the markers
+        self.assertEqual(marked[2]["content"][2]["text"], "\n</tool_response>")
+        prompt, _ = unmark_think_literals(tpl.render(marked, preserve_thinking=False), LITERAL_TAGS)
+        self.assertEqual(prompt, tpl.render(messages, preserve_thinking=False))
+        self.assertIn("thinking about it", prompt)
+
+    def test_a_quote_inside_is_still_text(self):
+        from serve.frontend import LITERAL_TAGS, mark_think_literals
+        wrapped = [{"type": "text", "text": "<tool_response>\nlog: </tool_call> "}, {"type": "image", "source": "a.png"},
+                   {"type": "text", "text": "\n</tool_response>"}]
+        marked, _, changed = mark_think_literals([{"role": "user", "content": wrapped}], None, LITERAL_TAGS)
+        self.assertTrue(changed)
+        self.assertNotIn("</tool_call>", marked[0]["content"][0]["text"])
+        self.assertTrue(marked[0]["content"][0]["text"].startswith("<tool_response>"))
+
+
 class FencedJsonCallInWrapper(unittest.TestCase):
     """#2037: with recovery on, a declared tool's JSON call in a Markdown fence inside <tool_call> is the call."""
     TOOLS = [{"name": "write_file", "parameters": {"type": "object", "properties": {"content": {"type": "string"}}}}]
