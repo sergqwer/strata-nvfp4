@@ -109,6 +109,32 @@ main { flex: 1; min-height: 0; display: flex; }
 .ctx-gauge__pct { font-weight: var(--st-fw-black); font-size: var(--st-fs-xl); line-height: 1.1; font-variant-numeric: tabular-nums; }
 .bar-row { display: flex; justify-content: space-between; font-size: var(--st-fs-sm); font-weight: var(--st-fw-medium);
            margin-top: var(--st-s-2); font-variant-numeric: tabular-nums; }
+/* the GPUs card: one row per card - who it is, its role, load, VRAM, temperature and power */
+.gpu-card { display: flex; flex-direction: column; gap: var(--st-s-2); }
+.gpu-list { display: flex; flex-direction: column; }
+.gpu-row { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1.15fr) minmax(0, .7fr) minmax(0, 1fr)
+           minmax(0, 1.05fr) 86px; gap: var(--st-s-2) var(--st-s-4); align-items: center;
+           padding: var(--st-s-3) 0; border-top: 1px solid var(--st-line-soft); font-variant-numeric: tabular-nums; }
+.gpu-row:first-child { border-top: 0; }
+.gpu-row[data-role="unused"] .gpu-name, .gpu-row[data-role="unused"] .gpu-vitals { color: var(--st-ink-muted); }
+.gpu-id, .gpu-role, .gpu-bar { min-width: 0; }
+.gpu-name { font-weight: var(--st-fw-medium); font-size: var(--st-fs-md); overflow: hidden; text-overflow: ellipsis;
+            white-space: nowrap; }
+.gpu-idx { display: inline-block; min-width: 46px; margin-right: var(--st-s-2); font-weight: var(--st-fw-bold); color: var(--st-ink); }
+.gpu-id .small, .gpu-role .small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gpu-role .st-badge { margin-bottom: 2px; }
+.gpu-row .gpu-bar .bar-row { margin-top: 0; margin-bottom: 4px; }
+.gpu-link { display: flex; flex-direction: column; min-width: 0; font-size: var(--st-fs-sm); line-height: 1.35; }
+.gpu-link .small { overflow: hidden; text-overflow: ellipsis; }
+.gpu-link__main { font-weight: var(--st-fw-medium); white-space: nowrap; }
+.gpu-link--warn .gpu-link__main { color: var(--st-warn-text); }
+.gpu-link--warn .gpu-link__main::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+                                          background: var(--st-warn); margin-right: 6px; vertical-align: 1px; }
+.gpu-vitals { display: flex; flex-direction: column; align-items: flex-end; font-size: var(--st-fs-sm); line-height: 1.5;
+              white-space: nowrap; }
+.gpu-note:empty { display: none; }
+.gpu-note { margin: 0; }
+.copyable { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
 .req-card { display: flex; flex-direction: column; gap: var(--st-s-3); min-width: 0; }
 .table-wrap { overflow-x: auto; }
 /* Recent requests: keep headings, values and status badges on one line. */
@@ -175,6 +201,8 @@ main { flex: 1; min-height: 0; display: flex; }
   .cc-bars { grid-template-columns: 1fr; }
   .cfg-form { grid-template-columns: 1fr; gap: 4px; }
   .cfg-form .st-input { margin-bottom: var(--st-s-2); }
+  .gpu-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .gpu-vitals { flex-direction: row; align-items: baseline; gap: var(--st-s-4); }
 }
 @media (max-width: 640px) {
   .st-header { padding: 0 var(--st-s-3); gap: var(--st-s-2); }
@@ -187,4 +215,5 @@ main { flex: 1; min-height: 0; display: flex; }
   .monitor, .about { padding: var(--st-s-4); }
   .facts { grid-template-columns: 1fr; gap: 2px; }
   .facts dd { margin-bottom: var(--st-s-2); }
+  .gpu-row { grid-template-columns: minmax(0, 1fr); }
 }
