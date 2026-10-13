@@ -624,10 +624,12 @@ uint8_t* kv_host_alloc(uint64_t bytes) {
 // ---- the elastic K/V (--kv-grow): one VMM range per state, each pool array at a chunk boundary in it
 bool g_kv_elastic = false;
 int64_t g_kv_elastic_init = 16384;
+int g_kv_elastic_owner = 0;   // batch-vram: 0 the main session, 1 + b batch slot b
 struct ElasticPool {
     strata::core::VmmRange range;
     std::vector<uint64_t> off, per_slot;   // each array's offset in the range (whole chunks) and bytes per page slot
     int64_t n_slots = 0, page_size = 0;
+    int owner = 0;
 };
 std::vector<std::unique_ptr<ElasticPool>> g_pools;
 
@@ -682,15 +684,18 @@ void qsa_set_kv_elastic(bool enabled, int64_t init_cells) {
     if (init_cells > 0) g_kv_elastic_init = init_cells;
 }
 bool qsa_kv_elastic() { return g_kv_elastic; }
-int64_t qsa_kv_elastic_cells() {
+void qsa_set_kv_elastic_owner(int owner) { g_kv_elastic_owner = owner; }
+int64_t qsa_kv_elastic_cells(int owner) {
     int64_t cells = std::numeric_limits<int64_t>::max();
-    for (const auto& p : g_pools) cells = std::min<int64_t>(cells, pool_slots_mapped(*p) * p->page_size);
+    for (const auto& p : g_pools)
+        if (p->owner == owner) cells = std::min<int64_t>(cells, pool_slots_mapped(*p) * p->page_size);
     return cells;
 }
-int64_t qsa_kv_elastic_need(int64_t cells) {
+int64_t qsa_kv_elastic_need(int64_t cells, int owner) {
     const uint64_t G = strata::core::vmm_granularity();
     int64_t n = 0;
     for (const auto& p : g_pools) {
+        if (p->owner != owner) continue;
         const int64_t slots = pool_slots(*p, cells);
         for (size_t a = 0; a < p->off.size(); ++a) {
             const int64_t c0 = (int64_t) (p->off[a] / G), c1 = c0 + pool_chunks(*p, a, slots);
@@ -699,15 +704,16 @@ int64_t qsa_kv_elastic_need(int64_t cells) {
     }
     return n;
 }
-bool qsa_kv_elastic_grow(int64_t cells, const std::function<strata::core::VmmChunk()>& take) {
+bool qsa_kv_elastic_grow(int64_t cells, const std::function<strata::core::VmmChunk()>& take, int owner) {
     for (auto& p : g_pools)
-        if (!pool_grow(*p, cells, take)) return false;
+        if (p->owner == owner && !pool_grow(*p, cells, take)) return false;
     return cudaDeviceSynchronize() == cudaSuccess;
 }
-int64_t qsa_kv_elastic_shrink(int64_t cells, const std::function<void(strata::core::VmmChunk)>& give) {
+int64_t qsa_kv_elastic_shrink(int64_t cells, const std::function<void(strata::core::VmmChunk)>& give, int owner) {
     const uint64_t G = strata::core::vmm_granularity();
     int64_t n = 0;
     for (auto& p : g_pools) {
+        if (p->owner != owner) continue;
         const int64_t slots = pool_slots(*p, cells);
         for (size_t a = 0; a < p->off.size(); ++a) {
             const int64_t c0 = (int64_t) (p->off[a] / G), c1 = c0 + pool_chunks(*p, a, slots);
@@ -718,14 +724,16 @@ int64_t qsa_kv_elastic_shrink(int64_t cells, const std::function<void(strata::co
     }
     return n;
 }
-uint64_t qsa_kv_elastic_mapped_bytes() {
+uint64_t qsa_kv_elastic_mapped_bytes(int owner) {
     uint64_t n = 0;
-    for (const auto& p : g_pools) n += (uint64_t) p->range.mapped_count() * strata::core::vmm_granularity();
+    for (const auto& p : g_pools)
+        if (owner < 0 || p->owner == owner) n += (uint64_t) p->range.mapped_count() * strata::core::vmm_granularity();
     return n;
 }
-uint64_t qsa_kv_elastic_full_bytes() {
+uint64_t qsa_kv_elastic_full_bytes(int owner) {
     uint64_t n = 0;
-    for (const auto& p : g_pools) n += (uint64_t) p->range.chunks() * strata::core::vmm_granularity();
+    for (const auto& p : g_pools)
+        if (owner < 0 || p->owner == owner) n += (uint64_t) p->range.chunks() * strata::core::vmm_granularity();
     return n;
 }
 std::vector<std::pair<strata::core::VmmChunk, int64_t>> qsa_kv_elastic_handles() {
@@ -851,6 +859,7 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         pool->per_slot = per;
         pool->n_slots = p.slots;
         pool->page_size = s.page_size;
+        pool->owner = g_kv_elastic_owner;
         if (!pool->range.reserve(at) || !pool_grow(*pool, g_kv_elastic_init, [] { return (strata::core::VmmChunk) 0; })) {
             std::fprintf(stderr, "strata: the elastic K/V could not reserve or map its pools\n");
             return 0;
