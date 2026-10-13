@@ -11093,7 +11093,13 @@ int main(int argc, char** argv) {
                         size_t fb = 0, tb = 0;
                         if (cudaMemGetInfo(&fb, &tb) != cudaSuccess) { (void) cudaGetLastError(); continue; }
                         const uint64_t need = strata::prefill::Prefill::bytes_needed(g, *p.ses, chunk, srcp != nullptr);
-                        if ((uint64_t) fb >= need + (3ull << 29)) {
+                        // extras/mgpu-fixes: a GIVEN --vram-reserve-mib / --vram-reserve-later-mib is not room for
+                        // these buffers (it was: with --vram-reserve-mib 8192 a 24 GB stage put 6.2 GiB of prompt
+                        // buffers into the 8 GiB it was told to leave alone).  The default reserve keeps the old test.
+                        const int64_t given_mib = p.dev < 0 ? (o.vram_reserve_given ? o.vram_reserve_mib : 0)
+                                                  : o.vram_reserve_later_mib >= 0 ? o.vram_reserve_later_mib
+                                                  : (o.vram_reserve_given ? o.vram_reserve_mib : 0);
+                        if ((uint64_t) fb >= need + (3ull << 29) + ((uint64_t) std::max<int64_t>(0, given_mib) << 20)) {
                             std::fprintf(stderr, "strata serve:   CUDA%d keeps its own prompt buffers (%.2f GiB of "
                                                  "%.2f GiB free): no loan\n", p.dev < 0 ? 0 : p.dev,
                                          (double) need / 1073741824.0, (double) fb / 1073741824.0);
