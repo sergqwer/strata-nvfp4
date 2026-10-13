@@ -282,6 +282,140 @@ __global__ void __launch_bounds__(128) block_scores_tc_kernel(const float* __res
     }
 }
 
+// STRATA_ROPE_FAR (rope_far.hpp): block_scores_tc_kernel with far blocks scored at their compressed distance.  The
+// remap of key block b (rotation position 4b) for query position L is R(d - w) on the rotary pairs, d = L - 4b; as
+// R(d - w) = R(L - w) R(-4b), it is (R(-(L - w)) q) . (R(-4b) k): a turned copy of every query and of every key, so
+// the products stay one GEMM - rotary dims twice (near and far), the other 64 once, picked per (query, block).
+constexpr int TF_RS = IDX_HEADS * 64 + 4;        // far query row stride (the rotary dims of the 4 heads)
+constexpr int TF_KS = 64 + 4;                    // far key row stride
+__device__ __forceinline__ void far_pair(const float* cs, int64_t x, int i, float a, float b, float& oa, float& ob) {
+    const float c = __ldg(cs + x * 64 + 2 * i), sn = __ldg(cs + x * 64 + 2 * i + 1);
+    oa = a * c + b * sn;        // turned by minus the angle
+    ob = b * c - a * sn;
+}
+__global__ void __launch_bounds__(128) block_scores_tc_far_kernel(const float* __restrict__ pooled,
+                                                                  const float* __restrict__ q_idx,
+                                                                  const int32_t* __restrict__ steps, int64_t nq,
+                                                                  int64_t max_blocks, int64_t reach,
+                                                                  float* __restrict__ out, RopeFarDev far) {
+    extern __shared__ __align__(16) float sm[];
+    float* sQ = sm;                                   // [TC_QT][TC_QS]
+    float* sK = sm + TC_QT * TC_QS;                   // [TC_NB][TC_KS]
+    float* sQf = sK + TC_NB * TC_KS;                  // [TC_QT][TF_RS]
+    float* sKf = sQf + TC_QT * TF_RS;                 // [TC_NB][TF_KS]
+    __shared__ int s_nbid[TC_QT], s_pos[TC_QT];
+    const int t = threadIdx.x, lane = t & 31, warp = t >> 5, gid = lane >> 2, tig = lane & 3;
+    const int64_t q0 = (int64_t) blockIdx.y * TC_QT;
+    const int w = __ldg(far.ctl);
+    for (int i = t; i < TC_QT * IDX_HEADS * IDX_DIM / 4; i += 128) {
+        const int r = i / (IDX_HEADS * IDX_DIM / 4), c = i % (IDX_HEADS * IDX_DIM / 4);
+        float4 v = make_float4(0.f, 0.f, 0.f, 0.f);
+        if (q0 + r < nq) v = reinterpret_cast<const float4*>(q_idx + (q0 + r) * IDX_HEADS * IDX_DIM)[c];
+        *reinterpret_cast<float4*>(sQ + r * TC_QS + c * 4) = v;
+    }
+    if (t < TC_QT) {
+        s_nbid[t] = q0 + t < nq ? steps[(q0 + t) * kStepCount + kStepNBid] : 0;
+        s_pos[t] = q0 + t < nq ? steps[(q0 + t) * kStepCount + kStepPos] : 0;
+    }
+    int lo_nbid = 0x7fffffff, hi_nbid = 0;
+    __syncthreads();
+    for (int i = t; i < TC_QT * IDX_HEADS * 32; i += 128) {   // the far queries: R(-(L - w)) on each head's pairs
+        const int r = i / (IDX_HEADS * 32), h = (i / 32) % IDX_HEADS, pr = i % 32;
+        const float a = sQ[r * TC_QS + h * IDX_DIM + pr], b = sQ[r * TC_QS + h * IDX_DIM + pr + 32];
+        float oa = a, ob = b;
+        const int64_t x = (int64_t) s_pos[r] - w;
+        if (x >= 0 && x < far.max_m) far_pair(far.cs, x, pr, a, b, oa, ob);
+        sQf[r * TF_RS + h * 64 + pr] = oa;
+        sQf[r * TF_RS + h * 64 + pr + 32] = ob;
+    }
+    for (int i = 0; i < TC_QT; ++i) {
+        if (q0 + i >= nq) break;
+        lo_nbid = min(lo_nbid, s_nbid[i]);
+        hi_nbid = max(hi_nbid, s_nbid[i]);
+    }
+    for (int it = 0; it < TC_ITER; ++it) {
+        const int64_t b0 = ((int64_t) blockIdx.x * TC_ITER + it) * TC_NB;
+        if (b0 >= reach || b0 >= hi_nbid) break;
+        __syncthreads();
+        for (int i = t; i < TC_NB * IDX_DIM / 4; i += 128) {
+            const int r = i / (IDX_DIM / 4), c = i % (IDX_DIM / 4);
+            float4 v = make_float4(0.f, 0.f, 0.f, 0.f);
+            if (b0 + r < hi_nbid) v = reinterpret_cast<const float4*>(pooled + (b0 + r) * IDX_DIM)[c];
+            *reinterpret_cast<float4*>(sK + r * TC_KS + c * 4) = v;
+        }
+        __syncthreads();
+        for (int i = t; i < TC_NB * 32; i += 128) {   // the far keys: R(-4b)
+            const int r = i / 32, pr = i % 32;
+            const float a = sK[r * TC_KS + pr], b = sK[r * TC_KS + pr + 32];
+            float oa = a, ob = b;
+            const int64_t x = (b0 + r) * R;
+            if (x < far.max_m) far_pair(far.cs, x, pr, a, b, oa, ob);
+            sKf[r * TF_KS + pr] = oa;
+            sKf[r * TF_KS + pr + 32] = ob;
+        }
+        __syncthreads();
+        float acc[IDX_HEADS][4], accf[IDX_HEADS][4], accp[IDX_HEADS][4];
+#pragma unroll
+        for (int h = 0; h < IDX_HEADS; ++h)
+#pragma unroll
+            for (int j = 0; j < 4; ++j) acc[h][j] = accf[h][j] = accp[h][j] = 0.f;
+        const float* kr = sK + (warp * 8 + gid) * TC_KS;
+        const float* kfr = sKf + (warp * 8 + gid) * TF_KS;
+        auto step = [&](const float* krow, int kk, const float* qbase, int qstride, int qk, float (&a)[IDX_HEADS][4],
+                        int hstride) {
+            const float kx0 = krow[kk + tig], kx1 = krow[kk + tig + 4];
+            uint32_t bh[2], bl[2];
+            bh[0] = tf32_hi(kx0);
+            bh[1] = tf32_hi(kx1);
+            bl[0] = tf32_hi(kx0 - __uint_as_float(bh[0]));
+            bl[1] = tf32_hi(kx1 - __uint_as_float(bh[1]));
+#pragma unroll
+            for (int h = 0; h < IDX_HEADS; ++h) {
+                const float* qa = qbase + h * hstride + qk + tig;
+                const float x0 = qa[gid * qstride], x1 = qa[(gid + 8) * qstride];
+                const float x2 = qa[gid * qstride + 4], x3 = qa[(gid + 8) * qstride + 4];
+                uint32_t ah[4], al[4];
+                ah[0] = tf32_hi(x0); ah[1] = tf32_hi(x1); ah[2] = tf32_hi(x2); ah[3] = tf32_hi(x3);
+                al[0] = tf32_hi(x0 - __uint_as_float(ah[0]));
+                al[1] = tf32_hi(x1 - __uint_as_float(ah[1]));
+                al[2] = tf32_hi(x2 - __uint_as_float(ah[2]));
+                al[3] = tf32_hi(x3 - __uint_as_float(ah[3]));
+                mma_tf32(a[h], al, bh);
+                mma_tf32(a[h], ah, bl);
+                mma_tf32(a[h], ah, bh);
+            }
+        };
+#pragma unroll 1
+        for (int k0 = 0; k0 < 64; k0 += 8) {
+            step(kr, k0, sQ, TC_QS, k0, acc, IDX_DIM);
+            step(kfr, k0, sQf, TF_RS, k0, accf, 64);
+        }
+#pragma unroll 1
+        for (int k0 = 64; k0 < IDX_DIM; k0 += 8) step(kr, k0, sQ, TC_QS, k0, accp, IDX_DIM);
+        const int64_t bc = b0 + warp * 8 + 2 * tig;
+#pragma unroll
+        for (int half = 0; half < 2; ++half) {
+            const int qr = gid + half * 8;
+            const int64_t qi = q0 + qr;
+            if (qi >= nq) continue;
+            const int nb = s_nbid[qr];
+#pragma unroll
+            for (int j = 0; j < 2; ++j) {
+                const int64_t b = bc + j;
+                if (b >= nb || b >= max_blocks) continue;
+                const bool is_far = (int64_t) s_pos[qr] - b * R > w;
+                float score = 0.0f;
+#pragma unroll
+                for (int h = 0; h < IDX_HEADS; ++h) {
+                    const float d = (is_far ? accf[h][half * 2 + j] : acc[h][half * 2 + j]) + accp[h][half * 2 + j];
+                    score += d > 0.0f ? d : 0.0f;
+                }
+                out[qi * max_blocks + b] = score;
+            }
+        }
+    }
+}
+
 #if defined(__HIPCC__)
 // ---- gfx12 (RDNA4: gfx1200 / gfx1201) scorer on v_wmma_f32_16x16x16_bf16 (wave32).  Same GEMM as above: for a tile of 16
 // queries, every block's score is sum over the 4 indexer heads of relu(q_h . k), K = 128.  FP32-level accuracy from a
@@ -1204,6 +1338,27 @@ bool qsa_block_scores_tc(const float* pooled, const float* dead, const float* q_
     static bool attr[64] = {};   // the shared-memory opt-in is per device (a layer split runs it on several)
     int adev = 0;
     cudaGetDevice(&adev);
+    if (rope_far_on()) {   // STRATA_ROPE_FAR: the far variant (its own shared-memory size)
+        static bool fattr[64] = {};
+        const int fbytes = (TC_QT * TC_QS + TC_NB * TC_KS + TC_QT * TF_RS + TC_NB * TF_KS) * (int) sizeof(float);
+        if (!fattr[adev]) {
+            if (cudaFuncSetAttribute(block_scores_tc_far_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, fbytes) !=
+                cudaSuccess) {
+                cudaGetLastError();
+                return false;
+            }
+            fattr[adev] = true;
+        }
+        const int64_t reach = active_blocks > 0 && active_blocks < max_blocks ? active_blocks : max_blocks;
+        const int64_t per = (int64_t) TC_NB * TC_ITER;
+        const dim3 grid((unsigned) ((reach + per - 1) / per), (unsigned) ((nq + TC_QT - 1) / TC_QT));
+        block_scores_tc_far_kernel<<<grid, 128, fbytes, (cudaStream_t) stream>>>(pooled, q_idx, steps, nq, max_blocks,
+                                                                                  reach, scores, rope_far());
+        block_scores_tail_kernel<<<(unsigned) nq, 32, 0, (cudaStream_t) stream>>>(dead, q_idx, steps, max_blocks, scores);
+        const cudaError_t e = cudaGetLastError();
+        if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_scores_tc (far): %s\n", cudaGetErrorString(e)); std::exit(1); }
+        return true;
+    }
     const int bytes = (TC_QT * TC_QS + TC_NB * TC_KS) * (int) sizeof(float);
     if (!attr[adev]) {
         if (cudaFuncSetAttribute(block_scores_tc_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes) !=
