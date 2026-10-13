@@ -784,7 +784,8 @@ async function loadConfig() {
       const opts = k.kind === "bool" ? [["true", "on"], ["false", "off"]]
         : k.choices.map((x) => Array.isArray(x) ? [String(x[0]), String(x[1])] : [x, x]);
       const cur = v == null ? "" : String(v);
-      input = `<select class="st-input" id="${id}"${dis}><option value=""${cur === "" ? " selected" : ""}>${def}</option>` +
+      input = `<select class="st-input" id="${id}"${dis}>` +   // required: no empty choice once the file has a value
+        (k.required && v != null ? "" : `<option value=""${cur === "" ? " selected" : ""}>${def}</option>`) +
         opts.map(([val, text]) => `<option value="${esc(val)}"${cur === val ? " selected" : ""}>${esc(text)}</option>`).join("") + `</select>`;
     } else {
       const text = v == null ? "" : Array.isArray(v) ? v.join(", ") : String(v);
