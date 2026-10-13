@@ -12825,10 +12825,17 @@ int main(int argc, char** argv) {
             }
             return true;
         };
-        // STRATA_SPLIT_MTP_BATCH=1 (default off): the layer split's drafter is on the last stage, so E-9 (Prefill::draft_kv)
-        // runs there, on the Prefill that ran the chunk, instead of the drafter's own per-8-row pass.  The drafts' K/V
-        // come from Q8_1 x Q8_0 MMQ rather than mmvq: drafts may differ, the target's tokens never.
-        static const bool split_mtp_batch = strata::program::draft_kv::split_env_on(std::getenv("STRATA_SPLIT_MTP_BATCH"));
+        // STRATA_SPLIT_MTP_BATCH: the layer split's drafter is on the last stage, so E-9 (Prefill::draft_kv) runs there,
+        // on the Prefill that ran the chunk, instead of the drafter's own per-8-row pass.  The drafts' K/V come from
+        // Q8_1 x Q8_0 MMQ rather than mmvq: drafts may differ, the target's tokens never.
+        // extras/mgpu-fixes: ON by default (=0 restores the per-8-row pass).  The per-8-row pass is one graph launch and
+        // four device copies per 8 prompt rows (4,000 groups for 32K) - on a split it is the one prompt cost that one GPU
+        // never pays (one GPU always batches).  Measured: 4x 4090 rental (P2/s4_mtpbatch) 32K 3880 -> 4040 tok/s, decode
+        // 154.9 -> 156.9; 2x 3080 (docs/MULTI_GPU.md) +3-7% prompt, greedy output identical.
+        static const bool split_mtp_batch = [] {
+            const char* v = std::getenv("STRATA_SPLIT_MTP_BATCH");
+            return v == nullptr || strata::program::draft_kv::split_env_on(v);
+        }();
         sp.on_chunk = [&](const float* R_rows, int64_t T, int64_t p0, std::string& e) -> bool {
             // KVA: a chunk the late layers did not compute has no real final rows: its draft cells are neither built
             // nor read (the floor rises before the cells are built, so they are skipped)
@@ -12851,7 +12858,7 @@ int main(int argc, char** argv) {
                             std::fprintf(stderr, "strata serve: draft layer prompt K/V batched on CUDA%d (E-9 on the layer "
                                                  "split, K/V mode %d)\n", stages.back()->dev, mtp.kv_state().kv_mode);
                         else
-                            std::fprintf(stderr, "strata serve: STRATA_SPLIT_MTP_BATCH=1 declined, the drafter's own pass "
+                            std::fprintf(stderr, "strata serve: the batched draft K/V (STRATA_SPLIT_MTP_BATCH) declined, the drafter's own pass "
                                                  "runs: %s\n", why);
                     }
                 }
