@@ -76,6 +76,14 @@ class Apply(unittest.TestCase):
         self.assertNotIn("api_key", got)
         self.assertNotIn("mcp_servers", got)
 
+    def test_sections_and_the_grid(self):
+        keys = runconfig.view(CFG, "x/strata-q2_0.json")["keys"]
+        self.assertEqual(keys[0]["section"], "Sampling defaults")
+        self.assertEqual(sum("section" in k for k in keys), len(runconfig.SECTIONS))
+        css = (ROOT / "serve" / "web" / "app.css").read_text(encoding="utf-8")
+        rule = css[css.index(".cfg-form {"):].split("}", 1)[0]
+        self.assertNotIn("max-content", rule)   # a long help took the whole row and pushed the controls out of the card
+
 
 class Uncensored(unittest.TestCase):
     """The censorship switch's default ("uncensored", 0.1.41-nvfp4.7): settable where setup loaded the refusal
