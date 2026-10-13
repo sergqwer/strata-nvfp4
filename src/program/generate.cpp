@@ -4060,6 +4060,9 @@ int main(int argc, char** argv) {
                                  kPipeWindowMib + (drafter ? kDrafterMib : 0)) << 20;
         return std::max<int64_t>((int64_t) fb - reserve, 0);
     };
+    // extras/mgpu-fixes: the split search's own link readings (CUDA0, then the stages in order), for serve's slow-link
+    // rule when a given --pcie-frac skipped the stage probes
+    std::vector<double> split_link_gbps;
     if (multi_gpu && split_auto) {
         const auto& lay = strata::kernels::cpu::expert_layout();
         const int ns = (int) stages.size() + 1;
@@ -4094,6 +4097,8 @@ int main(int argc, char** argv) {
             // Never below 1.0: a link at or above the 20 GB/s reference keeps the fitted cost exactly (a x16
             // gen4/5 reads 26-28 and must not credit misses below the formula the sweep's K was fitted with).
             if (bw > 0.0) link_scale[(size_t) i] = std::clamp(20.0 / bw, 1.0, 64.0);
+            split_link_gbps.resize((size_t) ns, 0.0);
+            split_link_gbps[(size_t) i] = std::max(0.0, bw);
             std::fprintf(stderr, "strata generate: layer split auto: CUDA%d link %.1f GB/s -> miss cost x%.2f\n",
                          dev, bw, link_scale[(size_t) i]);
         }
@@ -4355,18 +4360,24 @@ int main(int argc, char** argv) {
         std::vector<int64_t> layer_pairs((size_t) g.n_layers, 0);
         for (const auto& pr : profile)
             if (pr.first >= 0 && pr.first < g.n_layers) ++layer_pairs[(size_t) pr.first];
+        // stage i on [lb, le) with `held` pairs filled using `used_b` bytes: all its layers' profiled pairs held, and
+        // room for its own buffers (memoised per lb: chunk_bytes builds a session per call)
+        std::vector<int64_t> slow_need((size_t) g.n_layers + 1, -1);
+        auto slow_stage_ok = [&](int i, int64_t lb, int64_t le, int64_t held, int64_t used_b) -> bool {
+            int64_t pairs = 0;
+            for (int64_t l = lb; l < le; ++l) pairs += layer_pairs[(size_t) l];
+            if (held < pairs) return false;
+            if (slow_need[(size_t) lb] < 0)
+                slow_need[(size_t) lb] = (int64_t) chunk_bytes(lb, slow_chunk) +
+                                         384 * (int64_t) strata::kernels::cpu::expert_layout().max_blob + (3ll << 29);
+            return stage_left(i, lb, le) - used_b >= slow_need[(size_t) lb];
+        };
         // after `predict(at)`: every slow stage holds all its layers' profiled pairs and has room for its own buffers
         auto slow_ok = [&](const std::vector<int64_t>& cuts) -> bool {
             for (int i = 0; i < ns; ++i) {
                 if (!slow_stage[(size_t) i]) continue;
                 const int64_t lb = i == 0 ? 0 : cuts[(size_t) i - 1], le = i + 1 < ns ? cuts[(size_t) i] : g.n_layers;
-                int64_t pairs = 0;
-                for (int64_t l = lb; l < le; ++l) pairs += layer_pairs[(size_t) l];
-                if (held_cnt[(size_t) i] < pairs) return false;
-                const int64_t left = stage_left(i, lb, le) - used[(size_t) i];
-                const int64_t need = (int64_t) chunk_bytes(lb, slow_chunk) +
-                                     384 * (int64_t) strata::kernels::cpu::expert_layout().max_blob + (3ll << 29);
-                if (left < need) return false;
+                if (!slow_stage_ok(i, lb, le, held_cnt[(size_t) i], used[(size_t) i])) return false;
             }
             return true;
         };
@@ -4474,6 +4485,15 @@ int main(int argc, char** argv) {
                                           (double) (k3 - k2) * layer_ms[2] + (double) (L - k3) * layer_ms[3];
                         if (min_stage_layers > 1 &&
                             strata::program::split_rules::smallest_stage({k1, k2, k3}, L) < min_stage_layers) continue;
+                        if (any_slow && slow_gate_on) {   // extras/mgpu-fixes: a slow-link stage fully resident
+                            const int64_t lbs[4] = {0, k1, k2, k3}, les[4] = {k1, k2, k3, L};
+                            const size_t keys[4] = {a, b, c, d};
+                            bool ok = true;
+                            for (int i = 0; ok && i < 4; ++i)
+                                if (slow_stage[(size_t) i])
+                                    ok = slow_stage_ok(i, lbs[i], les[i], held_at[keys[i]], used_at[keys[i]]);
+                            if (!ok) continue;
+                        }
                         ++tried;
                         const double mx = stage_max({k1, k2, k3});
                         if (!(ms < best_ms - tie_eps || (ms <= best_ms + tie_eps && mx < best_max - tie_eps))) continue;
@@ -4507,13 +4527,13 @@ int main(int argc, char** argv) {
         }
         };
         search();
-        if (any_slow) {
-            if (best.empty() || ns == 4) {
-                if (ns != 4)
-                    std::fprintf(stderr, "strata generate: layer split auto: no placement lets the slow-link card hold "
-                                         "all experts of its layers and its own prompt buffers; choosing as before\n");
+        if (any_slow && ns > 4) slow_gate_on = false;   // beyond four GPUs: the proportional guess only
+        if (any_slow && slow_gate_on) {
+            if (best.empty()) {
+                std::fprintf(stderr, "strata generate: layer split auto: no placement lets the slow-link card hold "
+                                     "all experts of its layers and its own prompt buffers; choosing as before\n");
                 slow_gate_on = false;
-                if (best.empty()) search();
+                search();
             } else {
                 std::string sl;
                 for (int i = 0; i < ns; ++i)
@@ -7464,8 +7484,13 @@ int main(int argc, char** argv) {
                     return v == nullptr || v[0] != '0';
                 }();
                 auto bw_of = [&](const PfPart& p) -> double {
-                    if (p.dev < 0) return o.pcie_probe_gbps;
-                    for (auto& st : stages) if (st->dev == p.dev) return st->link_gbps;
+                    // the start-up probes; skipped under a given --pcie-frac, then the split search's own reading
+                    if (p.dev < 0) return o.pcie_probe_gbps > 0.0 ? o.pcie_probe_gbps
+                                          : split_link_gbps.empty() ? 0.0 : split_link_gbps[0];
+                    for (size_t k = 0; k < stages.size(); ++k)
+                        if (stages[k]->dev == p.dev)
+                            return stages[k]->link_gbps > 0.0 ? stages[k]->link_gbps
+                                   : k + 1 < split_link_gbps.size() ? split_link_gbps[k + 1] : 0.0;
                     return 0.0;
                 };
                 double max_bw = 0.0;
