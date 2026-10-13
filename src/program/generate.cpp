@@ -7181,6 +7181,50 @@ int main(int argc, char** argv) {
         if (kvg_audit) kvg_audit("trim", true);
         return true;
     };
+    // batch-oom: a window graph that finds no VRAM (Verifier::set_vram_relief): the slots just below [lo, top) give up
+    // their experts (the CPU computes those, as any miss) and their chunks go back to the driver.  The cache stays that
+    // much smaller.  Run on a quiet device (as kvg_ensure's `quiesce`).  Returns the bytes freed.
+    auto kvg_release = [&](int64_t bytes) -> int64_t {
+        if (!kvg.on || bytes <= 0) return 0;
+        strata::core::VmmRange& r = *xcache.vmm_range();
+        const int64_t G = (int64_t) strata::core::vmm_granularity();
+        const int64_t want = (bytes + G - 1) / G;
+        auto freeable = [&]() -> int64_t {   // mapped chunks wholly inside [lo, top)
+            const int64_t c0 = (int64_t) ((xcache.slot_offset(kvg.lo) + G - 1) / G);
+            const int64_t c1 = (int64_t) (xcache.slot_offset(kvg.top) / G);
+            int64_t k = 0;
+            for (int64_t c = c0; c < c1; ++c) k += r.mapped(c) ? 1 : 0;
+            return k;
+        };
+        std::vector<int32_t> owner;
+        int64_t gave = 0;
+        while (freeable() < want && kvg.lo > kvg.floor) {
+            if (owner.empty()) {
+                owner.assign((size_t) xcache.slots(), -1);
+                for (size_t i = 0; i < host_res.size(); ++i)
+                    if (host_res[i] >= 0 && host_res[i] < xcache.slots()) owner[(size_t) host_res[i]] = (int32_t) i;
+            }
+            --kvg.lo;
+            ++gave;
+            if (const int32_t oi = owner[(size_t) kvg.lo]; oi >= 0) {
+                host_res[(size_t) oi] = strata::core::kNotResident;
+                ++kvg.evicted;
+            }
+        }
+        if (gave > 0 && res_put(d_res) != cudaSuccess) return 0;   // (it waits for its copy)
+        int64_t n = 0;
+        const int64_t c0 = (int64_t) ((xcache.slot_offset(kvg.lo) + G - 1) / G);
+        const int64_t c1 = (int64_t) (xcache.slot_offset(kvg.top) / G);
+        for (int64_t c = c0; c < c1 && n < want; ++c)
+            if (r.mapped(c))
+                if (const strata::core::VmmChunk h = r.unmap(c)) { strata::core::vmm_chunk_free(h); ++n; }
+        if (n == 0) return 0;
+        std::fprintf(stderr, "strata: the expert cache gave %lld slots (%lld MiB) back to the driver for a window graph "
+                             "(%lld of %lld slots hold experts)\n", (long long) gave, (long long) ((n * G) >> 20),
+                     (long long) (kvg.lo + (xcache.slots() - kvg.top)), (long long) xcache.slots());
+        if (kvg_audit) kvg_audit("release", true);
+        return n * G;
+    };
     // ---- the resident RAM mode (--resident-experts / --resident-cpu-experts): the experts the GPU cache does not
     // hold are copied from experts.bin into RAM once, so no decode or prompt step reads the file (the plain mmap
     // mode reads them through the OS file cache, which a small-RAM PC keeps giving back to the SSD).  Built here,
@@ -9206,11 +9250,19 @@ int main(int argc, char** argv) {
             int32_t* pairs;
             ~PreLaunchOff() {
                 v.set_pre_launch(nullptr);
+                v.set_vram_relief(nullptr);
                 for (auto& st : stages) st->ver.set_pre_launch(nullptr);
                 d.dres_check = nullptr;
                 if (pairs != nullptr) cudaFreeHost(pairs);
             }
         } pre_launch_off{ver, stages, drive.d, res_pairs};
+        // batch-oom: a window graph with no VRAM left (after the verifier freed its own graphs) takes expert cache slots
+        if (kvg.on)
+            ver.set_vram_relief([&](size_t bytes) -> size_t {
+                if (cudaDeviceSynchronize() != cudaSuccess) return 0;
+                apply_pending(true);   // a swap in flight could still be writing a slot given up here
+                return (size_t) kvg_release((int64_t) bytes);
+            });
         if (serial_windows && (drive.d.fetch_admit > 0 || drive.d.evict_sync || res_checking)) {
             ver.set_pre_launch([&](cudaStream_t, std::string& e) { return res_sync(res_checking, e); });
             for (auto& st : stages) st->ver.set_pre_launch([&](cudaStream_t, std::string& e) { return res_sync(false, e); });
@@ -10479,6 +10531,27 @@ int main(int argc, char** argv) {
             }
             const Clock::time_point w0 = Clock::now();
             if (!ver.run_slot_rows(rows, S, tok, pos, win_pool_fn, win_pool_user, outb, err) || drive.d.failed) {
+                // batch-oom: a window graph that found no VRAM after every graph and cache slot that could go went (a
+                // stage after the first may have run its part): the window's slots end as #879's do (their state is
+                // not kept), the engine goes on
+                if (!drive.d.failed && err.find("instantiate: ") != std::string::npos &&
+                    err.find("out of memory") != std::string::npos) {
+                    std::fprintf(stderr, "strata batch: no VRAM for this window's graphs (%s): its %d slot%s end here "
+                                         "(BDONE nonfinite), the engine goes on - a larger --vram-reserve-mib or a "
+                                         "smaller parallel avoids it\n", err.c_str(), A, A == 1 ? "" : "s");
+                    for (int a = 0; a < A; ++a) {
+                        BSlot& sl = bs[(size_t) active[a]];
+                        const double ms = std::chrono::duration<double, std::milli>(Clock::now() - sl.t0).count();
+                        std::printf("BDONE %d %lld nonfinite %.1f\n", active[a], (long long) sl.produced, ms);
+                        sl.active = false;
+                        sl.cached = false;
+                        sl.checks.clear();
+                    }
+                    std::fflush(stdout);
+                    strata::core::progress().busy.store(was_busy);
+                    err.clear();
+                    return true;
+                }
                 std::printf("ERR %s\n", drive.d.failed && drive.d.fail ? drive.d.fail : err.c_str());
                 return false;
             }
