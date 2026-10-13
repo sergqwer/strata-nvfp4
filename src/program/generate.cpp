@@ -3390,6 +3390,44 @@ int main(int argc, char** argv) {
                                  "(STRATA_ARENA_PIN_GIB changes it)\n");
         return pin_env >= 0 ? (uint64_t) pin_env << 30 : pin_wddm_cap ? (8ull << 30) : 0;
     };
+    // extras/wddm-pin: per-stage registration.  Each stage's layers are registered in ITS device's context without
+    // cudaHostRegisterPortable, so under WDDM adapter k charges only stage k's share of the arena to its shared
+    // (non-local) segment - a portable pin is mapped into every context and charged to every adapter, which is why
+    // a split under WDDM was capped at 8 GiB in all (#253).  The cap is now per stage: STRATA_ARENA_PIN_GIB=N GiB
+    // each (0: none), unset under WDDM 8 GiB each (as much per adapter as the portable cap charged each before).
+    // Default on under WDDM on a multi-GPU layer split; STRATA_ARENA_PIN_PER_STAGE=1 forces it on any split (Linux,
+    // --split-device 0: one context, the same code path), =0 keeps the portable registration.  True: the arena's slices
+    // have their owners (set_arena_slice_devices) and the open takes no cap of its own.
+    auto arena_per_stage = [&]() -> bool {
+        const int per_stage_env = strata::core::arena_pin_per_stage_env();
+        if (split_at.empty() || !(multi_gpu || split_same) || o.mmap_experts ||
+            !(per_stage_env == 1 || (per_stage_env == -1 && multi_gpu && under_wddm())))
+            return false;
+        int d0 = 0;
+        if (cudaGetDevice(&d0) != cudaSuccess) { (void) cudaGetLastError(); d0 = 0; }
+        std::vector<int> owner((size_t) g.n_layers, d0), stage_of_l((size_t) g.n_layers, 0);
+        int max_dev = d0;
+        for (int64_t l = 0; l < g.n_layers; ++l) {
+            size_t st = 0;
+            while (st < split_at.size() && l >= split_at[st]) ++st;
+            const int d = st == 0 || split_same || st - 1 >= split_devs.size() ? d0 : split_devs[st - 1];
+            owner[(size_t) l] = d;
+            stage_of_l[(size_t) l] = (int) st;
+            max_dev = std::max(max_dev, d);
+        }
+        const int pin_env = strata::core::arena_pin_cap_gib();   // -1 unset, -2 auto, 0 none, N GiB
+        const uint64_t per_cap = pin_env > 0 ? (uint64_t) pin_env << 30 :
+                                 pin_env == -1 && multi_gpu && under_wddm() ? (8ull << 30) : 0;
+        strata::core::set_arena_slice_devices(owner, std::vector<uint64_t>((size_t) max_dev + 1, per_cap), stage_of_l);
+        char capb[96];
+        if (per_cap > 0) std::snprintf(capb, sizeof capb, "at most %llu GiB per GPU", (unsigned long long) (per_cap >> 30));
+        else std::snprintf(capb, sizeof capb, "no cap");
+        std::fprintf(stderr, "strata generate: expert arena: registered per stage, each stage's layers in its own CUDA "
+                             "context (not portable; STRATA_ARENA_PIN_PER_STAGE=%s), %s (%s)\n",
+                     per_stage_env == 1 ? "1" : "unset: multi-GPU under WDDM", capb,
+                     pin_env > 0 ? "STRATA_ARENA_PIN_GIB" : per_cap > 0 ? "the WDDM default" : "STRATA_ARENA_PIN_GIB=0 or not WDDM");
+        return true;
+    };
     // This fork, #7: one GPU only.  On a layer split, with a peer device or helper caches the arena (mlock and up to
     // 8 GiB of cudaHostRegister under WDDM) would be made before the other cards' contexts, which upstream creates
     // first: under WSL2 (about 1 GiB of pinned memory) CUDA1's context can then be refused ("cudaSetDevice(1) failed:
@@ -3405,7 +3443,7 @@ int main(int argc, char** argv) {
     } arena_joiner{arena_thread};
     if (!o.mmap_experts) arena_src.set_gguf(o.native_preset);   // plan v0.3 P6: a native pack may take its experts from shard 1
     if (arena_async) {
-        const uint64_t pin_limit = arena_pin_limit();
+        const uint64_t pin_limit = arena_per_stage() ? 0 : arena_pin_limit();   // extras/wddm-pin: --split-device 0
         int arena_dev = 0;
         cudaGetDevice(&arena_dev);
         strata::prefill::gemm_prewarm(o.prefill_chunk > 0);   // with the prompt path's GEMM kernels
@@ -5217,7 +5255,10 @@ int main(int argc, char** argv) {
         // take the layers from 0 up - on a 2-GPU NVFP4 split ~6 layers of CUDA0 and none of the later stages, whose
         // PCIe share then acts nowhere and whose prompt streams all go through the host staging copies.  The stages
         // now take the cap's layers in turn (each from its first layer up).  STRATA_ARENA_PIN_SPREAD=0: from layer 0.
-        if (multi_gpu && !arena_async && !split_at.empty()) {
+        // extras/wddm-pin: per-stage registration (arena_per_stage above); otherwise the portable one and its cap
+        const bool per_stage_pin = !arena_async && arena_per_stage();
+        const uint64_t arena_cap_bytes = arena_async || per_stage_pin ? 0 : arena_pin_limit();
+        if (multi_gpu && !arena_async && !split_at.empty() && !per_stage_pin) {
             static const bool spread_ok = [] {
                 const char* v = std::getenv("STRATA_ARENA_PIN_SPREAD");
                 return v == nullptr || v[0] != '0';
@@ -5241,7 +5282,7 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "strata generate: %s\n", arena_err.c_str());
                 return 1;
             }
-        } else if (!arena_src.open(o.pack, g.n_layers, g.n_expert, /*threads=*/6, err, arena_pin_limit(),
+        } else if (!arena_src.open(o.pack, g.n_layers, g.n_expert, /*threads=*/6, err, arena_cap_bytes,
                                    o.shared_expert_arena)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;

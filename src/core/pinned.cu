@@ -4,7 +4,9 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <climits>
 #include <cerrno>
 #include <cstdlib>
@@ -311,6 +313,33 @@ std::vector<int>& pin_order() {
 
 void set_arena_pin_order(const std::vector<int>& slices) { pin_order() = slices; }
 
+namespace {
+struct SliceDevices {
+    std::vector<int> dev;
+    std::vector<uint64_t> cap;
+    std::vector<int> stage;   ///< per slice: its stage (a new stage starts where it changes); empty: where dev changes
+};
+SliceDevices& slice_devices() {
+    static SliceDevices v;
+    return v;
+}
+}  // namespace
+
+void set_arena_slice_devices(const std::vector<int>& slice_dev, const std::vector<uint64_t>& per_dev_cap,
+                             const std::vector<int>& slice_stage) {
+    slice_devices().dev = slice_dev;
+    slice_devices().cap = per_dev_cap;
+    slice_devices().stage = slice_stage.size() == slice_dev.size() ? slice_stage : std::vector<int>{};
+}
+
+bool arena_slice_devices_set() { return !slice_devices().dev.empty(); }
+
+int arena_pin_per_stage_env() {
+    const char* e = std::getenv("STRATA_ARENA_PIN_PER_STAGE");
+    if (e == nullptr || *e == '\0') return -1;
+    return e[0] == '0' ? 0 : 1;
+}
+
 int arena_pin_cap_gib() {
     const char* e = std::getenv("STRATA_ARENA_PIN_GIB");
     if (e == nullptr || *e == '\0') return -1;
@@ -362,6 +391,122 @@ std::vector<uint64_t> uniform_bounds(uint64_t bytes, uint64_t slice) {
 }
 }  // namespace
 
+namespace {
+// The working-set lock of every run of unregistered slices and of the bytes past the last bound (a scattered pin).
+void lock_unregistered(PinnedArena& a, const std::vector<uint64_t>& bounds, uint64_t bytes) {
+    const char* env = std::getenv("STRATA_ARENA_LOCK");
+    if (a.backing == PageBacking::LargePages) {
+        a.note = "large pages are resident without a lock; " + a.note;
+        return;
+    }
+    if (env != nullptr && std::string(env) == "0") return;
+    std::string lnote;
+    const size_t n_sl = bounds.size() - 1;
+    for (size_t i = 0; i < n_sl;) {
+        if (a.slice_pinned[i]) { ++i; continue; }
+        size_t j = i;
+        while (j < n_sl && !a.slice_pinned[j]) ++j;   // [i, j): a run of unregistered slices
+        const uint64_t off = bounds[i], len = bounds[j] - bounds[i];
+        const strata::platform::LockResult lr = strata::platform::lock_resident((uint8_t*) a.base + off, len);
+        if (lr.locked_bytes) a.locked_ranges.emplace_back(off, lr.locked_bytes);
+        a.locked_bytes += lr.locked_bytes;
+        lnote = lr.note;
+        i = j;
+    }
+    const uint64_t last = bounds.back();
+    if (last < bytes) {
+        const strata::platform::LockResult lr = strata::platform::lock_resident((uint8_t*) a.base + last, bytes - last);
+        if (lr.locked_bytes) a.locked_ranges.emplace_back(last, lr.locked_bytes);
+        a.locked_bytes += lr.locked_bytes;
+    }
+    if (!lnote.empty()) a.note = lnote + "; " + a.note;
+}
+
+// extras/wddm-pin: each device registers the slices it reads, in its own context, without cudaHostRegisterPortable:
+// a portable registration is mapped into EVERY context, and under WDDM every adapter then charges the whole pinned
+// range to its shared (non-local) segment - the 5080 + 3090 rig's refused allocations (#253).  Device by device in the
+// order the slices name them, each from its first slice up, until its cap or the driver's first refusal.
+void register_per_stage(PinnedArena& a, const std::vector<uint64_t>& bounds, uint64_t bytes) {
+    constexpr double GiB = 1073741824.0;
+    const SliceDevices& sd = slice_devices();
+    const size_t n = bounds.size() - 1;
+    a.per_stage = true;
+    a.scattered = true;
+    a.slice_bytes = 1;
+    a.slice_owner = sd.dev;
+    a.slice_pinned.assign(n, 0);
+    int prev = 0;
+    if (cudaGetDevice(&prev) != cudaSuccess) { (void) cudaGetLastError(); prev = 0; }
+    // the stages: runs of consecutive slices with one owner, in layer order; a device's cap and a refusal by its
+    // driver hold for every stage on it (one adapter: --split-device 0 puts both stages on CUDA0)
+    std::vector<uint64_t> dev_got;
+    std::vector<std::string> dev_stop;
+    const auto t0 = std::chrono::steady_clock::now();
+    int stage = 0;
+    for (size_t s0 = 0; s0 < n;) {
+        const int d = sd.dev[s0];
+        size_t s1 = s0;
+        while (s1 < n && sd.dev[s1] == d && (sd.stage.empty() || sd.stage[s1] == sd.stage[s0])) ++s1;   // one stage
+        stage = sd.stage.empty() ? stage + 1 : sd.stage[s0] + 1;
+        if (d < 0) { s0 = s1; continue; }
+        if ((size_t) d >= dev_got.size()) { dev_got.resize((size_t) d + 1, 0); dev_stop.resize((size_t) d + 1); }
+        const uint64_t cap = (size_t) d < sd.cap.size() ? sd.cap[(size_t) d] : 0;
+        uint64_t want = 0, got = 0;
+        int n_ok = 0;
+        std::string& stop = dev_stop[(size_t) d];
+        const auto td = std::chrono::steady_clock::now();
+        if (stop.empty() && cudaSetDevice(d) != cudaSuccess)
+            stop = std::string("cudaSetDevice failed: ") + cudaGetErrorString(cudaGetLastError());
+        for (size_t i = s0; i < s1; ++i) {
+            const uint64_t off = bounds[i], len = bounds[i + 1] - bounds[i];
+            want += len;
+            if (!stop.empty()) continue;
+            if (cap > 0 && dev_got[(size_t) d] + len > cap) {
+                char b[96];
+                std::snprintf(b, sizeof b, "the cap of %.1f GiB on CUDA%d", (double) cap / GiB, d);
+                stop = b;
+                continue;
+            }
+            const cudaError_t e = cudaHostRegister((uint8_t*) a.base + off, (size_t) len, cudaHostRegisterMapped);
+            if (e != cudaSuccess) {
+                (void) cudaGetLastError();
+                stop = std::string("the driver refused a slice (") + cudaGetErrorString(e) + ")";
+                continue;
+            }
+            void* dp = nullptr;
+            if (cudaHostGetDevicePointer(&dp, (uint8_t*) a.base + off, 0) != cudaSuccess) {
+                (void) cudaGetLastError();
+                dp = nullptr;
+            }
+            a.slice_pinned[i] = 1;
+            a.slice_starts.push_back(off);
+            a.slice_index.push_back((int) i);
+            a.reg_dev.push_back(d);
+            a.reg_alias.push_back(dp);
+            got += len;
+            dev_got[(size_t) d] += len;
+            ++n_ok;
+            ++a.registered_slices;
+        }
+        char b[384];
+        std::snprintf(b, sizeof b, "%sstage %d layers %lld-%lld: pinned %.2f of %.2f GiB (%d of %d slices) in the context of "
+                                   "cuda%d in %.1f s%s%s", a.stage_note.empty() ? "" : "; ", stage, (long long) s0,
+                      (long long) s1 - 1, (double) got / GiB, (double) want / GiB, n_ok, (int) (s1 - s0), d,
+                      std::chrono::duration<double>(std::chrono::steady_clock::now() - td).count(),
+                      got < want ? ", the rest unpinned: " : "", got < want ? stop.c_str() : "");
+        a.stage_note += b;
+        s0 = s1;
+    }
+    cudaSetDevice(prev);
+    for (size_t i = 0; i < n && a.slice_pinned[i]; ++i) a.registered_bytes = bounds[i + 1];   // the pinned PREFIX
+    char t[64];
+    std::snprintf(t, sizeof t, " (%.1f s)", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+    a.note = "cudaHostRegister per stage, each stage's layers in its own CUDA context, not portable "
+             "(STRATA_ARENA_PIN_PER_STAGE)" + std::string(t) + ": " + a.stage_note + "; " + a.note;
+    lock_unregistered(a, bounds, bytes);
+}
+}  // namespace
+
 PinnedArena::PinnedArena(uint64_t bytes, uint64_t slice) : PinnedArena(bytes, uniform_bounds(bytes, slice)) {
     if (slice_bytes) slice_bytes = slice;   // sliced registration: record the uniform size
 }
@@ -378,7 +523,10 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds,
 
     // Register with CUDA BEFORE any page is touched: cudaHostRegister pins what is resident now, and a region
     // that has already been faulted in page by page is far more expensive to register and may fail outright.
-    if (base) {
+    // extras/wddm-pin: a layer split's stages each register their own layers in their own context (not portable)
+    const bool by_stage = base != nullptr && bounds.size() >= 2 && slice_devices().dev.size() == bounds.size() - 1;
+    if (by_stage) register_per_stage(*this, bounds, bytes);
+    if (base && !by_stage) {
         // #243: STRATA_ARENA_PIN_GIB=N caps the registration from the start where the caller set no cap
         const int env_gib = arena_pin_cap_gib();
         uint64_t cap = max_pinned_bytes;
@@ -569,7 +717,16 @@ PinnedArena::~PinnedArena() {
         } else if (locked_bytes) {
             strata::platform::unlock_resident((uint8_t*) base + (slice_bytes ? registered_bytes : 0), locked_bytes);
         }
-        if (slice_bytes) {
+        if (per_stage) {   // a non-portable registration is undone in the context that made it
+            int prev = 0;
+            if (cudaGetDevice(&prev) != cudaSuccess) { (void) cudaGetLastError(); prev = 0; }
+            for (size_t k = 0; k < slice_starts.size(); ++k) {
+                if (k < reg_dev.size()) cudaSetDevice(reg_dev[k]);
+                cudaHostUnregister((uint8_t*) base + slice_starts[k]);
+            }
+            (void) cudaGetLastError();
+            cudaSetDevice(prev);
+        } else if (slice_bytes) {
             for (uint64_t off : slice_starts) cudaHostUnregister((uint8_t*) base + off);
         } else {
             cudaHostUnregister(base);

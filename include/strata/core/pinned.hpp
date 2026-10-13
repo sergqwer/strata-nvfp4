@@ -31,6 +31,17 @@ int arena_pin_cap_gib();
 /// layer of a native pack).  Empty (the default): from slice 0 up, as before.  A layer split sets its stages' layers
 /// in turn, so the cap is shared between the stages instead of all landing on the first one.
 void set_arena_pin_order(const std::vector<int>& slices);
+/// extras/wddm-pin: per-stage registration.  `slice_dev[i]` is the CUDA device that reads slice i (a layer split: the
+/// stage that runs layer i); each slice is then registered in THAT device's context only (cudaHostRegisterMapped, not
+/// Portable), so under WDDM each adapter accounts only its own stage's share of the arena in its shared (non-local)
+/// segment.  `per_dev_cap[d]` (bytes, 0 = none) caps what device d pins; its slices go from its first layer up and stop
+/// at the cap or at the driver's first refusal (the rest stays resident through the working-set lock).  Empty = off.
+void set_arena_slice_devices(const std::vector<int>& slice_dev, const std::vector<uint64_t>& per_dev_cap,
+                             const std::vector<int>& slice_stage = {});
+bool arena_slice_devices_set();
+/// STRATA_ARENA_PIN_PER_STAGE: 1 forces the per-stage registration on a layer split (any OS, also --split-device 0),
+/// 0 keeps the portable one; -1 unset (the engine decides: on under WDDM on a multi-GPU layer split).
+int arena_pin_per_stage_env();
 
 struct PinnedArena {
     void* base = nullptr;
@@ -71,6 +82,13 @@ struct PinnedArena {
     std::vector<char> slice_pinned;
     std::vector<int> slice_index;
     std::vector<std::pair<uint64_t, uint64_t>> locked_ranges;   ///< scattered: the working-set locks (offset, bytes)
+    /// extras/wddm-pin (set_arena_slice_devices): registered per stage.  Also `scattered`; per registered slice k (as
+    /// slice_starts / slice_index) its owner device and its device alias in that device's context.
+    bool per_stage = false;
+    std::vector<int> slice_owner;            ///< per slice (all of bounds): the owner device
+    std::vector<int> reg_dev;                ///< per registered slice k: the device whose context holds it
+    std::vector<void*> reg_alias;            ///< per registered slice k: its device pointer there (null: none)
+    std::string stage_note;                  ///< per device: "CUDAd layers a-b: pinned X of Y GiB (n of m slices)..."
     void* mapping_base = nullptr;     ///< actual mapping start; differs from base when a shared-file header exists
     uint64_t mapping_bytes = 0;       ///< bytes to release from mapping_base
     ~PinnedArena();
