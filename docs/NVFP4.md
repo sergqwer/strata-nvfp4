@@ -403,17 +403,37 @@ Tried and dropped:
     with the CUDA error, so the start steps the chunk down to 512 tokens instead of exiting;
   - a token embedding that could not be page-locked stays in the first card's VRAM; the drafter on the split's last
     card read it there ("mtp prefill: an illegal memory access"). The start now refuses that case and says why.
+  - a later stage's probed PCIe share starts from the pack's base like CUDA0's: 0.25 for NVFP4, not the i-quants'
+    0.55 (issue #7's CUDA1 on 6.8 GB/s got 0.19 instead of 0.085).
   Not run on two GPUs (one card here): the refusal and the step-down were not executed.
+- **Taken from other forks and upstream pull requests** (serve, with their tests; credits in the commits):
+  Python-style `True` / `False` in a tool call become JSON booleans where the schema allows one (jarydkrish/Strata);
+  a call missing its `</tool_call>` ends at its own `</function>` (upstream PR #1881, LeGeRyChEeSe); a quoted
+  `</tool_response>` stays text, a wrapped tool result keeps its closer (upstream PR #1840, Mert Özkan); opt-in
+  `"tool_name_repair"` maps a call to an undeclared tool onto the declared one it meant (ANBAL534/Strata); an image URL
+  is fetched only from a public address, re-checked on every redirect (shoftee/Strata). In the engine, the private
+  f32 -> BF16 conversions of the PLE and prompt paths keep a NaN a NaN (sebastianrcnt/Strata): over all 2^32 inputs
+  every non-NaN one converts to the same bits as before, and the old code turned 131,072 NaN patterns into -0 or inf.
+- **Linux:** the fork built on Ubuntu 24.04 (gcc 13.3 and 15.2, CUDA 13.3, archs 89 and 120 with the sm_120a W4A4
+  unit) - its first Linux build. Fixed for it: two tests' FP16 conversions (f16_bits.hpp, not F16C intrinsics gcc
+  refused; `mmq_nvfp4_parity` builds outside `STRATA_BUILD_TESTS`), `check_isa_guard` knowing `nvfp4_avx512.cpp`,
+  setup tests that pin the Windows asset, and a raw NUL byte upstream 0.1.43 put in a char literal of
+  `expert_source.cpp` (now `'\0'`, the same code; git had taken the file for binary). Not run on Linux here.
+- **The Monitor** lists every GPU: its engine device and role (layer-split stage and layers, peer tier, helper cache,
+  image encoder, unused), VRAM, load, temperature, power and PCIe link (current / max, with the engine's measured
+  bandwidth); the Disk card reads the model's drives. The Windows bundle's `.venv-serve` gets `psutil==7.2.2`
+  (`requirements-serve.txt`; `update.cmd` installs it into an existing one when that file changed).
 - **Checks** (RTX 5090 + Ryzen 9 9950X3D, 128 GB; references of 0.1.42-nvfp4.2's engine ddd78216 made with it on
   `qwen-nvfp4-gptq`, the same bits as 0.1.42-nvfp4.1's):
   - 2K and 32K give the same logits and 32 tokens (`--pcie-frac 0.25`, the CPU share 0.5, 6,000 slots), on the port's
-    first build (f2ba8a5c) and on the release build 925c7326 with the #7 fixes;
+    first build (f2ba8a5c), on 925c7326 with the #7 fixes and on the release build ecdf7aa9 (+ the commits above);
   - through the server, the tail skip left unset, the 12 KL texts' rows and logpos files are byte for byte those of
     ddd78216 (normal mode, 8,000 slots): the start line says the skip is off for this fork's packs; upstream's IQ2_XS
     GGUF still starts with it on (72.8% of its experts cached, under #1884's line);
   - with every fork default off the logits equal upstream 0.1.43.1's on IQ2_XS (32K, 12,000 slots);
-  - tests: 116 of 119 engine tests pass (the 3 others need model files this PC does not have); the server's 751 OK
-    (16 skipped); setup's and the tools' 821, all but `test_iq_pack` (no `yaml` in that venv).
+  - tests: 116 of 119 engine tests pass (the 3 others need model files this PC does not have); the server's 827 OK
+    (17 skipped; 751 before the commits above); setup's and the tools' 821, all but `test_iq_pack` (no `yaml`
+    in that venv).
 - **Decode speed**, 5 interleaved pairs (`bench_prompt.txt`, 1,000 tokens, `--stop-eos`, cache auto): 0.1.42-nvfp4.2's
   engine 178.1 tokens/s (median; mean 168.0 +- 22.9), this one 179.2 (174.1 +- 11.6), the ratio per pair 1.008
   (median); the same misses per layer (2.18) and cache hits (92.9%). Two outlier runs, one on each side, had a slow
