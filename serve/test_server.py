@@ -5491,13 +5491,87 @@ class IncrementalPrompts(unittest.TestCase):
                 self.assertGreater(self.svc.prompts.last_reused, len(prompt) // 3)
             msgs.append({"role": "assistant", "content": b["choices"][0]["message"]["content"]})
 
+    def conversation(self, n):
+        """Messages of the n-th conversation: distinct from every other one from the number on."""
+        return [{"role": "user", "content": f"conversation {n} says: " + f"topic {n} sentence {n} " * 20}]
+
+    def service(self, **info):
+        engine = RecordingPrompt(self.svc.tok, "The answer.", max_context=CTX)
+        engine.info = info
+        return Service(engine, self.svc.tok, self.svc.template)
+
+    def test_the_kept_prompts_follow_the_engines_conversation_slots(self):
+        svc = self.service(conversation_cache_slots=8)
+        texts = []
+        for n in range(8):
+            msgs = self.conversation(n)
+            svc.encode_prompt(msgs, None, {})
+            texts.append(svc.render_prompt(msgs, None, {}))
+        self.assertEqual(len(svc.prompts.entries), 8)
+        self.assertEqual(sorted(e[0] for e in svc.prompts.entries), sorted(texts))
+        msgs = self.conversation(8)
+        svc.encode_prompt(msgs, None, {})
+        kept = sorted(e[0] for e in svc.prompts.entries)
+        self.assertEqual(len(kept), 8)
+        self.assertEqual(kept, sorted(texts[1:] + [svc.render_prompt(msgs, None, {})]))
+
+    def lazy_service(self, args, **info):
+        """A Service over the real StrataEngine class started lazily: no process yet, so no INFO line either."""
+        engine = StrataEngine("strata", args, lazy=True)
+        engine.info.update(info)
+        return Service(engine, self.svc.tok, self.svc.template)
+
+    def test_a_lazy_engine_keeps_the_prompts_its_arguments_ask_for(self):
+        svc = self.lazy_service(["--conversation-cache-slots", "8"])
+        for n in range(10):
+            svc.encode_prompt(self.conversation(n), None, {})
+        self.assertEqual(len(svc.prompts.entries), 8)
+
+    def test_the_slot_argument_wins_over_the_info_line_and_a_bad_one_falls_back(self):
+        self.assertEqual(self.lazy_service(["--conversation-cache-slots", "6"], conversation_cache_slots=3)
+                         .prompts.keep, 6)
+        self.assertEqual(self.lazy_service(["--conversation-cache-slots", "x"], conversation_cache_slots=3)
+                         .prompts.keep, 3)
+        self.assertEqual(self.lazy_service(["--conversation-cache-slots"]).prompts.keep, 4)
+        self.assertEqual(self.lazy_service([]).prompts.keep, 4)
+
+    def test_without_a_slot_setting_four_prompts_are_kept(self):
+        svc = self.service()
+        for n in range(6):
+            svc.encode_prompt(self.conversation(n), None, {})
+        self.assertEqual(len(svc.prompts.entries), 4)
+
+    def test_counting_tokens_leaves_the_kept_prompts_alone(self):
+        svc = self.service(conversation_cache_slots=2)
+        httpd = serve(svc, port=0)
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        self.base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        main = self.conversation(0)
+        status, b = self.post("/v1/chat/completions", {"model": "m", "max_tokens": 8, "messages": main})
+        self.assertEqual(status, 200, b)
+        before = list(svc.prompts.entries)
+        full = self.service()
+        full.prompts = None
+        for n in range(1, 6):
+            other = self.conversation(n)
+            status, b = self.post("/v1/messages/count_tokens", {"model": "m", "messages": other})
+            self.assertEqual(status, 200, b)
+            self.assertEqual(b["input_tokens"], len(full.encode_prompt(other, None, {})))
+        self.assertTrue(svc.prompts.entries == before, "the count wrote into the kept prompts")
+        main.append({"role": "assistant", "content": "ok"})
+        main.append({"role": "user", "content": "and then?"})
+        svc.encode_prompt(main, None, {})
+        self.assertGreater(svc.prompts.last_reused, len(svc.render_prompt(main, None, {})) // 2)
+
     def test_same_ids_as_a_full_encode_on_varied_conversations(self):
         import random
         sys.path.insert(0, str(ROOT / "tools"))
         from test_strata_tokenizer import conversation_prompts, load_tokenizer
         toks = [("byte", ByteTokenizer())]
-        if load_tokenizer() is not None:
-            toks.append(("qwen35", load_tokenizer()))
+        qwen = load_tokenizer()
+        if qwen is not None:
+            toks.append(("qwen35", qwen))
         for name, tok in toks:
             svc = Service(self.engine, tok, self.svc.template)
             for seed in range(3):
@@ -5508,10 +5582,13 @@ class IncrementalPrompts(unittest.TestCase):
     def test_a_tokenizer_without_resume_points_encodes_in_full(self):
         class Plain:
             """ByteTokenizer without the resume points."""
+            def __init__(self):
+                self.base = ByteTokenizer()
+
             def __getattr__(self, name):
                 if name in ("encode_marked", "max_special_len"):
                     raise AttributeError(name)
-                return getattr(ByteTokenizer(), name)
+                return getattr(self.base, name)
         svc = Service(self.engine, Plain(), self.svc.template)
         self.assertIsNone(svc.prompts)
         msgs = [{"role": "user", "content": "hi"}]
