@@ -3381,7 +3381,11 @@ int main(int argc, char** argv) {
     // such limit, so there the whole arena is pinned (#253).  STRATA_ARENA_PIN_GIB overrides both ways.
     auto arena_pin_limit = [&]() -> uint64_t {
         const int pin_env = strata::core::arena_pin_cap_gib();   // -1 unset, -2 "auto" (#243, Windows sliced pin)
-        const bool pin_wddm_cap = pin_env < 0 && (o.expert_cache_remote[0] > 0 || multi_gpu) && under_wddm();
+        const bool pin_wddm_cap = pin_env < 0 && pin_env != -3 && (o.expert_cache_remote[0] > 0 || multi_gpu) && under_wddm();
+        if (pin_env == -3) {   // extras/wddm-pin
+            std::fprintf(stderr, "strata generate: STRATA_ARENA_PIN_GIB=none: nothing of the expert arena is pinned\n");
+            return 1;   // a cap of one byte: no slice fits
+        }
         if (pin_env >= 0)
             std::fprintf(stderr, "strata generate: STRATA_ARENA_PIN_GIB=%d: %s\n", pin_env,
                          pin_env == 0 ? "the whole expert arena is pinned" : "the expert arena's pinning is capped");
@@ -3431,6 +3435,9 @@ int main(int argc, char** argv) {
                 w = "STRATA_ARENA_PIN_GIB=" + std::to_string(pin_env);
             } else if (pin_env == 0) {
                 w = "STRATA_ARENA_PIN_GIB=0: no cap";
+            } else if (pin_env == -3) {
+                caps[(size_t) d] = 1;   // one byte: no slice fits
+                w = "STRATA_ARENA_PIN_GIB=none: nothing pinned";
             } else if (under_wddm()) {
                 uint64_t lim = 0;
                 if (strata::core::shared_pin_limit_for(d, lim, w)) {
