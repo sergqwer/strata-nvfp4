@@ -13543,11 +13543,14 @@ int main(int argc, char** argv) {
             // extras/mgpu-fixes (D6): on a layer split a stage's swaps copy over ITS link, and the round waits for them.
             // A stage on a link below the 20 GB/s reference gets adapt_swaps x link/20 of them (2 GB/s: 9 of 96, the
             // same ~10 ms as a x16 card's full round); the rest of the budget goes to the other stages.  Links not
-            // probed (--pcie-frac given) or at/above 20 GB/s: unchanged.  STRATA_ADAPT_LINK_BUDGET=0: off.
+            // probed (--pcie-frac given) or at/above 20 GB/s: unchanged.
+            // OPT-IN (STRATA_ADAPT_LINK_BUDGET=1): measured on the 4x 4090 rental, CUDA1 at 2 GB/s, 16 GB cards, the
+            // tier HELPS decode even through that link - auto K=41: 66.8 tok/s on, 43.8 off; --layer-split 24: 84.6 on,
+            // 55.2 off - so capping its swaps by the link is not the default.
             if (multi_gpu && !swaps.empty()) {
                 static const bool link_budget = [] {
                     const char* v = std::getenv("STRATA_ADAPT_LINK_BUDGET");
-                    return v == nullptr || v[0] != '0';
+                    return v != nullptr && v[0] != '0';
                 }();
                 std::vector<int64_t> left(stages.size() + 1, -1);
                 bool any_cap = false;
