@@ -19,10 +19,10 @@
 // 8-bit activations land near 0.5%; FP4 activations near 10% - the difference between the two modes.
 #include "strata/prefill/moe_mmq.hpp"
 
-#include "strata/kernels/f16_bits.hpp"
 #include "ggml.h"
 
 #include <cuda_runtime.h>
+#include <immintrin.h>
 
 #include <algorithm>
 #include <cmath>
@@ -43,9 +43,7 @@ void ck(cudaError_t e, const char* what) {
 }
 
 // one product: x [T, cols] times w [rows, cols]^T
-// to FP16 and back, round-to-nearest-even (the tree's portable conversions: gcc refuses the F16C intrinsics
-// without -mf16c)
-float half_round(float v) { return strata::kernels::f32_from_f16(strata::kernels::f16_from_f32(v)); }
+float half_round(float v) { return _mm_cvtss_f32(_mm_cvtph_ps(_mm_cvtps_ph(_mm_set_ss(v), 0))); }
 
 int product(const uint8_t* w_host, int64_t rows, int64_t cols, int T, const char* what, std::mt19937& rng,
             const std::vector<float>* given = nullptr, double* rel_out = nullptr, double* rel16_out = nullptr,
