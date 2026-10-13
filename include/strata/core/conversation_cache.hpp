@@ -161,6 +161,9 @@ struct SavedConversation {
     bool cvec = true;
     // with a layer split, the later stages' own images, one per stage, in stage order
     std::vector<SavedConversation> stage_images;
+    // the disk tier's entry holding exactly this image (conversation_disk.hpp: written while the engine was idle), 0 =
+    // none.  A run-time mark only, not in the session file: an eviction then drops the RAM copy without a write.
+    uint64_t disk_id = 0;
 
     /// Holds a pinned shared prefix (see ConversationCheckpoint::pinned): the parked-conversation budget keeps it.
     bool pinned() const {
@@ -380,6 +383,15 @@ public:
 
     // The slot count, so a caller that evicts in a loop has a bound it did not invent.
     size_t slots() const { return slots_; }
+
+    // The disk tier's idle save walks the parked conversations (least recently active first) and marks the ones it
+    // wrote; the index is valid until the cache changes, the serial for good.
+    const SavedConversation& at(size_t index) const { return entries_.at(index); }
+    uint64_t serial_at(size_t index) const { return serials_.at(index); }
+    void set_disk_id(uint64_t serial, uint64_t disk_id) {
+        const size_t i = index_of(serial);
+        if (i != SIZE_MAX) entries_[i].disk_id = disk_id;
+    }
 
     // #342: drop the parked entries an outgoing conversation (its live tokens and checkpoint chain) supersedes:
     // the same conversation a turn back, whose DEEPEST checkpoint the outgoing chain still holds, so all it adds
