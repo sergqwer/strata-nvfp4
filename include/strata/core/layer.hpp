@@ -288,18 +288,21 @@ void qsa_set_kv_resident(int64_t cells);
 /// captured graphs stay valid.  Set before sizing and initializing the session and the drafter.
 void qsa_set_kv_elastic(bool enabled, int64_t init_cells);
 bool qsa_kv_elastic();
-/// Cells every elastic state can hold now (INT64_MAX when none is elastic).
-int64_t qsa_kv_elastic_cells();
-/// Chunks still to map for every elastic state to hold `cells` cells.
-int64_t qsa_kv_elastic_need(int64_t cells);
+/// batch-vram: the states made from now on belong to this owner (0: the main session and its drafter, the default;
+/// 1 + b: --batch slot b, which grows on its own).  Every call below takes the owner its pools were made under.
+void qsa_set_kv_elastic_owner(int owner);
+/// Cells every elastic state of `owner` can hold now (INT64_MAX when none is elastic).
+int64_t qsa_kv_elastic_cells(int owner = 0);
+/// Chunks still to map for every elastic state of `owner` to hold `cells` cells.
+int64_t qsa_kv_elastic_need(int64_t cells, int owner = 0);
 /// Maps them, each from `take()` (0: a new chunk), the new memory zeroed.  Synchronous; nothing may be running on
 /// the device.  false: out of memory.
-bool qsa_kv_elastic_grow(int64_t cells, const std::function<VmmChunk()>& take);
+bool qsa_kv_elastic_grow(int64_t cells, const std::function<VmmChunk()>& take, int owner = 0);
 /// Unmaps the chunks past `cells` cells, each handed to `give`.  Returns how many.
-int64_t qsa_kv_elastic_shrink(int64_t cells, const std::function<void(VmmChunk)>& give);
-/// Physical bytes the elastic pools hold, and what all of them would at the full context.
-uint64_t qsa_kv_elastic_mapped_bytes();
-uint64_t qsa_kv_elastic_full_bytes();
+int64_t qsa_kv_elastic_shrink(int64_t cells, const std::function<void(VmmChunk)>& give, int owner = 0);
+/// Physical bytes the elastic pools of `owner` hold (-1: every owner), and what they would at the full context.
+uint64_t qsa_kv_elastic_mapped_bytes(int owner = 0);
+uint64_t qsa_kv_elastic_full_bytes(int owner = 0);
 /// Every mapped chunk of the elastic pools as (handle, pool << 32 | chunk): a debug check for chunks mapped twice.
 std::vector<std::pair<VmmChunk, int64_t>> qsa_kv_elastic_handles();
 int64_t qsa_kv_resident();
