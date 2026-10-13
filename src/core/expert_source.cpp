@@ -1721,7 +1721,7 @@ bool FileExpertSource::drop_mapping(std::string& why) {
     // Linux's page cache has no such lock: only the tests close the GGUF views (STRATA_TEST_UNMAP_GGUF=1), to run the
     // unmapped path the Windows file tier takes
     const char* t = std::getenv("STRATA_TEST_UNMAP_GGUF");
-    if (t == nullptr || t[0] == ' ' || std::atoi(t) == 0 || role_ptr_.empty()) { why = "not Windows"; return false; }
+    if (t == nullptr || t[0] == '\0' || std::atoi(t) == 0 || role_ptr_.empty()) { why = "not Windows"; return false; }
     if (direct_.empty()) { why = "the reads are not unbuffered"; return false; }
     if (unmapped_) { why = "already closed"; return true; }
     for (Map& m : maps_) {
