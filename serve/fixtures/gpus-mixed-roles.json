@@ -1,0 +1,82 @@
+{
+  "about": "STRATA_MOCK_GPUS=gpus-mixed-roles.json: five cards. GPU 0 drives the desktop and the engine does not see it (CUDA_VISIBLE_DEVICES=2,1,3,4, PCI order: CUDA0 is GPU 2); a 3-stage layer split on GPU 2, 1 and the 5090 (a Gen5 card in a Gen4 slot); the 3060 holds a helper expert cache on a chipset Gen3 x4 link; the image encoder alone on GPU 0.",
+  "cards": [
+    {
+      "name": "NVIDIA GeForce RTX 4060 Ti",
+      "mem_total_mib": 16380,
+      "mem_used_mib": 2650,
+      "util": 8,
+      "power_limit": 165,
+      "pci": "0000:01:00.0",
+      "uuid": "GPU-1c0d4e60-0000-4060-0000-000000000001"
+    },
+    {
+      "name": "NVIDIA GeForce RTX 4090",
+      "mem_total_mib": 24564,
+      "mem_used_mib": 22400,
+      "util": 60,
+      "power_limit": 450,
+      "pci": "0000:21:00.0",
+      "uuid": "GPU-1c0d4e60-0000-4090-0000-000000000002"
+    },
+    {
+      "name": "NVIDIA GeForce RTX 4090",
+      "mem_total_mib": 24564,
+      "mem_used_mib": 22950,
+      "util": 55,
+      "power_limit": 450,
+      "pci": "0000:41:00.0",
+      "uuid": "GPU-1c0d4e60-0000-4090-0000-000000000003"
+    },
+    {
+      "name": "NVIDIA GeForce RTX 5090",
+      "mem_total_mib": 32607,
+      "mem_used_mib": 30900,
+      "util": 75,
+      "power_limit": 575,
+      "pci": "0000:61:00.0",
+      "uuid": "GPU-1c0d4e60-0000-5090-0000-000000000004",
+      "pcie_gen_max": 4,
+      "pcie_gen_gpu_max": 5
+    },
+    {
+      "name": "NVIDIA GeForce RTX 3060",
+      "mem_total_mib": 12288,
+      "mem_used_mib": 11100,
+      "util": 25,
+      "power_limit": 170,
+      "pci": "0000:81:00.0",
+      "uuid": "GPU-1c0d4e60-0000-3060-0000-000000000005",
+      "pcie_width": 4,
+      "pcie_width_max": 16,
+      "pcie_gen_max": 3
+    }
+  ],
+  "encoder": 0,
+  "engine": {
+    "env": {
+      "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
+      "CUDA_VISIBLE_DEVICES": "2,1,3,4"
+    },
+    "args": [
+      "--layer-split",
+      "14,30",
+      "--expert-cache-device1",
+      "auto"
+    ],
+    "log": [
+      "strata generate: PCIe probe: 24.6 GB/s host->device (best of 24.6 24.1 23.9 24.4) -> pcie_frac 0.25 (default 0.25)",
+      "strata generate: layer split across 3 GPUs: CUDA0, then CUDA1,2 (split 14,30)",
+      "strata generate: layer split: CUDA1 runs layers 14-29, expert cache 7420 slots (19.42 GiB), 7420 of its 8192 profiled pairs; slot 0 verified",
+      "strata generate: layer split: CUDA1 PCIe probe 24.1 GB/s (best of 24.1 23.8 23.9 24.0) -> pcie_frac 0.55",
+      "strata generate: layer split: CUDA2 runs layers 30-47, expert cache 9216 slots (24.12 GiB), 9216 of its 9216 profiled pairs; slot 0 verified",
+      "strata generate: layer split: CUDA2 PCIe probe 25.3 GB/s (best of 25.3 25.1 25.0 25.2) -> pcie_frac 0.55",
+      "strata generate: layer split: CUDA0 runs layers 0-13",
+      "strata generate: CUDA3: 3810 additional experts, 9.97 GiB; results return through pinned host rows"
+    ],
+    "info": {
+      "expert_slots_primary": 6110,
+      "expert_cache_primary_mib": 16380
+    }
+  }
+}
