@@ -459,7 +459,25 @@ void gemm_prewarm_wait() {
     if (g_prewarm.valid()) g_prewarm.wait();
 }
 
-// extras/mgpu-fixes: see gemm.hpp
+// extras/mgpu-fixes: see gemm.hpp.  A plain FP32 FMA loop, not cuBLAS: it measures what the split search's
+// SMs x GHz stands for, and it leaves nothing behind - a cuBLAS handle and its HGEMM kernels kept ~190 MiB of each
+// card's VRAM after cublasDestroy, which shrank the expert caches sized after the search (and moved the chunk).
+#if !defined(STRATA_USE_HIP) && !defined(__HIPCC__)
+namespace {
+__global__ void fma_probe_kernel(float* out, int iters) {
+    float a0 = threadIdx.x * 1e-7f, a1 = a0 + 1e-3f, a2 = a0 + 2e-3f, a3 = a0 + 3e-3f;
+    float a4 = a0 + 4e-3f, a5 = a0 + 5e-3f, a6 = a0 + 6e-3f, a7 = a0 + 7e-3f;
+    const float m = 0.9999f, c = 1e-4f;
+    for (int i = 0; i < iters; ++i) {   // eight independent chains: the FMA pipes stay full
+        a0 = fmaf(a0, m, c); a1 = fmaf(a1, m, c); a2 = fmaf(a2, m, c); a3 = fmaf(a3, m, c);
+        a4 = fmaf(a4, m, c); a5 = fmaf(a5, m, c); a6 = fmaf(a6, m, c); a7 = fmaf(a7, m, c);
+    }
+    const float r = a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7;
+    if (r == 12345.678f) out[blockIdx.x] = r;   // never true; keeps the loop
+}
+}  // namespace
+#endif
+
 double compute_probe_ms(int dev) {
 #if defined(STRATA_USE_HIP) || defined(__HIPCC__)
     (void) dev;
@@ -471,37 +489,26 @@ double compute_probe_ms(int dev) {
         (void) cudaGetLastError();
         return -1.0;
     }
-    const int n = 4096;
-    const size_t bytes = (size_t) n * n * sizeof(__half);
-    __half *a = nullptr, *b = nullptr, *c = nullptr;
-    cublasHandle_t h = nullptr;
+    int sms = 0;
+    (void) cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
+    const int blocks = std::max(1, sms) * 8, threads = 256, iters = 8192;
+    float* out = nullptr;
     cudaEvent_t e0 = nullptr, e1 = nullptr;
     double ms = -1.0;
-    // 0x3C3C = 1.06 in every element: non-zero operands, so the card draws the power a real product does
-    if (cudaMalloc((void**) &a, bytes) == cudaSuccess && cudaMalloc((void**) &b, bytes) == cudaSuccess &&
-        cudaMalloc((void**) &c, bytes) == cudaSuccess && cudaMemset(a, 0x3C, bytes) == cudaSuccess &&
-        cudaMemset(b, 0x3C, bytes) == cudaSuccess && cublasCreate(&h) == CUBLAS_STATUS_SUCCESS &&
+    if (cudaMalloc((void**) &out, (size_t) blocks * sizeof(float)) == cudaSuccess &&
         cudaEventCreate(&e0) == cudaSuccess && cudaEventCreate(&e1) == cudaSuccess) {
-        const __half one = __float2half(1.0f), zero = __float2half(0.0f);
-        auto run = [&](int reps) {
-            for (int i = 0; i < reps; ++i)
-                (void) cublasHgemm(h, CUBLAS_OP_N, CUBLAS_OP_N, n, n, n, &one, a, n, b, n, &zero, c, n);
-        };
-        run(120);   // the clocks ramp up from idle (and a power limit pulls them down) first
+        for (int i = 0; i < 500; ++i) fma_probe_kernel<<<blocks, threads>>>(out, iters);   // ramp the clocks up
         (void) cudaEventRecord(e0);
-        run(40);
+        for (int i = 0; i < 200; ++i) fma_probe_kernel<<<blocks, threads>>>(out, iters);
         (void) cudaEventRecord(e1);
         float f = 0.0f;
         if (cudaEventSynchronize(e1) == cudaSuccess && cudaEventElapsedTime(&f, e0, e1) == cudaSuccess && f > 0.0f)
-            ms = (double) f / 40.0;
+            ms = (double) f / 200.0 * 1024.0 / (double) blocks;   // per 1024 blocks (the launch scales with the SMs)
     }
     (void) cudaGetLastError();
     if (e0) (void) cudaEventDestroy(e0);
     if (e1) (void) cudaEventDestroy(e1);
-    if (h) (void) cublasDestroy(h);
-    if (a) (void) cudaFree(a);
-    if (b) (void) cudaFree(b);
-    if (c) (void) cudaFree(c);
+    if (out) (void) cudaFree(out);
     (void) cudaGetLastError();
     (void) cudaSetDevice(prev);
     return ms;
