@@ -13376,6 +13376,35 @@ int main(int argc, char** argv) {
                 }
             }
             std::sort(swaps.begin(), swaps.end(), [](const Swap& a, const Swap& b) { return a.gain > b.gain; });
+            // extras/mgpu-fixes (D6): on a layer split a stage's swaps copy over ITS link, and the round waits for them.
+            // A stage on a link below the 20 GB/s reference gets adapt_swaps x link/20 of them (2 GB/s: 9 of 96, the
+            // same ~10 ms as a x16 card's full round); the rest of the budget goes to the other stages.  Links not
+            // probed (--pcie-frac given) or at/above 20 GB/s: unchanged.  STRATA_ADAPT_LINK_BUDGET=0: off.
+            if (multi_gpu && !swaps.empty()) {
+                static const bool link_budget = [] {
+                    const char* v = std::getenv("STRATA_ADAPT_LINK_BUDGET");
+                    return v == nullptr || v[0] != '0';
+                }();
+                std::vector<int64_t> left(stages.size() + 1, -1);
+                bool any_cap = false;
+                for (size_t st = 0; link_budget && st <= stages.size(); ++st) {
+                    const double bw = st == 0 ? o.pcie_probe_gbps : stages[st - 1]->link_gbps;
+                    if (bw > 0.0 && bw < 20.0) {
+                        left[st] = (int64_t) ((double) o.adapt_swaps * bw / 20.0);
+                        any_cap = true;
+                    }
+                }
+                if (any_cap) {
+                    size_t w = 0;
+                    for (size_t si = 0; si < swaps.size(); ++si) {
+                        const int st = stage_of(swaps[si].layer);
+                        if (left[(size_t) st] == 0) continue;
+                        if (left[(size_t) st] > 0) --left[(size_t) st];
+                        swaps[w++] = swaps[si];
+                    }
+                    swaps.resize(w);
+                }
+            }
             if ((int) swaps.size() > o.adapt_swaps) swaps.resize((size_t) o.adapt_swaps);
             if (aov) {   // 0.1.43: the copies go in layer order and each layer's landing is told to the verify window
                 std::stable_sort(swaps.begin(), swaps.end(), [](const Swap& a, const Swap& b) { return a.layer < b.layer; });
