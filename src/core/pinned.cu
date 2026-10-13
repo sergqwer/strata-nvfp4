@@ -319,6 +319,7 @@ struct SliceDevices {
     std::vector<uint64_t> cap;
     std::vector<int> stage;   ///< per slice: its stage (a new stage starts where it changes); empty: where dev changes
     std::vector<std::string> why;   ///< per device: where its cap came from (the log line)
+    std::vector<char> live;         ///< per device: re-read its adapter's budget before each of its stages registers
 };
 SliceDevices& slice_devices() {
     static SliceDevices v;
@@ -327,10 +328,12 @@ SliceDevices& slice_devices() {
 }  // namespace
 
 void set_arena_slice_devices(const std::vector<int>& slice_dev, const std::vector<uint64_t>& per_dev_cap,
-                             const std::vector<int>& slice_stage, const std::vector<std::string>& per_dev_why) {
+                             const std::vector<int>& slice_stage, const std::vector<std::string>& per_dev_why,
+                             const std::vector<char>& per_dev_live) {
     slice_devices().dev = slice_dev;
     slice_devices().cap = per_dev_cap;
     slice_devices().why = per_dev_why;
+    slice_devices().live = per_dev_live;
     slice_devices().stage = slice_stage.size() == slice_dev.size() ? slice_stage : std::vector<int>{};
 }
 
@@ -453,8 +456,9 @@ void lock_unregistered(PinnedArena& a, const std::vector<uint64_t>& bounds, uint
 
 // extras/wddm-pin: each device registers the slices it reads, in its own context, without cudaHostRegisterPortable:
 // a portable registration is mapped into EVERY context, and under WDDM every adapter then charges the whole pinned
-// range to its shared (non-local) segment - the 5080 + 3090 rig's refused allocations (#253).  Device by device in the
-// order the slices name them, each from its first slice up, until its cap or the driver's first refusal.
+// range to its shared (non-local) segment - the 5080 + 3090 rig's refused allocations (#253).  Stage by stage in layer
+// order, each from its first slice up, until its room (the GPU's cap, or its adapter's budget read just before) or the
+// driver's first refusal (which ends every later stage on that GPU too).
 void register_per_stage(PinnedArena& a, const std::vector<uint64_t>& bounds, uint64_t bytes) {
     constexpr double GiB = 1073741824.0;
     const SliceDevices& sd = slice_devices();
@@ -479,7 +483,19 @@ void register_per_stage(PinnedArena& a, const std::vector<uint64_t>& bounds, uin
         stage = sd.stage.empty() ? stage + 1 : sd.stage[s0] + 1;
         if (d < 0) { s0 = s1; continue; }
         if ((size_t) d >= dev_got.size()) { dev_got.resize((size_t) d + 1, 0); dev_stop.resize((size_t) d + 1); }
+        // what this stage may pin: the GPU's cap less what its earlier stages pinned; with a live budget the room its
+        // adapter has NOW (budget - usage - margin, read just before this stage): whatever the earlier registrations,
+        // on this adapter or - if a driver charges a non-portable one to every adapter - on the others, it shows here
+        uint64_t room = UINT64_MAX;
+        std::string why_now;
         const uint64_t cap = (size_t) d < sd.cap.size() ? sd.cap[(size_t) d] : 0;
+        if ((size_t) d < sd.live.size() && sd.live[(size_t) d]) {
+            uint64_t lim = 0;
+            if (shared_pin_limit_for(d, lim, why_now)) room = lim;
+            else if (cap > 0) room = cap > dev_got[(size_t) d] ? cap - dev_got[(size_t) d] : 0;
+        } else if (cap > 0) {
+            room = cap > dev_got[(size_t) d] ? cap - dev_got[(size_t) d] : 0;
+        }
         uint64_t want = 0, got = 0;
         int n_ok = 0;
         std::string& stop = dev_stop[(size_t) d];
@@ -490,9 +506,9 @@ void register_per_stage(PinnedArena& a, const std::vector<uint64_t>& bounds, uin
             const uint64_t off = bounds[i], len = bounds[i + 1] - bounds[i];
             want += len;
             if (!stop.empty()) continue;
-            if (cap > 0 && dev_got[(size_t) d] + len > cap) {
-                char b[96];
-                std::snprintf(b, sizeof b, "the cap of %.1f GiB on CUDA%d", (double) cap / GiB, d);
+            if (room != UINT64_MAX && got + len > room) {
+                char b[128];
+                std::snprintf(b, sizeof b, "the cap: %.1f GiB left for this stage on CUDA%d", (double) room / GiB, d);
                 stop = b;
                 continue;
             }
@@ -524,7 +540,9 @@ void register_per_stage(PinnedArena& a, const std::vector<uint64_t>& bounds, uin
                       std::chrono::duration<double>(std::chrono::steady_clock::now() - td).count(),
                       got < want ? ", the rest unpinned: " : "", got < want ? stop.c_str() : "");
         a.stage_note += b;
-        if ((size_t) d < sd.why.size() && !sd.why[(size_t) d].empty()) a.stage_note += " (cap: " + sd.why[(size_t) d] + ")";
+        if (!why_now.empty()) a.stage_note += " (cap read now: " + why_now + ")";
+        else if ((size_t) d < sd.why.size() && !sd.why[(size_t) d].empty()) a.stage_note += " (cap: " + sd.why[(size_t) d] + ")";
+        if (stop.rfind("the cap: ", 0) == 0) stop.clear();   // a cap ends this stage only: the next stage reads its own
         s0 = s1;
     }
     cudaSetDevice(prev);

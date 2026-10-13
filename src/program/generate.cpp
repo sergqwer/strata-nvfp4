@@ -3426,6 +3426,7 @@ int main(int argc, char** argv) {
         const int pin_env = strata::core::arena_pin_cap_gib();   // -1 unset, -2 auto, 0 none, N GiB
         std::vector<uint64_t> caps((size_t) max_dev + 1, 0);
         std::vector<std::string> whys((size_t) max_dev + 1);
+        std::vector<char> live((size_t) max_dev + 1, 0);   // the budget re-read before each stage registers
         std::string capsum;
         for (int d = 0; d <= max_dev; ++d) {
             if (std::find(owner.begin(), owner.end(), d) == owner.end()) continue;
@@ -3442,6 +3443,7 @@ int main(int argc, char** argv) {
                 uint64_t lim = 0;
                 if (strata::core::shared_pin_limit_for(d, lim, w)) {
                     caps[(size_t) d] = lim > 0 ? lim : 1;   // 1 byte: no slice fits, nothing pinned
+                    live[(size_t) d] = 1;
                 } else {
                     caps[(size_t) d] = 8ull << 30;
                     w += ": 8 GiB (no shared-memory budget to read)";
@@ -3453,7 +3455,7 @@ int main(int argc, char** argv) {
                                (double) caps[(size_t) d] / 1073741824.0);
             capsum += b;
         }
-        strata::core::set_arena_slice_devices(owner, caps, stage_of_l, whys);
+        strata::core::set_arena_slice_devices(owner, caps, stage_of_l, whys, live);
         std::fprintf(stderr, "strata generate: expert arena: registered per stage, each stage's layers in its own CUDA "
                              "context (not portable; STRATA_ARENA_PIN_PER_STAGE=%s); the cap per GPU: %s\n",
                      per_stage_env == 1 ? "1" : "unset: multi-GPU under WDDM", capsum.c_str());

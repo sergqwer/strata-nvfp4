@@ -39,7 +39,8 @@ void set_arena_pin_order(const std::vector<int>& slices);
 /// at the cap or at the driver's first refusal (the rest stays resident through the working-set lock).  Empty = off.
 void set_arena_slice_devices(const std::vector<int>& slice_dev, const std::vector<uint64_t>& per_dev_cap,
                              const std::vector<int>& slice_stage = {},
-                             const std::vector<std::string>& per_dev_why = {});
+                             const std::vector<std::string>& per_dev_why = {},
+                             const std::vector<char>& per_dev_live = {});
 bool arena_slice_devices_set();
 /// STRATA_ARENA_PIN_PER_STAGE: 1 forces the per-stage registration on a layer split (any OS, also --split-device 0),
 /// 0 keeps the portable one; -1 unset (the engine decides: on under WDDM on a multi-GPU layer split).
