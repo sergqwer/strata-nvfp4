@@ -18,6 +18,11 @@ conversation's next turn therefore goes back to its replica, until that replica 
 reading the prompt again is cheaper than waiting.  What each replica holds is tracked as hashes of 64-token blocks of
 the prompts and answers it served (the engine itself checks the real prefix, as it always does).
 
+Shared pool (strata-nvfp4).  With --conversation-disk-shared in the engine args every replica parks into one folder
+and looks there first, so a conversation parked by one replica resumes on any: the router then counts what ANY
+replica served (a "pool" bit beside the replicas' bits) as held by all of them, less POOL_PENALTY_TOKENS for the
+restore, and a returning conversation goes to the first free replica instead of waiting for its own.
+
 CPU cores.  On Linux the replicas get disjoint physical cores (serve/cpu_affinity.py, from PR #1436 by agorevski), so
 the host threads of the engines (the expert workers) do not compete.  "replica_cpus": false turns it off.
 """
@@ -33,6 +38,7 @@ BLOCK = 64                          # tokens per hashed block of a prompt
 LOAD_TOKENS = 3000                  # the cost of one request already running on a replica, in prompt tokens
 INDEX_MAX = 262144                  # block hashes kept (about 17M tokens of prompts)
 HEAL_COOLDOWN_S = 60.0              # a replica that died is started again at most this often
+POOL_PENALTY_TOKENS = 2048          # shared pool: a restore from it (~0.1-0.5 s) costs about this many prompt tokens
 
 
 class ReplicaConfigError(ValueError):
@@ -123,8 +129,9 @@ class Router:
     """Which replica holds the start of a prompt: chained hashes of its 64-token blocks, each with the set of replicas
     that served it (a bit mask)."""
 
-    def __init__(self, n: int, cap: int = INDEX_MAX):
+    def __init__(self, n: int, cap: int = INDEX_MAX, pool: bool = False, pool_penalty: int = POOL_PENALTY_TOKENS):
         self.n, self.cap = n, cap
+        self.pool, self.pool_penalty = pool, pool_penalty      # bit n: in the shared pool (--conversation-disk-shared)
         self.blocks: collections.OrderedDict[int, int] = collections.OrderedDict()
         self.lock = threading.Lock()
 
@@ -137,11 +144,14 @@ class Router:
         return out
 
     def matched(self, ids) -> list[int]:
-        """Per replica: how many leading tokens of `ids` it holds (a multiple of BLOCK)."""
+        """Per replica: how many leading tokens of `ids` it holds (a multiple of BLOCK).  With the shared pool, what
+        any replica served counts for all of them, less the restore (pool_penalty)."""
         got = [0] * self.n
         alive = (1 << self.n) - 1
+        pooled = 0
+        chain = self.chain(ids)
         with self.lock:
-            for k, h in enumerate(self.chain(ids)):
+            for k, h in enumerate(chain):
                 m = self.blocks.get(h, 0) & alive
                 if not m:
                     break
@@ -149,17 +159,26 @@ class Router:
                 for r in range(self.n):
                     if m >> r & 1:
                         got[r] = (k + 1) * BLOCK
+            if self.pool:
+                bit = 1 << self.n
+                for k, h in enumerate(chain):
+                    if not self.blocks.get(h, 0) & bit:
+                        break
+                    pooled = (k + 1) * BLOCK
+        if pooled > self.pool_penalty:
+            got = [max(g, pooled - self.pool_penalty) for g in got]
         return got
 
     def note(self, r: int, ids) -> None:
+        mark = (1 << r) | ((1 << self.n) if self.pool else 0)     # shared pool: it will be parked where all can read it
         with self.lock:
             for h in self.chain(ids):
-                self.blocks[h] = self.blocks.pop(h, 0) | (1 << r)
+                self.blocks[h] = self.blocks.pop(h, 0) | mark
             while len(self.blocks) > self.cap:
                 self.blocks.popitem(last=False)
 
     def forget(self, r: int) -> None:
-        """Replica r lost its cache (it restarted)."""
+        """Replica r lost its cache (it restarted).  The shared pool's bit stays: the pool is on the disk."""
         with self.lock:
             bit = ~(1 << r)
             for h in [h for h, m in self.blocks.items() if m >> r & 1]:
@@ -176,12 +195,12 @@ class ReplicaEngine:
     NOT_HERE = {"session_file", "vram", "ctl", "slot_cv"}       # not offered: one conversation file / VRAM resize / control line
     PROPAGATE = {"silence_s", "gpu_busy"}
 
-    def __init__(self, engines: list, load_tokens: int = LOAD_TOKENS):
+    def __init__(self, engines: list, load_tokens: int = LOAD_TOKENS, shared_pool: bool = False):
         if len(engines) < 2:
             raise ValueError("ReplicaEngine needs two or more engines")
         d = self.__dict__
         d["engines"] = list(engines)
-        d["router"] = Router(len(engines))
+        d["router"] = Router(len(engines), pool=shared_pool)
         d["load_tokens"] = load_tokens
         d["inflight"] = [0] * len(engines)
         d["run_locks"] = [threading.Lock() for _ in engines]    # an engine without batch slots: one request at a time

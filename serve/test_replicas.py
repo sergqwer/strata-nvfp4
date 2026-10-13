@@ -63,6 +63,20 @@ class Routing(unittest.TestCase):
         r.forget(0)
         self.assertEqual(r.matched(a), [0, BLOCK * 2, 0])
 
+    def test_the_shared_pool_counts_for_every_replica(self):
+        """strata-nvfp4, --conversation-disk-shared: what one replica served is in the pool, so every replica holds it
+        less the restore penalty; a replica's own copy still counts whole, and the pool survives a replica's restart."""
+        r = Router(3, pool=True, pool_penalty=BLOCK * 2)
+        a = list(range(BLOCK * 10))
+        r.note(1, a)
+        self.assertEqual(r.matched(a + [9]), [BLOCK * 8, BLOCK * 10, BLOCK * 8])
+        r.forget(1)
+        self.assertEqual(r.matched(a + [9]), [BLOCK * 8] * 3)
+        self.assertEqual(r.matched(a[:BLOCK]), [0, 0, 0])            # shorter than the penalty: nothing
+        plain = Router(2)
+        plain.note(0, a)
+        self.assertEqual(plain.matched(a + [9]), [BLOCK * 10, 0])    # without the pool: as before
+
     def test_the_index_is_bounded(self):
         r = Router(2, cap=10)
         for i in range(50):
@@ -104,6 +118,21 @@ class RouteChoice(unittest.TestCase):
         self.assertEqual(e.route(ids + [1]), 0)
         e.inflight = [5, 0]
         self.assertEqual(e.route(ids + [1]), 1)
+
+    def test_shared_pool_a_busy_replicas_conversation_goes_to_a_free_one(self):
+        """With the shared pool a conversation whose replica is busy resumes on a free one (a restore, not a re-read);
+        while its replica is free it still goes back there."""
+        e = ReplicaEngine([FakeEngine(), FakeEngine()], load_tokens=3000, shared_pool=True)
+        ids = list(range(BLOCK * 400))                              # 25,600 tokens, served by replica 0
+        e.router.note(0, ids)
+        e.inflight = [0, 0]
+        self.assertEqual(e.route(ids + [1]), 0)
+        e.inflight = [1, 0]                                         # replica 0 busy: replica 1 restores it from the pool
+        self.assertEqual(e.route(ids + [1]), 1)
+        plain = ReplicaEngine([FakeEngine(), FakeEngine()], load_tokens=3000)
+        plain.router.note(0, ids)
+        plain.inflight = [1, 0]                                     # without the pool: re-reading 25,600 is worse
+        self.assertEqual(plain.route(ids + [1]), 0)
 
     def test_a_dead_replica_is_skipped(self):
         a, b = FakeEngine(), FakeEngine()

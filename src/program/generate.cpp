@@ -655,6 +655,11 @@ struct Options {
     /// block when a request arrives), so a kill (the tray's taskkill /F /T) loses at most what came after the last
     /// idle stretch.  -1 = default (60 with --conversation-disk-persist), 0 = only at QUIT.
     int64_t conversation_disk_sync_s = -1;
+    /// --conversation-disk-shared (strata-nvfp4): several engines (the replicas of one server, one per GPU) use the
+    /// folder as ONE parking pool - every park goes straight to it (not to this engine's RAM cache), each request looks
+    /// for what the others wrote first, so a conversation parked by one replica comes back on any.  Implies
+    /// --conversation-disk-persist (the files are bound to the model and settings, not to this process).
+    bool conversation_disk_shared = false;
     /// --memory-limit-mib N / STRATA_MEMORY_LIMIT_MIB: the total RAM this engine's container or cgroup may use, for a
     /// container that cannot see its real limit (0 or unset = none; the flag wins over the variable)
     int64_t memory_limit_mib = -1;
@@ -819,6 +824,10 @@ void usage() {
                  "                       the live conversation and every parked one not on the disk yet are written there\n"
                  "                       (a request stops the write within 16 MiB), so a killed engine keeps them\n"
                  "                       (default 60; 0 = only at QUIT)\n"
+                 "  --conversation-disk-shared  --serve: the folder is one parking pool for several engines (the replicas\n"
+                 "                       of a server, one per GPU): every park goes there and each request looks for what\n"
+                 "                       the others wrote, so a parked conversation resumes on any replica (implies\n"
+                 "                       --conversation-disk-persist)\n"
                  "  --conversation-cache-min-tokens N  --serve: park only conversations of at least N tokens, so\n"
                  "                       short side requests do not take the slots a long one needs (default 0 = park any)\n"
                  "  --session-min-free-mib N  --serve: disk space a SAVE must leave free (default 4096; 0 = no check)\n"
@@ -2228,6 +2237,7 @@ int main(int argc, char** argv) {
         }
         else if (a == "--conversation-disk-dir") o.conversation_disk_dir = next("--conversation-disk-dir");
         else if (a == "--conversation-disk-persist") o.conversation_disk_persist = true;
+        else if (a == "--conversation-disk-shared") o.conversation_disk_shared = o.conversation_disk_persist = true;
         else if (a == "--prompt-cache-tail") o.prompt_cache_tail = true;
         else if (a == "--prompt-cache-spread") o.prompt_cache_spread = true;
         else if (a == "--prompt-cache-every") o.prompt_cache_every = std::max(0LL, std::atoll(next("--prompt-cache-every")));
@@ -8274,6 +8284,7 @@ int main(int argc, char** argv) {
             // the session files' identity: a later start with the same model and settings takes the files in
             std::string id_err;
             disk_opts.persist = session_identity(disk_opts.identity, id_err, {});
+            disk_opts.shared = disk_opts.persist && o.conversation_disk_shared;
             if (disk_opts.persist) {
                 disk_opts.ttl_s = 0;   // the budget alone
                 std::signal(SIGINT, SIG_IGN);   // Ctrl+C reaches the engine too: the server's QUIT ends it, after the save
@@ -8519,7 +8530,8 @@ int main(int argc, char** argv) {
             // capacity and directories, and put() charges that same true size -
             // a capped figure would under-evict and overfill the budget.
             // Over the budget (the incoming image still counts while it is restored): the disk tier takes it instead
-            const bool to_disk = !conversations.make_room(estimate, held);
+            // --conversation-disk-shared: every park goes to the shared pool (any replica can take it back), not RAM
+            const bool to_disk = conv_disk.shared() || !conversations.make_room(estimate, held);
             if (to_disk && !conv_disk.enabled()) {
                 std::fprintf(stderr, "strata serve: conversation cache: skip parking (snapshot %zu MiB exceeds available budget)\n",
                              estimate >> 20);
@@ -11310,6 +11322,7 @@ int main(int argc, char** argv) {
             // the disk tier holds a longer prefix than the session, a --batch slot or the RAM cache: restore that one
             if (conv_disk.enabled()) {
                 conv_disk.expire();
+                conv_disk.rescan();   // --conversation-disk-shared: what the other replicas parked since the last look
                 const auto on_disk = conv_disk.best(ids, req_imgs, want_cvec);
                 if (on_disk.tokens > std::max({resume, slot_tokens, parked.tokens})) {
                     const uint64_t floor = (uint64_t) o.conversation_cache_min_free_mib * 1024 * 1024;

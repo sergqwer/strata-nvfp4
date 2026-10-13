@@ -277,15 +277,36 @@ std::string ConversationDiskTier::scan_folder(size_t& stale, std::error_code& ec
         Entry e;
         const bool index = it->path().extension() == ".idx";
         const bool taken = index && options_.persist && read_index(ustr(it->path()), e);
+        if (index && options_.shared) seen_index_.insert(ustr(it->path()));
         if (taken) found.push_back(std::move(e));
         else others.push_back(ustr(it->path()));
         refused += index && !taken;
     }
-    // the files of the entries taken in stay; the rest goes (refused indexes and their files, interrupted writes)
+    // the files of the entries taken in stay; the rest goes (refused indexes and their files, interrupted writes).
+    // Shared: another engine's files (another identity) and young leftovers (a write still running) stay - only a
+    // leftover untouched for kSharedGrace goes.
     std::set<std::string> kept;
     for (const auto& e : found) kept.insert(e.files.begin(), e.files.end());
-    for (const auto& p : others)
-        if (!kept.count(p)) { remove_file(p); ++stale; }
+    const auto now = fs::file_time_type::clock::now();
+    for (const auto& p : others) {
+        if (kept.count(p)) continue;
+        if (options_.shared) {
+            const fs::path fp = upath(p);
+            if (fp.extension() == ".idx") continue;   // another identity's (or a torn one): not this engine's to judge
+            // an image whose entry's index exists (whatever its identity) belongs to that entry
+            const std::string name = ustr(fp.filename());
+            const size_t dash = name.rfind('-');
+            std::error_code xec;
+            if (fp.extension() == ".bin" && dash != std::string::npos &&
+                fs::exists(fp.parent_path() / upath(name.substr(0, dash) + ".idx"), xec))
+                continue;
+            std::error_code tec;
+            const auto t = fs::last_write_time(fp, tec);
+            if (tec || now - t < std::chrono::minutes(10)) continue;   // perhaps still being written by another engine
+        }
+        remove_file(p);
+        ++stale;
+    }
     std::sort(found.begin(), found.end(), [](const Entry& a, const Entry& b) { return a.written_s < b.written_s; });
     for (auto& e : found) {
         e.id = ++next_id_;
@@ -426,8 +447,9 @@ void ConversationDiskTier::writer() {
         Job job;
         {
             std::unique_lock<std::mutex> lock(m_);
-            // a job starts while the engine is idle, or when someone waits for it (its RAM, or its entry)
-            cv_.wait(lock, [&] { return stop_ || (!queue_.empty() && (!busy_ || urgent_ > 0)); });
+            // a job starts while the engine is idle, or when someone waits for it (its RAM, or its entry); shared: at
+            // once, the other replicas may want it while this engine stays busy
+            cv_.wait(lock, [&] { return stop_ || (!queue_.empty() && (!busy_ || urgent_ > 0 || options_.shared)); });
             if (stop_) return;
             job = std::move(queue_.front());
             queue_.pop_front();
@@ -472,7 +494,16 @@ bool ConversationDiskTier::write_files(Entry& e, const SavedConversation& img,
     };
     bool ok = write_one(img, sources, 0);
     for (size_t k = 0; ok && k < img.stage_images.size(); ++k) ok = write_one(img.stage_images[k], nullptr, k + 1);
-    if (ok && options_.persist) ok = write_index(e, error);   // after the images: an index names complete files only
+    if (ok && options_.persist) {
+        if (options_.shared) {   // ours: rescan() must not take it in as another engine's (it is seen before it exists)
+            char name[96];
+            std::snprintf(name, sizeof name, "%s%016llx-%llu.idx", file_prefix(), (unsigned long long) nonce_,
+                          (unsigned long long) e.id);
+            std::lock_guard<std::mutex> lock(m_);
+            seen_index_.insert(ustr(upath(options_.dir) / name));
+        }
+        ok = write_index(e, error);   // after the images: an index names complete files only
+    }
     if (!ok) {
         for (const auto& f : e.files) remove_file(f);
         e.files.clear();
@@ -630,6 +661,49 @@ bool ConversationDiskTier::write_now(const SavedConversation& image, const std::
     log(fmt("saved %zu tokens while idle: %.0f MiB in %zu file%s, %.0f ms (%.0f MB/s); %s", tokens, mib(b), nfiles,
             nfiles == 1 ? "" : "s", ms, mbps(b, ms), tail.c_str()));
     return true;
+}
+
+size_t ConversationDiskTier::rescan() {
+    if (!open_ || !options_.shared) return 0;
+    std::lock_guard<std::mutex> lock(m_);
+    std::error_code ec;
+    std::set<std::string> present;
+    std::vector<std::string> fresh;
+    for (fs::directory_iterator it(upath(options_.dir), ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string name = ustr(it->path().filename());
+        if (it->path().extension() != ".idx" || name.rfind(file_prefix(), 0) != 0) continue;
+        const std::string path = ustr(it->path());
+        present.insert(path);
+        if (!seen_index_.count(path)) fresh.push_back(path);
+    }
+    if (ec) return 0;
+    // the entries whose index another engine removed (the budget, a newer copy, a #879 clear) leave this list; their
+    // files are that engine's to delete
+    size_t gone = 0;
+    for (size_t i = 0; i < entries_.size();) {
+        if (!entries_[i].index.empty() && !present.count(entries_[i].index) && entries_[i].id != reading_) {
+            bytes_ -= entries_[i].bytes;
+            entries_.erase(entries_.begin() + (std::ptrdiff_t) i);
+            ++gone;
+            continue;
+        }
+        ++i;
+    }
+    size_t in = 0;
+    for (const auto& path : fresh) {
+        seen_index_.insert(path);
+        Entry e;
+        if (!read_index(path, e)) continue;   // another identity, or torn: not ours to judge here
+        e.id = ++next_id_;
+        e.at = now_();
+        bytes_ += e.bytes;
+        entries_.push_back(std::move(e));
+        ++in;
+    }
+    if (in || gone)
+        log(fmt("shared folder: %zu conversation%s from other engines, %zu removed by them; on disk %zu (%.0f MiB)", in,
+                in == 1 ? "" : "s", gone, entries_.size(), mib(bytes_)));
+    return in;
 }
 
 bool ConversationDiskTier::has(uint64_t id) const {
