@@ -15,7 +15,8 @@ import shutil
 from pathlib import Path
 
 # (key, kind, help).  kind: "bool", "int>=0", "num>=0", ("enum", values), "names", or ("sampling", check) for a key
-# of the "sampling" block, ("arg", flag) for an engine option kept in "args".
+# of the "sampling" block, ("arg", flag) for an engine option kept in "args" (a whole number; ("arg", flag, "text"): a
+# string, ("arg", flag, "flag"): an option without a value, on or absent).
 EDITABLE = [
     ("sampling.temperature", ("sampling", "num>=0"),
      "Default temperature for requests that send none (0 = greedy, the default without a sampling block)"),
@@ -41,11 +42,28 @@ EDITABLE = [
     ("open_browser", "bool", "Open the chat page in the browser when the model is ready"),
     ("vram_reserve_mib", ("arg", "--vram-reserve-mib"),
      "VRAM in MiB the engine leaves free for other programs (engine default 700)"),
+    # this fork: dialogs kept between requests - the engine's conversation cache and its disk tier
+    ("conversation_cache_slots", ("arg", "--conversation-cache-slots"),
+     "Dialogs kept in RAM between requests: at most this many (engine default 4). Needs the RAM below; without it "
+     "only the last dialog is kept, and another one is read again from its start"),
+    ("conversation_cache_mib", ("arg", "--conversation-cache-mib"),
+     "RAM for the kept dialogs, in MiB (empty or 0: off). Measured per dialog: 0.5 GB at 8K tokens, 1 GB at 32K, "
+     "2.2 GB at 100K; 16384 kept 8 agents' dialogs (back in 0.2-0.6 s instead of 1-11 s read again)"),
+    ("conversation_disk_dir", ("arg", "--conversation-disk-dir", "text"),
+     "Keep dialogs on the disk too: a folder on a fast SSD (empty: off). A dialog the RAM above has no room for is "
+     "written there and read back (100K tokens: 1 s instead of 11-12 s read again). Needs the RAM above"),
+    ("conversation_disk_mib", ("arg", "--conversation-disk-mib"),
+     "Disk space for those dialogs, in MiB (engine default 32768)"),
+    ("conversation_disk_persist", ("arg", "--conversation-disk-persist", "flag"),
+     "Keep the dialogs on the disk for the next start (off: removed when the model stops, and after 30 minutes). "
+     "Saved after 60 s without requests, so closing Strata's window loses at most what came after"),
 ]
 SPEC = {k: kind for k, kind, _ in EDITABLE}
 # the view's headings: the first key of each group -> its title
 SECTIONS = {"sampling.temperature": "Sampling defaults", "reasoning_budget_tokens": "Requests",
-            "idle_unload_s": "Loading and the engine"}
+            "idle_unload_s": "Loading and the engine", "conversation_cache_slots": "Dialogs"}
+DIALOG_KEYS = ("conversation_cache_slots", "conversation_cache_mib", "conversation_disk_dir", "conversation_disk_mib",
+               "conversation_disk_persist")
 NO_PROJECTION = ("this model loads no refusal projection (--control-vector-scaled): setup loads it for the original "
                  "Qwen's families only, never for NVIDIA's model (its license does not allow bypassing the model's "
                  "safety guardrails), nor for Swift 1.5 or the Coder")
@@ -57,12 +75,19 @@ def has_projection(cfg: dict) -> bool:
     return any(str(x) in ("--control-vector-scaled", "--control-vector") for x in a)
 
 
-def _arg(cfg: dict, flag: str):
+def _arg(cfg: dict, flag: str, sub: str = "int>=0"):
     a = cfg.get("args") if isinstance(cfg.get("args"), list) else []
+    if sub == "flag":
+        return True if flag in a else None
     if flag in a[:-1]:
         v = str(a[a.index(flag) + 1])
-        return int(v) if v.isdigit() else v
+        return int(v) if v.isdigit() and sub != "text" else v
     return None
+
+
+def _sub(kind) -> str:
+    """An "arg" key's value kind: "int>=0" (the default), "text" or "flag"."""
+    return kind[2] if len(kind) > 2 else "int>=0"
 
 
 def value_of(cfg: dict, key: str):
@@ -71,7 +96,7 @@ def value_of(cfg: dict, key: str):
         s = cfg.get("sampling")
         return s.get(key.split(".", 1)[1]) if isinstance(s, dict) else None
     if isinstance(kind, tuple) and kind[0] == "arg":
-        return _arg(cfg, kind[1])
+        return _arg(cfg, kind[1], _sub(kind))
     return cfg.get(key)
 
 
@@ -80,6 +105,8 @@ def view(cfg: dict, path: str | Path) -> dict:
     out = []
     for key, kind, help_ in EDITABLE:
         k = kind[0] if isinstance(kind, tuple) else kind
+        if k == "arg" and _sub(kind) != "int>=0":
+            k = {"text": "text", "flag": "bool"}[_sub(kind)]
         off = key == "uncensored" and not has_projection(cfg)   # nothing to switch: shown, not settable
         out.append({"key": key, "value": value_of(cfg, key), "help": help_ + (f" - not available: {NO_PROJECTION}"
                                                                                  if off else ""),
@@ -128,6 +155,14 @@ def check(key: str, v, cfg: dict):
         return _number(key, v, whole=True)
     if k == "num>=0":
         return _number(key, v)
+    if k == "arg" and _sub(kind) == "flag":
+        if not isinstance(v, bool):
+            raise ValueError(f"{key}: expected true or false, not {v!r}")
+        return v or None                               # off: the option is left out, as by default
+    if k == "arg" and _sub(kind) == "text":
+        if not isinstance(v, str) or not v.strip() or len(v) > 1024 or any(ord(c) < 32 for c in v):
+            raise ValueError(f"{key}: expected a folder (one line of text), not {v!r}")
+        return v.strip()
     if k == "arg":
         return _number(key, v, whole=True)
     rule = kind[1]                                     # a sampling key: the server's own rules
@@ -163,6 +198,9 @@ def apply(cfg: dict, changes: dict) -> tuple[dict, list[str]]:
                 new["sampling"] = s
             else:
                 new.pop("sampling", None)
+        elif isinstance(kind, tuple) and kind[0] == "arg" and _sub(kind) == "flag":
+            a = [x for x in (new.get("args") or []) if x != kind[1]]
+            new["args"] = a + [kind[1]] if v else a
         elif isinstance(kind, tuple) and kind[0] == "arg":
             a = list(new.get("args") or [])
             flag = kind[1]
@@ -180,7 +218,24 @@ def apply(cfg: dict, changes: dict) -> tuple[dict, list[str]]:
         else:
             new[key] = v
         changed.append(key)
+    if any(k in changed for k in DIALOG_KEYS):
+        _check_dialogs(new)
     return new, changed
+
+
+def _check_dialogs(cfg: dict):
+    """The kept dialogs' keys work together: a refusal names what is missing (an engine given one without the other
+    would start and keep nothing)."""
+    v = {k: value_of(cfg, k) for k in DIALOG_KEYS}
+    if not v["conversation_cache_mib"]:
+        for k in ("conversation_cache_slots", "conversation_disk_dir"):
+            if v[k] is not None:
+                raise ValueError(f"{k}: dialogs are kept only with RAM for them - set conversation_cache_mib too "
+                                 "(e.g. 16384), or clear both")
+    if not v["conversation_disk_dir"]:
+        for k in ("conversation_disk_mib", "conversation_disk_persist"):
+            if v[k] is not None:
+                raise ValueError(f"{k}: set the folder (conversation_disk_dir) too, or clear both")
 
 
 def save(path: str | Path, cfg: dict) -> Path:

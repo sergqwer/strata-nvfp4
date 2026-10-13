@@ -133,6 +133,52 @@ class Uncensored(unittest.TestCase):
         self.assertIn('k.available === false ? " disabled" : ""', js)    # a model without the projection: greyed out
 
 
+class Dialogs(unittest.TestCase):
+    """Kept dialogs: the conversation cache (--conversation-cache-slots / -mib) and its disk tier (--conversation-disk-dir,
+    -mib, --conversation-disk-persist without a value), each set and cleared alone, and refused without what they need."""
+    ON = {"conversation_cache_slots": 8, "conversation_cache_mib": 16384, "conversation_disk_dir": "D:/strata dialogs",
+          "conversation_disk_mib": 131072, "conversation_disk_persist": True}
+
+    def test_on_and_off(self):
+        new, changed = runconfig.apply(CFG, self.ON)
+        self.assertEqual(changed, list(self.ON))
+        self.assertEqual(new["args"][len(CFG["args"]):],
+                         ["--conversation-cache-slots", "8", "--conversation-cache-mib", "16384",
+                          "--conversation-disk-dir", "D:/strata dialogs", "--conversation-disk-mib", "131072",
+                          "--conversation-disk-persist"])
+        got = {k["key"]: k for k in runconfig.view(new, "x.json")["keys"]}
+        self.assertEqual({k: got[k]["value"] for k in self.ON}, self.ON)
+        self.assertEqual([got[k]["kind"] for k in self.ON], ["number", "number", "text", "number", "bool"])
+        self.assertEqual(got["conversation_cache_slots"]["section"], "Dialogs")
+        again, changed = runconfig.apply(new, self.ON)                   # the same values: nothing changes
+        self.assertEqual((again, changed), (new, []))
+        off, changed = runconfig.apply(new, {k: None for k in self.ON})
+        self.assertEqual((off["args"], changed), (CFG["args"], list(self.ON)))
+        off, _ = runconfig.apply(new, {"conversation_disk_persist": False})   # off = the option left out
+        self.assertNotIn("--conversation-disk-persist", off["args"])
+        self.assertIn("--conversation-disk-dir", off["args"])
+
+    def test_a_folder_named_by_digits_stays_text(self):
+        new, _ = runconfig.apply(CFG, {"conversation_cache_mib": 4096, "conversation_disk_dir": "2026"})
+        self.assertEqual(runconfig.value_of(new, "conversation_disk_dir"), "2026")
+
+    def test_refused_without_what_they_need(self):
+        for changes, says in (({"conversation_cache_slots": 8}, "conversation_cache_mib"),
+                              ({"conversation_disk_dir": "D:/d"}, "conversation_cache_mib"),
+                              ({"conversation_cache_mib": 0, "conversation_disk_dir": "D:/d"}, "conversation_cache_mib"),
+                              ({"conversation_cache_mib": 4096, "conversation_disk_persist": True}, "conversation_disk_dir"),
+                              ({"conversation_cache_mib": 4096, "conversation_disk_mib": 1024}, "conversation_disk_dir"),
+                              ({"conversation_disk_persist": "yes"}, "true or false"),
+                              ({"conversation_disk_dir": "a\nb"}, "folder"), ({"conversation_disk_dir": " "}, "folder"),
+                              ({"conversation_cache_mib": -1}, "at least 0")):
+            with self.subTest(changes=changes), self.assertRaises(ValueError) as e:
+                runconfig.apply(CFG, changes)
+            self.assertIn(says, str(e.exception))
+        new, _ = runconfig.apply(CFG, self.ON)
+        with self.assertRaises(ValueError):                              # the RAM goes, the disk would stay unused
+            runconfig.apply(new, {"conversation_cache_mib": None})
+
+
 class Http(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
