@@ -217,6 +217,61 @@ class Parallel(unittest.TestCase):
         self.assertIn("--batch", got["help"])
 
 
+class Context(unittest.TestCase):
+    """--max-context as setup's sizes, never empty; past the trained 262144 the RoPE extension setup writes (yarn unless
+    linear is picked, the factor context / 262144), taken out again within it; none past it refused, as by setup."""
+    BASE = {**CFG, "args": CFG["args"] + ["--max-context", "262144"]}
+
+    def rope(self, cfg):
+        a = cfg["args"]
+        return tuple(a[a.index(f) + 1] if f in a else None for f in ("--max-context", "--rope-scaling", "--rope-scale"))
+
+    def test_past_the_trained_context_and_back(self):
+        new, changed = runconfig.apply(self.BASE, {"max_context": 524288})
+        self.assertEqual((changed, self.rope(new)), (["max_context", "rope_scaling"], ("524288", "yarn", "2")))
+        new, changed = runconfig.apply(new, {"max_context": 393216})
+        self.assertEqual((changed, self.rope(new)), (["max_context"], ("393216", "yarn", "1.5")))
+        new, changed = runconfig.apply(new, {"rope_scaling": "linear"})
+        self.assertEqual((changed, self.rope(new)), (["rope_scaling"], ("393216", "linear", "1.5")))
+        new, changed = runconfig.apply(new, {"rope_scaling": None})     # the default past 262144: yarn again
+        self.assertEqual((changed, self.rope(new)), (["rope_scaling"], ("393216", "yarn", "1.5")))
+        new, changed = runconfig.apply(new, {"max_context": 131072})
+        self.assertEqual((changed, self.rope(new)), (["max_context", "rope_scaling"], ("131072", None, None)))
+        self.assertEqual(new["args"][:len(CFG["args"])], CFG["args"])    # the other args stay
+        both, changed = runconfig.apply(self.BASE, {"max_context": 524288, "rope_scaling": "linear"})
+        self.assertEqual((changed, self.rope(both)), (["max_context", "rope_scaling"], ("524288", "linear", "2")))
+
+    def test_view(self):
+        new, _ = runconfig.apply(self.BASE, {"max_context": 524288})
+        got = {k["key"]: k for k in runconfig.view(new, "x.json")["keys"]}
+        ctx, rope = got["max_context"], got["rope_scaling"]
+        self.assertEqual((ctx["kind"], ctx["value"], ctx["required"], ctx["section"]), ("choice", 524288, True, "Context"))
+        self.assertEqual([n for n, _ in ctx["choices"]], runconfig.CONTEXTS)
+        self.assertIn("trained", dict(ctx["choices"])[262144])
+        self.assertIn("RoPE", dict(ctx["choices"])[524288])
+        self.assertEqual((rope["kind"], rope["value"], rope["choices"]), ("enum", "yarn", ["yarn", "linear"]))
+        self.assertIn("now: yarn, factor 2", rope["help"])
+        odd = {k["key"]: k for k in runconfig.view({**CFG, "args": ["--max-context", "100000"]}, "x")["keys"]}
+        self.assertIn(100000, [n for n, _ in odd["max_context"]["choices"]])   # the file's own size is listed
+
+    def test_refused(self):
+        for changes, says in (({"max_context": None}, "4096"), ({"max_context": 512}, "at least 1024"),
+                              ({"max_context": 4 * 262144 + 1}, "at most 1048576"), ({"max_context": "262144"}, "whole"),
+                              ({"rope_scaling": "yarn"}, "nothing to extend"), ({"rope_scaling": "none"}, "yarn or linear")):
+            with self.subTest(changes=changes), self.assertRaises(ValueError) as e:
+                runconfig.apply(self.BASE, changes)
+            self.assertIn(says, str(e.exception))
+        hand = {**CFG, "args": ["--max-context", "262144", "--rope-scaling", "none"]}
+        with self.assertRaises(ValueError) as e:                          # none past 262144, as setup refuses it
+            runconfig.apply(hand, {"max_context": 524288})
+        self.assertIn("pick yarn or linear", str(e.exception))
+        self.assertEqual(runconfig.apply(hand, {"fit_max_tokens": True})[0]["args"], hand["args"])   # left alone
+
+    def test_the_page_keeps_a_required_choice(self):
+        js = (ROOT / "serve" / "web" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("k.required && v != null", js)                       # no empty choice for the context
+
+
 class Http(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()

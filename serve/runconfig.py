@@ -16,8 +16,8 @@ from pathlib import Path
 
 # (key, kind, help).  kind: "bool", "int>=0", "num>=0", ("enum", values), "names", or ("sampling", check) for a key
 # of the "sampling" block, ("arg", flag) for an engine option kept in "args" (a whole number; ("arg", flag, "text"): a
-# string, ("arg", flag, "flag"): an option without a value, on or absent), ("count", lo, hi) for a whole number the
-# page offers as a list.
+# string, ("arg", flag, "flag"): an option without a value, on or absent; "context" and "rope": --max-context and
+# --rope-scaling, kept together with --rope-scale), ("count", lo, hi) for a whole number the page offers as a list.
 EDITABLE = [
     ("sampling.temperature", ("sampling", "num>=0"),
      "Default temperature for requests that send none (0 = greedy, the default without a sampling block)"),
@@ -63,14 +63,23 @@ EDITABLE = [
     ("conversation_disk_persist", ("arg", "--conversation-disk-persist", "flag"),
      "Keep the dialogs on the disk for the next start (off: removed when the model stops, and after 30 minutes). "
      "Saved after 60 s without requests, so closing Strata's window loses at most what came after"),
+    # the context, and past the trained one the RoPE extension setup writes there (setup.py resolve_rope)
+    ("max_context", ("arg", "--max-context", "context"),
+     "Context size in tokens: the longest dialog. More takes more VRAM for its K/V, taken from the expert cache "
+     "(3.35 GiB at 262,144, 6.7 GiB at 524,288). Past the model's trained 262,144 it needs the RoPE extension below"),
+    ("rope_scaling", ("arg", "--rope-scaling", "rope"),
+     "RoPE extension past the trained 262,144 tokens: yarn (chosen there by default, measured the best at 512K) or "
+     "linear. The factor is the context over 262,144 (2 at 524,288), as setup writes it; within 262,144 none is used"),
 ]
 SPEC = {k: kind for k, kind, _ in EDITABLE}
 # the view's headings: the first key of each group -> its title
 SECTIONS = {"sampling.temperature": "Sampling defaults", "reasoning_budget_tokens": "Requests",
-            "idle_unload_s": "Loading and the engine", "parallel": "Dialogs"}
+            "idle_unload_s": "Loading and the engine", "parallel": "Dialogs", "max_context": "Context"}
 # what an empty field means, where "default" says too little (the page's placeholder / first choice)
 DEFAULTS = {"conversation_cache_slots": "default: 4", "conversation_cache_mib": "off", "conversation_disk_dir": "off",
             "conversation_disk_mib": "default: 32768", "conversation_disk_persist": "default: off"}
+TRAINED_CTX = 262144      # the model's trained context (Qwen3.8-Flash-Next: every family setup installs)
+CONTEXTS = [8192, 32768, 65536, 131072, 204800, 262144, 393216, 524288]   # setup.py's CONTEXTS
 DIALOG_KEYS = ("conversation_cache_slots", "conversation_cache_mib", "conversation_disk_dir", "conversation_disk_mib",
                "conversation_disk_persist")
 NO_PROJECTION = ("this model loads no refusal projection (--control-vector-scaled): setup loads it for the original "
@@ -90,12 +99,12 @@ def _arg(cfg: dict, flag: str, sub: str = "int>=0"):
         return True if flag in a else None
     if flag in a[:-1]:
         v = str(a[a.index(flag) + 1])
-        return int(v) if v.isdigit() and sub != "text" else v
+        return int(v) if v.isdigit() and sub in ("int>=0", "context") else v
     return None
 
 
 def _sub(kind) -> str:
-    """An "arg" key's value kind: "int>=0" (the default), "text" or "flag"."""
+    """An "arg" key's value kind: "int>=0" (the default), "text", "flag", "context" or "rope"."""
     return kind[2] if len(kind) > 2 else "int>=0"
 
 
@@ -132,15 +141,31 @@ def _count_view(cfg: dict, key: str, kind) -> dict:
     return out
 
 
+def _context_view(cfg: dict, key: str) -> dict:
+    """--max-context as setup's sizes (and the file's own); never empty: without it the engine runs 4096 tokens.
+    --rope-scaling: yarn or linear, the factor in force said in its help."""
+    v = value_of(cfg, key)
+    if key == "max_context":
+        ns = sorted(set(CONTEXTS + ([v] if isinstance(v, int) else [])))
+        return {"kind": "choice", "required": True, "default": "not set: the engine's 4096",
+                "choices": [[n, f"{n // 1024}K - {n:,}" + (" (the trained context)" if n == TRAINED_CTX else
+                                                          " (RoPE extension)" if n > TRAINED_CTX else "")] for n in ns]}
+    scale = _arg(cfg, "--rope-scale", "text")
+    return {"kind": "enum", "default": f"default: yarn past {TRAINED_CTX:,}",
+            "choices": ["yarn", "linear"] + ([v] if v not in (None, "yarn", "linear") else []),
+            "note": f" - now: {v}, factor {scale}" if v is not None and scale is not None else ""}
+
+
 def view(cfg: dict, path: str | Path) -> dict:
     """GET /config: the editable keys with their values (None: not set, the default applies)."""
     out = []
     for key, kind, help_ in EDITABLE:
         k = kind[0] if isinstance(kind, tuple) else kind
-        if k == "arg" and _sub(kind) != "int>=0":
+        if k == "arg" and _sub(kind) in ("text", "flag"):
             k = {"text": "text", "flag": "bool"}[_sub(kind)]
         off = key == "uncensored" and not has_projection(cfg)   # nothing to switch: shown, not settable
-        extra = _count_view(cfg, key, kind) if k == "count" else {}
+        extra = _count_view(cfg, key, kind) if k == "count" else \
+            _context_view(cfg, key) if k == "arg" and _sub(kind) in ("context", "rope") else {}
         out.append({"key": key, "value": value_of(cfg, key), "help": help_ + (f" - not available: {NO_PROJECTION}"
                                                                                  if off else extra.pop("note", "")),
                     "kind": "number" if k in ("sampling", "arg", "int>=0", "num>=0") else k,
@@ -154,7 +179,7 @@ def view(cfg: dict, path: str | Path) -> dict:
 def _number(key, v, whole=False, lo=0.0, hi=None, lo_open=False):
     if isinstance(v, bool) or not isinstance(v, (int, float)) or (whole and v != int(v)) or \
             (v <= lo if lo_open else v < lo) or (hi is not None and v > hi):
-        rng = f"{'more than' if lo_open else 'at least'} {lo:g}" + (f" and at most {hi:g}" if hi is not None else "")
+        rng = f"{'more than' if lo_open else 'at least'} {lo:g}" + (f" and at most {hi:.10g}" if hi is not None else "")
         raise ValueError(f"{key}: expected a {'whole ' if whole else ''}number, {rng}, not {v!r}")
     return int(v) if whole else v
 
@@ -163,6 +188,8 @@ def check(key: str, v, cfg: dict):
     """The value to store for `key`, or a ValueError naming what is expected.  None removes the key (its default)."""
     if key not in SPEC:
         raise ValueError(f"{key!r} cannot be changed here (only the keys the Settings view lists)")
+    if key == "max_context" and v is None:
+        raise ValueError("max_context: pick a size (without --max-context the engine runs 4096 tokens)")
     if v is None:
         return None
     kind = SPEC[key]
@@ -197,6 +224,12 @@ def check(key: str, v, cfg: dict):
         if not isinstance(v, str) or not v.strip() or len(v) > 1024 or any(ord(c) < 32 for c in v):
             raise ValueError(f"{key}: expected a folder (one line of text), not {v!r}")
         return v.strip()
+    if k == "arg" and _sub(kind) == "context":
+        return _number(key, v, whole=True, lo=1024, hi=4 * TRAINED_CTX)
+    if k == "arg" and _sub(kind) == "rope":
+        if v not in ("yarn", "linear"):
+            raise ValueError(f"{key}: expected yarn or linear, not {v!r}")
+        return v
     if k == "arg":
         return _number(key, v, whole=True)
     if k == "count":
@@ -238,25 +271,52 @@ def apply(cfg: dict, changes: dict) -> tuple[dict, list[str]]:
             a = [x for x in (new.get("args") or []) if x != kind[1]]
             new["args"] = a + [kind[1]] if v else a
         elif isinstance(kind, tuple) and kind[0] == "arg":
-            a = list(new.get("args") or [])
-            flag = kind[1]
-            if flag in a[:-1]:
-                i = a.index(flag)
-                if v is None:
-                    del a[i:i + 2]
-                else:
-                    a[i + 1] = str(v)
-            elif v is not None:
-                a += [flag, str(v)]
-            new["args"] = a
+            new["args"] = _put(list(new.get("args") or []), kind[1], v)
         elif v is None:
             new.pop(key, None)
         else:
             new[key] = v
         changed.append(key)
+    if "max_context" in changed or "rope_scaling" in changed:
+        _fit_rope(new, "rope_scaling" in changed and checked["rope_scaling"] is not None)
+        changed = [k for k in changed if value_of(new, k) != value_of(cfg, k)] + \
+            [k for k in ("rope_scaling",) if k not in changed and value_of(new, k) != value_of(cfg, k)]
     if any(k in changed for k in DIALOG_KEYS):
         _check_dialogs(new)
     return new, changed
+
+
+def _put(a: list, flag: str, v) -> list:
+    """`a` with `flag`'s value set to `v`, or the flag and its value left out (None)."""
+    if flag in a[:-1]:
+        i = a.index(flag)
+        if v is None:
+            del a[i:i + 2]
+        else:
+            a[i + 1] = str(v)
+    elif v is not None:
+        a += [flag, str(v)]
+    return a
+
+
+def _fit_rope(cfg: dict, explicit: bool):
+    """setup's rule (resolve_rope) for a context the page changed: past the trained context the extension is on
+    (yarn unless linear was picked) with the factor context / trained; within it --rope-scaling and --rope-scale go.
+    none past it is refused, as setup refuses it: positions the model never saw, rotated as if it had."""
+    ctx, method = value_of(cfg, "max_context"), value_of(cfg, "rope_scaling")
+    a = list(cfg.get("args") or [])
+    if isinstance(ctx, int) and ctx > TRAINED_CTX:
+        if method not in (None, "yarn", "linear"):
+            raise ValueError(f"rope_scaling: a context of {ctx:,} is past the model's trained {TRAINED_CTX:,}, and "
+                             f"{method} keeps the trained angles there: pick yarn or linear, or a context of "
+                             f"{TRAINED_CTX:,} or less")
+        a = _put(_put(a, "--rope-scaling", method or "yarn"), "--rope-scale", f"{ctx / TRAINED_CTX:g}")
+    elif explicit:
+        raise ValueError(f"rope_scaling: a context of {ctx or 4096:,} fits the model's trained {TRAINED_CTX:,} - there "
+                         "is nothing to extend (pick a larger context first)")
+    else:
+        a = _put(_put(a, "--rope-scaling", None), "--rope-scale", None)
+    cfg["args"] = a
 
 
 def _check_dialogs(cfg: dict):
