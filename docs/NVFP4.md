@@ -374,6 +374,39 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### Several dialogs at once (2026-10-13, branch extras/parallel-dialogs)
+
+- **Dialogs that take turns re-read each other.** Without `--conversation-cache-mib` (the tray never passed it; the
+  default is 0) the engine holds one conversation, and its checkpoints are points of the live session's chain: another
+  conversation overwrites their K/V, so only the shared system prompt's root checkpoint survives a switch. Measured
+  switch cost (two dialogs on a 3K shared system prompt, through the server): 1.1-1.2 s at 8K, 3.2-3.5 s at 32K,
+  10.7-11.1 s at 100K; with `--conversation-cache-mib 16384 --conversation-cache-slots 8` 0.18-0.30 s, 0.21-0.38 s and
+  0.35-0.62 s, for 0.5-0.6 / 0.8-1.1 / 2.1-2.3 GB of RAM per parked conversation (park 50-250 ms, restore 20-110 ms).
+- **Claude Code's pattern needs #1164.** A main session and subagents on one system prompt with a short side call on
+  another one in between: upstream's cache took a parked subagent's conversation for the shared root and overwrote it,
+  so the subagent's next turn read 29K again (3.35 s); with the borrow 0.23 s.
+- **Requests at the same time are queued, and that works.** No errors, crashes or mixed-up answers in any run (exact
+  settings: each dialog's text equal to its solo run; default settings: each answer names its own document's codename).
+  What made `"parallel"` useless here was VRAM: four 262K slots took 14.6 GiB, the expert cache 4 GiB instead of 22.
+- **Changes** (none touches a single dialog without `--batch` or the cache):
+  - `--batch-max-context N` sizes the batch slots; a request longer than a slot runs alone on the solo path;
+  - with `--batch` the main session keeps the elastic K/V, and a request alone keeps PcieAuto and
+    `STRATA_ADAPT_FETCH=2` (off before: -12.6% decode for one dialog beside 64K slots);
+  - a batch window carries one control-vector setting (a dialog with `"uncensored": true` decoded with the other one's
+    setting while that one's prompt was read: its text left its solo run at char 37);
+  - from upstream PRs not merged yet: #1503 (s.anastasiou), #1163 and #1164 (BlueKingMuch), #1959
+    `--prompt-cache-spread` (xrip); from forks: `STRATA_PARK_REWIND_MAX` (Xiaomi2008 8e4ccbe9).
+- **Checks**: upstream's `batch_test.py` (4 slots at 32K and 2 at 262K), `batch_interleave_test.py` (8 cases) and
+  `parking_test.py` give tokens identical to the solo runs; through the server 2-4 dialogs at once, a client that
+  leaves, agents taking turns with and without the cache, a request longer than a slot: equal to the one-at-a-time
+  runs; `STRATA_ADAPT_FETCH_CHECKRES=1` under concurrent requests: no residency mismatch; CPU tests
+  `conversation_cache_test` (4771 checks) and `conv_cache_test` pass, the server's 753 tests too (12 skipped).
+- **One dialog's decode** (a ~650-token answer, fresh server per arm, rounds interleaved, median): the tray's config
+  175.8 tok/s, with the conversation cache 174.9 (-0.5%), `"parallel": 2` + 64K slots 158.6 (-9.8%), `"parallel": 4`
+  + 32K slots 161.3 (-8.2%); before PcieAuto and the fetch were kept with `--batch` -12.6% / -12.7%. The rest is the
+  slots' VRAM (7762 cache slots instead of 8530). So the cache is the recommended setting for one user with an agent
+  client, and `"parallel"` the choice when requests really overlap (docs/BATCHING.md, "This fork").
+
 ### Upstream 0.1.43.1 (2026-10-13, release 0.1.43.1-nvfp4.1)
 
 - **The port.** rel/0.1.42's first-parent chain since v0.1.42 holds 121 commits; 120 are carried (the 121st is the
@@ -403,37 +436,17 @@ Tried and dropped:
     with the CUDA error, so the start steps the chunk down to 512 tokens instead of exiting;
   - a token embedding that could not be page-locked stays in the first card's VRAM; the drafter on the split's last
     card read it there ("mtp prefill: an illegal memory access"). The start now refuses that case and says why.
-  - a later stage's probed PCIe share starts from the pack's base like CUDA0's: 0.25 for NVFP4, not the i-quants'
-    0.55 (issue #7's CUDA1 on 6.8 GB/s got 0.19 instead of 0.085).
   Not run on two GPUs (one card here): the refusal and the step-down were not executed.
-- **Taken from other forks and upstream pull requests** (serve, with their tests; credits in the commits):
-  Python-style `True` / `False` in a tool call become JSON booleans where the schema allows one (jarydkrish/Strata);
-  a call missing its `</tool_call>` ends at its own `</function>` (upstream PR #1881, LeGeRyChEeSe); a quoted
-  `</tool_response>` stays text, a wrapped tool result keeps its closer (upstream PR #1840, Mert Özkan); opt-in
-  `"tool_name_repair"` maps a call to an undeclared tool onto the declared one it meant (ANBAL534/Strata); an image URL
-  is fetched only from a public address, re-checked on every redirect (shoftee/Strata). In the engine, the private
-  f32 -> BF16 conversions of the PLE and prompt paths keep a NaN a NaN (sebastianrcnt/Strata): over all 2^32 inputs
-  every non-NaN one converts to the same bits as before, and the old code turned 131,072 NaN patterns into -0 or inf.
-- **Linux:** the fork built on Ubuntu 24.04 (gcc 13.3 and 15.2, CUDA 13.3, archs 89 and 120 with the sm_120a W4A4
-  unit) - its first Linux build. Fixed for it: two tests' FP16 conversions (f16_bits.hpp, not F16C intrinsics gcc
-  refused; `mmq_nvfp4_parity` builds outside `STRATA_BUILD_TESTS`), `check_isa_guard` knowing `nvfp4_avx512.cpp`,
-  setup tests that pin the Windows asset, and a raw NUL byte upstream 0.1.43 put in a char literal of
-  `expert_source.cpp` (now `'\0'`, the same code; git had taken the file for binary). Not run on Linux here.
-- **The Monitor** lists every GPU: its engine device and role (layer-split stage and layers, peer tier, helper cache,
-  image encoder, unused), VRAM, load, temperature, power and PCIe link (current / max, with the engine's measured
-  bandwidth); the Disk card reads the model's drives. The Windows bundle's `.venv-serve` gets `psutil==7.2.2`
-  (`requirements-serve.txt`; `update.cmd` installs it into an existing one when that file changed).
 - **Checks** (RTX 5090 + Ryzen 9 9950X3D, 128 GB; references of 0.1.42-nvfp4.2's engine ddd78216 made with it on
   `qwen-nvfp4-gptq`, the same bits as 0.1.42-nvfp4.1's):
   - 2K and 32K give the same logits and 32 tokens (`--pcie-frac 0.25`, the CPU share 0.5, 6,000 slots), on the port's
-    first build (f2ba8a5c), on 925c7326 with the #7 fixes and on the release build ecdf7aa9 (+ the commits above);
+    first build (f2ba8a5c) and on the release build 925c7326 with the #7 fixes;
   - through the server, the tail skip left unset, the 12 KL texts' rows and logpos files are byte for byte those of
     ddd78216 (normal mode, 8,000 slots): the start line says the skip is off for this fork's packs; upstream's IQ2_XS
     GGUF still starts with it on (72.8% of its experts cached, under #1884's line);
   - with every fork default off the logits equal upstream 0.1.43.1's on IQ2_XS (32K, 12,000 slots);
-  - tests: 116 of 119 engine tests pass (the 3 others need model files this PC does not have); the server's 827 OK
-    (17 skipped; 751 before the commits above); setup's and the tools' 821, all but `test_iq_pack` (no `yaml`
-    in that venv).
+  - tests: 116 of 119 engine tests pass (the 3 others need model files this PC does not have); the server's 751 OK
+    (16 skipped); setup's and the tools' 821, all but `test_iq_pack` (no `yaml` in that venv).
 - **Decode speed**, 5 interleaved pairs (`bench_prompt.txt`, 1,000 tokens, `--stop-eos`, cache auto): 0.1.42-nvfp4.2's
   engine 178.1 tokens/s (median; mean 168.0 +- 22.9), this one 179.2 (174.1 +- 11.6), the ratio per pair 1.008
   (median); the same misses per layer (2.18) and cache hits (92.9%). Two outlier runs, one on each side, had a slow
