@@ -9,6 +9,72 @@ conversations at the same time instead of waiting for each other.
 
 It is opt-in and changes nothing when the options are absent (#465; the engine part is PR #559).
 
+## This fork: several dialogs on one RTX 5090 (2026-10-13)
+
+Measured with the setup-default `qwen-nvfp4-gptq` config (`--max-context 262144`, `--kv int8`, MTP, every expert in
+RAM) through the HTTP server. "Several dialogs" is two problems.
+
+**Dialogs that take turns** (two chats; Claude Code's main session, its subagents and its short side calls). The
+engine holds one conversation: its checkpoints are points of the live session, so another conversation overwrites
+their K/V and only the shared system prompt (the root checkpoint) survives a switch. Each switch reads the other
+dialog again from there (time to the first token of the next turn, two dialogs on a 3K shared system prompt):
+
+| context | switch, no cache | with `--conversation-cache-mib 16384` | parked conversation (RAM) |
+| ---: | ---: | ---: | ---: |
+| 8K | 1.1-1.2 s | 0.18-0.30 s | 0.5-0.6 GB |
+| 32K | 3.2-3.5 s | 0.21-0.38 s | 0.8-1.1 GB |
+| 100K | 10.7-11.1 s | 0.35-0.62 s | 2.1-2.3 GB |
+
+Parking takes 50-250 ms, a restore 20-110 ms. A 205K conversation read again behind a Claude Code subagent took 44 s
+in this PC's tray log.
+
+**Requests at the same time.** Without `"parallel"` they queue: one answer at a time, keep-alive pings while they
+wait; nothing broke in any run, and every one of them is a switch (above). With `"parallel": N` on this config every
+slot was carved for the whole 262K context and the fork's elastic K/V was off: four slots took 14.6 GiB, the expert
+cache fell from 22 GiB to 4 GiB (hits 12-21% instead of ~92%), a request alone decoded at 45-70 tok/s instead of
+~175, and four short answers at once came out at 7 tok/s in all. That is what broke.
+
+What the fork changes (opt-in: without `--batch` and the cache a single dialog runs as before):
+
+- **`--batch-max-context N`** sizes each slot for N cells (65,536: 1.00 GiB a slot; 32,768: 0.56 GiB). A request whose
+  prompt plus `max_tokens` does not fit a slot runs alone on the solo path once the slots have finished (the engine
+  refuses such a `BGEN` with `ERR BGEN-LONG` as its own guard).
+- **With `--batch`, the main session keeps the elastic K/V and a request alone keeps PcieAuto and
+  `STRATA_ADAPT_FETCH=2`** (all three were off with `--batch`).
+- **A batch window carries one control-vector setting.** The per-request "uncensored" projection is one device flag,
+  and a window applied whatever the last prompt read had set to every slot: a dialog with `"uncensored": true` beside
+  one without left its solo text at char 37. The windows now alternate between the settings present.
+- **Conversation-cache fixes from upstream PRs that were not merged**: #1503 (a park after a slot gave its
+  conversation back could store another conversation's K/V), #1164 (a new conversation that matches only the shared
+  root inside a parked one borrows it instead of taking it: without it a subagent lost its history whenever a side
+  request ran in between - 3.35 s against 0.23 s for its next turn at 32K), #1163 (a re-parked conversation reserves
+  at most an eighth), Xiaomi2008's `STRATA_PARK_REWIND_MAX` and xrip's `--prompt-cache-spread` (#1959).
+
+One dialog's decode, one ~650-token answer per request, every arm a fresh server, rounds interleaved (median):
+
+| config | tok/s | vs the tray's |
+| --- | ---: | ---: |
+| the tray's (no cache, no `parallel`) | 175.8 | - |
+| + `--conversation-cache-mib 16384 --conversation-cache-slots 8` | 174.9 | -0.5% |
+| + `"parallel": 2`, `--batch-max-context 65536` (2.00 GiB of slots) | 158.6 | -9.8% |
+| + `"parallel": 4`, `--batch-max-context 32768` (2.24 GiB) | 161.3 | -8.2% |
+| + `"parallel": 2`, 65536, `--batch-mtp` | 158.2 | -10.0% |
+
+(Before PcieAuto and the fetch were kept with `--batch`: -12.6% / -12.7% / -15.0%.) What is left is the slots' VRAM:
+the expert cache holds 7762 slots instead of 8530, 91-92% hits instead of 93%.
+
+Recommended for one user with an agent client (Claude Code): the conversation cache only, which costs no decode speed
+(the RAM is a cap; 45 GiB were free after loading on a 128 GB PC):
+
+```
+"args": [ ..., "--conversation-cache-mib", "16384", "--conversation-cache-slots", "8" ],
+"env": { "STRATA_PARK_REWIND_MAX": "8192" }
+```
+
+Requests that really run at the same time (several clients, parallel subagents) then queue and each switch costs a
+park and a restore. `"parallel": 2` with `"--batch-max-context", "65536"` lets two of them decode together, for about
+10% of a single dialog's decode speed.
+
 ## Turning it on
 
 One GPU: add `"parallel": 2` to the model's config (`strata-<model>.json`) and restart, or run setup with
@@ -88,6 +154,7 @@ With a layer split, the engine options go into the config's `args`:
 | `--batch-groups G` | with a layer split (default: auto, below): the N slots in G groups that flow through the GPUs as a pipeline (GPU k runs one group while GPU k+1 runs another). G must divide N. 1 = all slots in one window, GPU after GPU. |
 | `--batch-groups auto` | the default on a layer split since 0.1.41 (give no `--batch-groups`): the engine pipelines one group per GPU stage (the most that divide the slots; 8 slots on 4 GPUs = 4 groups of 2) and says so (`INFO batch_groups=G`). `--batch-groups 1` turns it off (all slots in one window, GPU after GPU). Measured, 8 clients, total tok/s against one group: 4 x R9700 166 against 86, 2 GPUs 109 against 78, 3 GPUs 110 against 78. With `--adapt-async 1` and no `--batch-groups` the default is one group (the adaptive tier between batch windows does not run in pipelined groups) and the log says so; with `--batch-mtp` and no `--batch-groups` the pipeline wins and `--batch-mtp` is left off (`--batch-groups 1` or `STRATA_BATCH_MTP_SERIAL=1` keeps it); `--batch-groups G` or `--batch-groups auto` given with `--batch-mtp` pipelines the groups and turns `--batch-mtp` off, and given with `--adapt-async 1` pipelines the groups and turns `--adapt-async` off (the pipelined path does not adapt). |
 | `--trim-stage-weights` | with an **explicit** `--layer-split` (e.g. `12,24,36`, not `auto`): every GPU loads only the dense weights of its own layers instead of the whole model's (the same as `STRATA_STAGE_TRIM=1`, PR #639). The VRAM this frees goes to the expert cache. Useful without `--batch` too. |
+| `--batch-max-context N` | this fork (opt-in): each slot's session holds N cells instead of `--max-context` (at int8 K/V a 262,144-cell slot takes 3.65 GiB of VRAM, a 65,536-cell one 1.00 GiB, a 32,768-cell one 0.56 GiB). A request whose prompt plus `max_tokens` does not fit a slot runs alone on the solo path: the server waits for the slots to finish, admits nobody meanwhile and never moves it into a slot (the engine refuses such a `BGEN` with `ERR BGEN-LONG`). |
 
 The engine never refuses a count it cannot run: it says so in its log and runs what it can - at most 8 slots by
 default (a window holds 8 rows), as many as fit in VRAM, or none (one request at a time) when not two fit. The server reads
