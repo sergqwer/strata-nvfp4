@@ -138,6 +138,9 @@ public:
     bool pinned(int64_t layer, int64_t expert) const override {
         return from_helper(layer, expert) ? false : fallback_.pinned(layer, expert);
     }
+    bool pinned_on(int dev, int64_t layer, int64_t expert) const override {
+        return from_helper(layer, expert) ? false : fallback_.pinned_on(dev, layer, expert);
+    }
     void begin_layer(int64_t layer, const int32_t* ids, int64_t k) override {
         fallback_.begin_layer(layer, ids, k);
     }

@@ -3805,7 +3805,8 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     } else {
                         b = m.src->blob_stable(l, e);
                         if (!b) { err = "prefill: expert source has no blob"; return false; }
-                        if (ps_on && m.src->pinned(l, e)) {   // multi-GPU: every ps_frac-th one goes to the peer's ring
+                        // multi-GPU: every ps_frac-th one goes to the peer's ring (pinned in ITS context: extras/wddm-pin)
+                        if (ps_on && m.src->pinned_on(m.pp->dev, l, e)) {
                             ps_acc += m.pp->ps_frac;
                             if (ps_acc >= 1.0) {
                                 ps_acc -= 1.0;

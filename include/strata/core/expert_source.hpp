@@ -216,6 +216,9 @@ public:
     /// Plan v0.3 P5: whether `blob(layer, expert)` lies in page-locked, CUDA-registered memory, so an
     /// asynchronous host-to-device copy can DMA it directly (no staging copy on the CPU).
     virtual bool pinned(int64_t layer, int64_t expert) const { (void) layer; (void) expert; return false; }
+    /// extras/wddm-pin: whether a copy issued on CUDA device `dev` DMAs the blob straight from page-locked memory.  The
+    /// arena registered per stage (not portable) is pinned only in its owner stage's context; elsewhere = pinned().
+    virtual bool pinned_on(int dev, int64_t layer, int64_t expert) const { (void) dev; return pinned(layer, expert); }
 
     /// Called once before the first expert of a layer.  A source that reads from disk wants to start the read
     /// here so it overlaps the quantisation, and a prefetching source in Phase 3 wants the ids.
@@ -1304,11 +1307,14 @@ public:
     const uint8_t* blob_at(int64_t layer, int64_t expert) const;
     int64_t reads() const { return reads_.load(std::memory_order_relaxed); }
     bool pinned(int64_t layer, int64_t expert) const override;
+    bool pinned_on(int dev, int64_t layer, int64_t expert) const override;
     const uint8_t* device_alias(int64_t layer, int64_t expert) const override;
     /// Prefix pinning: the old rule (device_alias(layer, 0)); pin by need: at least one pinned range in the layer.
     bool pcie_layer(int64_t layer) const override;
     void prefetch(int64_t layer, int64_t expert) override;
     uint64_t release(int64_t layer, int64_t expert) override;
+    /// extras/wddm-pin: the arena was registered per stage, each layer's slice in its owner's context (not portable)
+    bool per_stage() const { return !layer_dev_.empty(); }
 
     /// Pin by need (STRATA_PIN_BY_NEED=1): BEFORE open(), the (layer, expert) pairs worth pinning, by decreasing
     /// priority - the profile's ranked pairs the GPU cache will NOT hold, then the unranked ones.  open() merges
@@ -1363,6 +1369,7 @@ private:
     uint64_t map_bytes_ = 0;
     std::vector<const uint8_t*> dev_slice_;   ///< device alias of each registered slice (or of the whole range)
     std::vector<char> pinned_layer_;          ///< extras/mgpu-fixes (D7): a scattered capped pin, per layer
+    std::vector<int> layer_dev_;              ///< extras/wddm-pin: per-stage registration - the owner device per layer
     uint64_t slice_bytes_ = 0;
     const uint8_t* base_ = nullptr;
     int64_t blobs_ = 0;

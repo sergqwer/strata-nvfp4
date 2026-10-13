@@ -6188,7 +6188,8 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
 #ifdef _WIN32
     const char* defer_env = std::getenv("STRATA_DEFERRED_REGISTER");
     const bool deferred = !by_need && max_pinned_bytes == 0 && arena_pin_cap_gib() == -1 && shared_arena_file.empty() &&
-                          (defer_env != nullptr && defer_env[0] != 0 && defer_env[0] != '0');
+                          (defer_env != nullptr && defer_env[0] != 0 && defer_env[0] != '0') &&
+                          !arena_slice_devices_set();   // extras/wddm-pin: a per-stage registration is not deferred
 #else
     const bool deferred = false;
 #endif
@@ -6331,6 +6332,7 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
     // plan v0.3 P6: device aliases of the mapped registration, for the PCIe share of the misses
     dev_slice_.clear();
     pinned_layer_.clear();
+    layer_dev_.clear();
     slice_bytes_ = a->slice_bytes;
     pin_start_.clear(); pin_end_.clear(); pin_dev_.clear(); layer_pcie_.clear();
     ranges_ = false;
@@ -6358,6 +6360,17 @@ bool ArenaExpertSource::open(const std::string& pack_dir, int64_t n_layers, int6
             for (int64_t l = 0; l < n_layers; ++l)
                 for (int64_t e = 0; e < n_expert && !layer_pcie_[(size_t) l]; ++e)
                     layer_pcie_[(size_t) l] = pinned(l, e) ? 1 : 0;
+        }
+    } else if (a->per_stage && a->slice_pinned.size() == (size_t) n_layers) {
+        // extras/wddm-pin: one slice per layer, each registered in its owner device's context - the alias made there
+        // (null for a layer that is not pinned; pinned() answers from pinned_layer_, pinned_on() also by the owner)
+        pinned_layer_.assign(a->slice_pinned.begin(), a->slice_pinned.end());
+        layer_dev_.assign(a->slice_owner.begin(), a->slice_owner.end());
+        dev_slice_.assign((size_t) n_layers, nullptr);
+        for (size_t k = 0; k < a->slice_index.size() && k < a->reg_alias.size(); ++k) {
+            const int l = a->slice_index[k];
+            if (a->reg_alias[k] == nullptr) { pinned_layer_[(size_t) l] = 0; continue; }   // no alias: not usable
+            dev_slice_[(size_t) l] = (const uint8_t*) a->reg_alias[k];
         }
     } else if (a->scattered && a->slice_pinned.size() == (size_t) n_layers) {
         // extras/mgpu-fixes (D7): one slice per layer, registered in the split's order - a device alias per pinned
@@ -6413,6 +6426,7 @@ void ArenaExpertSource::close() {
     base_ = nullptr;
     blobs_ = 0;
     n_expert_ = 0;
+    layer_dev_.clear();
 }
 
 void ArenaExpertSource::prefetch(int64_t layer, int64_t expert) {
@@ -6472,6 +6486,13 @@ bool ArenaExpertSource::pinned(int64_t layer, int64_t expert) const {
     const auto& lay = strata::kernels::cpu::expert_layout();
     if (ranges_) return pin_range_of(arena_off(layer, expert), lay.blob_bytes(layer)) >= 0;   // the whole blob inside ONE registered range
     return lay.blob_offset(layer, expert) + lay.blob_bytes(layer) <= pinned_bytes_;
+}
+
+bool ArenaExpertSource::pinned_on(int dev, int64_t layer, int64_t expert) const {
+    if (!pinned(layer, expert)) return false;
+    // extras/wddm-pin: registered per stage (not portable) - page-locked for its owner's context only; another
+    // device's copy from it would be a pageable (driver-staged) one
+    return layer_dev_.empty() || ((size_t) layer < layer_dev_.size() && layer_dev_[(size_t) layer] == dev);
 }
 
 const uint8_t* ArenaExpertSource::device_alias(int64_t layer, int64_t expert) const {
