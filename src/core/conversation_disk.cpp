@@ -512,9 +512,23 @@ bool ConversationDiskTier::write_files(Entry& e, const SavedConversation& img,
 }
 
 namespace {
+// `c` is where `live` starts: its tokens lead `live`'s, and so do the images below its end
+bool leads(const ConversationCheckpoint& c, const ConversationCheckpoint& live) {
+    if (c.ids.size() >= live.ids.size() || !std::equal(c.ids.begin(), c.ids.end(), live.ids.begin())) return false;
+    size_t j = 0;
+    for (const auto& im : live.imgs) {
+        if (im.start >= (int64_t) c.ids.size()) continue;
+        if (j == c.imgs.size() || !(c.imgs[j++] == im)) return false;
+    }
+    return j == c.imgs.size();
+}
+
 // `old` adds nothing to `n` (both keys only): the same conversation a turn or more back, whose deepest checkpoint the
 // newer chain still holds (the RAM cache's #342 rule: all `old` adds is the tail its client rewrote), or the very
-// same live state with no checkpoint `n` lacks.
+// same live state with no checkpoint `n` lacks.  On the disk also (strata-nvfp4): the same conversation carried on
+// past `old`'s deepest checkpoint although `n`'s chain has rotated that point out (6 checkpoints: a long session's
+// older copies piled up) - `n`'s live tokens start with it.  Not when that checkpoint is `old`'s only or shallowest
+// one (the shared system prompt's root: a sibling conversation starts there too).
 template<class E>
 bool superseded_by(const E& old, const E& n) {
     if (old.cvec != n.cvec) return false;
@@ -525,9 +539,14 @@ bool superseded_by(const E& old, const E& n) {
         return false;
     };
     const ConversationCheckpoint* deepest = nullptr;
-    for (const auto& c : old.checkpoints)
+    const ConversationCheckpoint* shallowest = nullptr;
+    for (const auto& c : old.checkpoints) {
         if (!deepest || c.ids.size() > deepest->ids.size()) deepest = &c;
+        if (!shallowest || c.ids.size() < shallowest->ids.size()) shallowest = &c;
+    }
     if (deepest && !deepest->ids.empty() && held(*deepest)) return true;
+    if (deepest && deepest != shallowest && deepest->ids.size() > shallowest->ids.size() && leads(*deepest, n.live))
+        return true;
     if (!same_key(old.live, n.live)) return false;
     for (const auto& c : old.checkpoints)
         if (!held(c)) return false;
