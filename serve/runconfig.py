@@ -16,7 +16,8 @@ from pathlib import Path
 
 # (key, kind, help).  kind: "bool", "int>=0", "num>=0", ("enum", values), "names", or ("sampling", check) for a key
 # of the "sampling" block, ("arg", flag) for an engine option kept in "args" (a whole number; ("arg", flag, "text"): a
-# string, ("arg", flag, "flag"): an option without a value, on or absent).
+# string, ("arg", flag, "flag"): an option without a value, on or absent), ("count", lo, hi) for a whole number the
+# page offers as a list.
 EDITABLE = [
     ("sampling.temperature", ("sampling", "num>=0"),
      "Default temperature for requests that send none (0 = greedy, the default without a sampling block)"),
@@ -42,6 +43,11 @@ EDITABLE = [
     ("open_browser", "bool", "Open the chat page in the browser when the model is ready"),
     ("vram_reserve_mib", ("arg", "--vram-reserve-mib"),
      "VRAM in MiB the engine leaves free for other programs (engine default 700)"),
+    # this fork: dialogs at once (server.parallel_args: "parallel": N -> --batch N; 1 or absent: one at a time)
+    ("parallel", ("count", 1, 8),
+     "Dialogs that run at once (the engine's batch slots; more wait their turn). Empty: 1 at a time, the fastest for "
+     "a dialog that runs alone. Each one more slows it: one RTX 5090 with 2 at once 158.6 instead of 175.8 tok/s "
+     "(-10%); a layer split over 2 GPUs with 4 at once 95.6 instead of ~147 tok/s (-35%)"),
     # this fork: dialogs kept between requests - the engine's conversation cache and its disk tier
     ("conversation_cache_slots", ("arg", "--conversation-cache-slots"),
      "Dialogs kept in RAM between requests: at most this many (engine default 4). Needs the RAM below; without it "
@@ -61,7 +67,10 @@ EDITABLE = [
 SPEC = {k: kind for k, kind, _ in EDITABLE}
 # the view's headings: the first key of each group -> its title
 SECTIONS = {"sampling.temperature": "Sampling defaults", "reasoning_budget_tokens": "Requests",
-            "idle_unload_s": "Loading and the engine", "conversation_cache_slots": "Dialogs"}
+            "idle_unload_s": "Loading and the engine", "parallel": "Dialogs"}
+# what an empty field means, where "default" says too little (the page's placeholder / first choice)
+DEFAULTS = {"conversation_cache_slots": "default: 4", "conversation_cache_mib": "off", "conversation_disk_dir": "off",
+            "conversation_disk_mib": "default: 32768", "conversation_disk_persist": "default: off"}
 DIALOG_KEYS = ("conversation_cache_slots", "conversation_cache_mib", "conversation_disk_dir", "conversation_disk_mib",
                "conversation_disk_persist")
 NO_PROJECTION = ("this model loads no refusal projection (--control-vector-scaled): setup loads it for the original "
@@ -100,6 +109,29 @@ def value_of(cfg: dict, key: str):
     return cfg.get(key)
 
 
+def gpu_count(cfg: dict) -> int:
+    """The cards the config names (server.gpu_list: "gpu": 2, [0, 1] or "0,1"), at least 1."""
+    g = cfg.get("gpu")
+    items = g if isinstance(g, (list, tuple)) else [] if g is None else str(g).split(",")
+    return max(1, sum(str(x).strip() != "" for x in items))
+
+
+def _count_view(cfg: dict, key: str, kind) -> dict:
+    """A "count" key as a list: lo..hi (and a value outside it the file already has); for "parallel" the choice that
+    is one dialog per GPU says so, and an engine option that sets it already (--batch / --slots) greys it out."""
+    v, gpus = value_of(cfg, key), gpu_count(cfg)
+    ns = list(range(kind[1], kind[2] + 1)) + ([v] if isinstance(v, int) and not isinstance(v, bool) and
+                                              not kind[1] <= v <= kind[2] else [])
+    out = {"kind": "choice", "default": "default: 1 at a time",
+           "choices": [[n, ("1 at a time" if n == 1 else f"{n} at once") +
+                        (f" - 1 per GPU ({gpus} GPU{'s' if gpus > 1 else ''})" if n == gpus else "")] for n in ns]}
+    a = cfg.get("args") if isinstance(cfg.get("args"), list) else []
+    if any(f in a for f in ("--batch", "--slots")):
+        out["available"] = False
+        out["note"] = " - not available: the config's args set it (--batch / --slots)"
+    return out
+
+
 def view(cfg: dict, path: str | Path) -> dict:
     """GET /config: the editable keys with their values (None: not set, the default applies)."""
     out = []
@@ -108,11 +140,13 @@ def view(cfg: dict, path: str | Path) -> dict:
         if k == "arg" and _sub(kind) != "int>=0":
             k = {"text": "text", "flag": "bool"}[_sub(kind)]
         off = key == "uncensored" and not has_projection(cfg)   # nothing to switch: shown, not settable
+        extra = _count_view(cfg, key, kind) if k == "count" else {}
         out.append({"key": key, "value": value_of(cfg, key), "help": help_ + (f" - not available: {NO_PROJECTION}"
-                                                                                 if off else ""),
+                                                                                 if off else extra.pop("note", "")),
                     "kind": "number" if k in ("sampling", "arg", "int>=0", "num>=0") else k,
                     **({"choices": kind[1]} if k == "enum" else {}), **({"available": False} if off else {}),
-                    **({"section": SECTIONS[key]} if key in SECTIONS else {})})
+                    **({"section": SECTIONS[key]} if key in SECTIONS else {}),
+                    **({"default": DEFAULTS[key]} if key in DEFAULTS else {}), **extra})
     return {"file": Path(path).name, "keys": out,
             "note": "Saved to the run config; used from the next start of the model."}
 
@@ -165,6 +199,8 @@ def check(key: str, v, cfg: dict):
         return v.strip()
     if k == "arg":
         return _number(key, v, whole=True)
+    if k == "count":
+        return _number(key, v, whole=True, lo=kind[1], hi=kind[2])
     rule = kind[1]                                     # a sampling key: the server's own rules
     if rule == "num>=0":
         return float(_number(key, v))

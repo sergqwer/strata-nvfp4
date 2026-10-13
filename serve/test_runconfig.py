@@ -17,7 +17,7 @@ from pathlib import Path
 
 from serve import runconfig
 from serve.frontend import ChatTemplate
-from serve.server import ByteTokenizer, MockEngine, Service, serve
+from serve.server import ByteTokenizer, MockEngine, Service, engine_args, serve
 
 ROOT = Path(__file__).resolve().parents[1]
 CFG = {"exe": "engine/strata.exe", "args": ["--pack", "data/packs/q2_0", "--kv", "int8", "--spec-min-p", "0.5"],
@@ -149,7 +149,7 @@ class Dialogs(unittest.TestCase):
         got = {k["key"]: k for k in runconfig.view(new, "x.json")["keys"]}
         self.assertEqual({k: got[k]["value"] for k in self.ON}, self.ON)
         self.assertEqual([got[k]["kind"] for k in self.ON], ["number", "number", "text", "number", "bool"])
-        self.assertEqual(got["conversation_cache_slots"]["section"], "Dialogs")
+        self.assertEqual(got["conversation_cache_mib"]["default"], "off")   # the empty field's meaning
         again, changed = runconfig.apply(new, self.ON)                   # the same values: nothing changes
         self.assertEqual((again, changed), (new, []))
         off, changed = runconfig.apply(new, {k: None for k in self.ON})
@@ -177,6 +177,44 @@ class Dialogs(unittest.TestCase):
         new, _ = runconfig.apply(CFG, self.ON)
         with self.assertRaises(ValueError):                              # the RAM goes, the disk would stay unused
             runconfig.apply(new, {"conversation_cache_mib": None})
+
+
+class Parallel(unittest.TestCase):
+    """Dialogs at once ("parallel" -> --batch N): a list of 1-8, empty = the engine's one at a time; the choice that is
+    one dialog per GPU says so (never chosen for the user); greyed out where the args set --batch themselves."""
+    def test_choices_name_one_per_gpu(self):
+        for gpu, per in ((None, 1), (0, 1), ([0, 1], 2), ("0,1,2,3", 4)):
+            cfg = {**CFG, **({} if gpu is None else {"gpu": gpu})}
+            got = {k["key"]: k for k in runconfig.view(cfg, "x.json")["keys"]}["parallel"]
+            self.assertEqual((got["kind"], got["value"], got["section"]), ("choice", None, "Dialogs"))
+            self.assertEqual([n for n, _ in got["choices"]], list(range(1, 9)))
+            marked = [n for n, label in got["choices"] if "1 per GPU" in label]
+            self.assertEqual(marked, [per], gpu)
+            self.assertIn("1 at a time", got["default"])
+            self.assertIn("95.6", got["help"])                          # the 2-GPU split's cost is said
+            self.assertNotIn("available", got)
+
+    def test_set_and_cleared(self):
+        new, changed = runconfig.apply(CFG, {"parallel": 2})
+        self.assertEqual((changed, new["parallel"], new["args"]), (["parallel"], 2, CFG["args"]))
+        self.assertEqual(engine_args({**new, "args": list(new["args"])})[-2:], ["--batch", "2"])
+        one, _ = runconfig.apply(new, {"parallel": 1})
+        self.assertNotIn("--batch", engine_args(one))                   # 1: one at a time, as the default
+        off, changed = runconfig.apply(new, {"parallel": None})
+        self.assertEqual((changed, "parallel" in off), (["parallel"], False))
+        for bad in (0, 9, 1.5, True, "2"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                runconfig.apply(CFG, {"parallel": bad})
+
+    def test_a_hand_written_value_is_shown(self):
+        got = {k["key"]: k for k in runconfig.view({**CFG, "parallel": 12}, "x.json")["keys"]}["parallel"]
+        self.assertEqual((got["value"], got["choices"][-1][0]), (12, 12))
+
+    def test_greyed_out_under_batch_in_the_args(self):
+        got = {k["key"]: k for k in runconfig.view({**CFG, "args": CFG["args"] + ["--batch", "4"]},
+                                                   "x.json")["keys"]}["parallel"]
+        self.assertIs(got["available"], False)
+        self.assertIn("--batch", got["help"])
 
 
 class Http(unittest.TestCase):
