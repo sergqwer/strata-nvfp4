@@ -1855,10 +1855,20 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
     }
     // the CPU share's staged-chunk limit, before the ring is sized below (a caller that sizes loans first armed it)
     arm_cpu_share(cpu_pool_ != nullptr);
+    // This fork, #7: a refused hand-off buffer reads "do not fit", so the layer split's chunk steps down (kStepChunks in
+    // generate.cpp) instead of ending the start: under WSL2 the driver page-locks only about 1 GiB of RAM, and a
+    // 15,616-token chunk's two buffers are 1.22 GiB
     for (int b = 0; next_ != nullptr && b < 2; ++b)
-        if (!m.hand[b] && cudaHostAlloc((void**) &m.hand[b], (size_t) chunk * D * 4, cudaHostAllocPortable) != cudaSuccess) {
-            err = "prefill: the layer split's hand-off buffers";
-            return false;
+        if (!m.hand[b]) {
+            if (const cudaError_t e = cudaHostAlloc((void**) &m.hand[b], (size_t) chunk * D * 4, cudaHostAllocPortable);
+                e != cudaSuccess) {
+                m.hand[b] = nullptr;
+                (void) cudaGetLastError();
+                err = "prefill: the layer split's hand-off buffers (2 x " + std::to_string(((size_t) chunk * D * 4) >> 20) +
+                      " MiB of page-locked RAM for a chunk of " + std::to_string(chunk) + " tokens) do not fit: " +
+                      cudaGetErrorString(e);
+                return false;
+            }
         }
     if (next_ != nullptr && handoff_pipe_pieces() > 0 && m.hand_pieces == 0) {   // events only: no device memory
         bool ok = true;
