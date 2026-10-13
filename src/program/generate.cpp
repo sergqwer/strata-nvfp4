@@ -8368,7 +8368,9 @@ int main(int argc, char** argv) {
                     const std::vector<ConvCheckpoint> none;   // the checkpoints are lent below, not copied
                     const strata::core::ConversationView view{live, live_imgs, none, cvec_cached};
                     try {
-                        if (!strata::core::conversation_snapshot_sources(meta, sources, view, ss, g, mtp.kv_state(), e))
+                        // no --mtp: no draft layer, as a park saves it (the SAVE command needs one)
+                        if (!strata::core::conversation_snapshot_sources(meta, sources, view, ss, g,
+                                                                         use_mtp ? &mtp.kv_state() : nullptr, e))
                             throw std::runtime_error(e);
                         meta.checkpoints = std::move(checks);
                         struct GiveBack {
