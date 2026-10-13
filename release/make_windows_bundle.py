@@ -14,7 +14,7 @@
    source: update.cmd (tools/bundle_update.py) replaces a file still as a release shipped it, never one the user changed.
 4. Zips it to dist/strata-nvfp4-v<VERSION>-windows-x64.zip and writes its SHA-256 beside it.
 5. Writes setup.py's asset from the same engine folder: dist/strata-windows-x64.zip, its files at the top level
-   (strata.exe, strata-vision.exe, the cuBLAS DLLs, BUILD.json with "cuda_libs": "bundled"), the layout get_prebuilt
+   (strata.exe, strata-vision.exe, strata_kq.dll, the cuBLAS DLLs, BUILD.json with "cuda_libs": "bundled"), the layout get_prebuilt
    unpacks into engine/ - so a clone's START-HERE / UPDATE.bat installs this fork's engine, never upstream's.
 Publish both with release/publish.py.
 """
@@ -32,7 +32,7 @@ OUT = REPO / "dist" / "strata-nvfp4"
 CUDA = pathlib.Path(os.environ["CUDA_PATH"])
 CUDA_BIN = CUDA / "bin" / "x64" if (CUDA / "bin" / "x64" / "cublas64_13.dll").exists() else CUDA / "bin"
 LLAMA = REPO / "third_party" / "llama.cpp"
-VERSION = "0.1.43.1-nvfp4.1"
+VERSION = "0.1.44-nvfp4.1"
 ZIP = REPO / "dist" / ("strata-nvfp4-v%s-windows-x64.zip" % VERSION)
 SETUP_ZIP = REPO / "dist" / "strata-windows-x64.zip"   # setup.py's PREBUILT_ASSET
 ENGINE = REPO / "build-release" / "strata.exe"
@@ -75,6 +75,12 @@ def cp(src, dst):
 # engine: the portable build and the cuBLAS it links (the CUDA runtime is static), and the image encoder
 cp(ENGINE, OUT / "engine" / "strata.exe")
 cp(VISION, OUT / "engine" / "strata-vision.exe")
+# upstream 0.1.44: the K-quant prompt kernels are a library of their own, opened only for a model with those experts and
+# STRATA_MMQ_KQ=1 (setup writes it for Unsloth's UD-Q5_K_XL / UD-Q6_K_XL); the release build makes it beside the engine
+KQ = REPO / "build-release" / "strata_kq.dll"
+if not KQ.exists():
+    sys.exit("make_windows_bundle: %s is missing (the K-quant prompt library the strata target builds)" % KQ)
+cp(KQ, OUT / "engine" / "strata_kq.dll")
 for dll in ("cublas64_13.dll", "cublasLt64_13.dll"):
     cp(CUDA_BIN / dll, OUT / "engine" / dll)
 (OUT / "engine" / "BUILD.json").write_text(json.dumps({
