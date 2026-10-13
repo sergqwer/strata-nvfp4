@@ -45,6 +45,11 @@ class Case(unittest.TestCase):
         self.heads, self.downloads, self.pip = [], [], []
         self.published = True                         # the release has the asset
         self.arch = 89
+        # the asset the fork publishes (the Windows engine), on Linux too, where PREBUILT_ASSET names the Linux one;
+        # test_linux_asks_nobody patches the Linux name over it
+        p = mock.patch.object(setup, "PREBUILT_ASSET", setup.FORK_ASSETS[0])
+        p.start()
+        self.addCleanup(p.stop)
 
     def engine(self, meta=UPSTREAM, toolkit=13) -> Path:
         eng = self.root / (setup.ENGINE12_DIR if toolkit == 12 else "engine")
