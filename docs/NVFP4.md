@@ -407,6 +407,33 @@ Tried and dropped:
   slots' VRAM (7762 cache slots instead of 8530). So the cache is the recommended setting for one user with an agent
   client, and `"parallel"` the choice when requests really overlap (docs/BATCHING.md, "This fork").
 
+### Dialogs parked on the disk (2026-10-13, branch extras/dialog-park)
+
+- **Ported** xrip's disk tier (upstream PR #1937 + xrip b0c4d361 / 65f3fd00, credited in the commits): a conversation
+  the RAM cache evicts or cannot take goes to `--conversation-disk-dir` instead of being dropped, and
+  `--conversation-disk-persist` keeps the folder for the next start. **Added for this fork:** the idle save
+  (`--conversation-disk-sync-s`, default 60 with persist: the tray stops the engine with `taskkill /F /T`, so the
+  QUIT-time save never ran under it), kept reads + supersede, an index hash, a writer that waits for the engine to be
+  idle, UTF-8 paths, the live save without `--mtp`, `--conversation-disk-shared` (one pool for replicas, router-aware),
+  and a fix to `STRATA_PARK_REWIND_MAX` (it dropped every sub-agent of up to N tokens past the shared root). docs/DETAILS.md
+  has the details.
+- **What a dialog costs to come back** (Claude-Code-like workload: a 100K main dialog + 8 sub-agents of 8K-64K taking
+  turns, 1 s tool pauses; one switch away and back for the 200K row):
+
+  | dialog | read again | from RAM (16 GiB x 8) | from the disk | after taskkill + restart |
+  | --- | --- | --- | --- | --- |
+  | 8K | 1.12 s | 0.26 s | 0.38 s | 0.34-0.58 s |
+  | 32K | 3.49 s | 0.25 s | 0.48 s | 0.60-0.69 s |
+  | 100K | 10.9-12.3 s | 0.44 s | 0.97 s | 1.00-1.12 s |
+  | 200K | 23.9 s | 0.66 s | 1.83 s | 1.65 s |
+
+  RAM per parked dialog 0.5 / 1.0 / 2.2 / 3.9 GB, the same on the disk. With 4 GiB x 2 RAM slots (a smaller PC) the
+  whole workload took 204 s without the disk (every switch read again) and 117 s with it (every switch 0.37-1.0 s).
+- **Recommended for the tray** (with this branch's engine): the conversation cache as before plus
+  `--conversation-disk-dir <a folder on the fast NVMe> --conversation-disk-mib 131072 --conversation-disk-persist
+  --conversation-disk-sync-s 60` and `STRATA_PARK_REWIND_MAX=8192` (safe now). One dialog's decode is unchanged (the
+  disk is not touched during a request).
+
 ### Upstream 0.1.43.1 (2026-10-13, release 0.1.43.1-nvfp4.1)
 
 - **The port.** rel/0.1.42's first-parent chain since v0.1.42 holds 121 commits; 120 are carried (the 121st is the
