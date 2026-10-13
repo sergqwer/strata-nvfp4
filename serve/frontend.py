@@ -803,6 +803,44 @@ def raw_value(value: str, spec):
         return PY_BOOLS[v] if v in PY_BOOLS and bool_allowed(spec) else value
 
 
+FORMAT_WORDS = frozenset("""tools tool function functions function_call function_calls tool_call tool_calls
+                           invoke invocation parameter parameters call""".split())
+
+
+def repair_call_name(name: str, schemas: dict) -> str | None:
+    """An undeclared call name -> the declared tool the model plainly meant, or None.  The model writes a declared
+    name sloppily (case, a stray space, backticks, `.` for `__`, a suffix of a long namespaced name); it writes a
+    format word ("tools", "function") when it echoes the template's own block, and that names no tool.  A suffix
+    counts only when exactly one declared tool ends with it and it is long enough to mean the name."""
+    if not schemas:
+        return None
+    if name in schemas:
+        return name
+    bare = name.strip().strip("`'\"").strip()
+    if bare.lower() in FORMAT_WORDS:
+        return None
+    for k in schemas:
+        if k.lower() == bare.lower():
+            return k
+    key = re.sub(r"[^a-z0-9]+", "", name.lower())
+    if not key:
+        return None
+    flat = {k: re.sub(r"[^a-z0-9]+", "", k.lower()) for k in schemas}
+    hits = [k for k in schemas if flat[k] == key]
+    if len(hits) == 1:
+        return hits[0]
+    for sep in ("/", ":", ".", "__", " "):           # "tools/write_stdin": the block's word written as a prefix
+        if sep in bare:
+            head, tail = bare.rsplit(sep, 1)
+            if head.lower() in FORMAT_WORDS and tail.strip():
+                return repair_call_name(tail.strip(), schemas)
+    if len(bare) >= 4:                         # a suffix keeps its separators: a__b is not ab
+        hits = [k for k in schemas if k.lower().endswith(bare)]
+        if len(hits) == 1:
+            return hits[0]
+    return None
+
+
 def parse_tool_call(body: str, schema: dict | None = None) -> ToolCall:
     """`<function=NAME>\\n<parameter=P>\\nVALUE\\n</parameter>...</function>` -> ToolCall. Values are JSON-decoded
     when the tool's schema says the parameter is not a string (or, without a schema, when they parse as JSON
@@ -841,7 +879,7 @@ class OutputParser:
     until it is complete, so clients never see `<tool_` or `</thi`."""
 
     def __init__(self, thinking: bool = True, tools: list[dict] | None = None, stream_tools: bool = False,
-                 recover: bool = False):
+                 recover: bool = False, repair_names: bool = False):
         self.state = "reasoning" if thinking else "content"
         self.buf = ""
         self.lead = False
@@ -862,6 +900,13 @@ class OutputParser:
         # form is the call - `<parameter=NAME>` as the opener, JSON inside <tool_call>, a bare <function=NAME> at the
         # start of a line outside code, or a second call in the same <tool_call> (which otherwise merges into one).
         self.recover = recover
+        # repair_names (opt-in, the config's "tool_name_repair"; ANBAL534 9453382a): a call naming a tool the request
+        # did not declare is repaired - the name mapped to the declared tool it plainly meant, a declared call nested
+        # inside a wrapper the model named "tools" is the call - and what cannot be mapped is the text it is, never a
+        # call the client cannot run.  Off, an undeclared name goes out as a call, as it always did: routers reject
+        # it ("routed provider emitted undeclared client tool") and the stream dies mid-turn.  Off by default because
+        # the suffix mapping guesses (`fetch` -> `WebFetch`, the one declared tool ending in it).
+        self.repair_names = repair_names
         self.bare = False            # the call being read opened with <function= alone (no <tool_call> around it)
         self.batch = False           # the call being finished is followed by another in the same wrapper
         self._reset_scan()
@@ -909,7 +954,8 @@ class OutputParser:
                 name = self.buf[p + len(FUNC_START):gt if gt >= 0 else len(self.buf)]
                 if gt < 0 and not any(c.isspace() for c in name):
                     return p, False
-                if gt >= 0 and name in self.schemas:
+                if gt >= 0 and (name in self.schemas
+                                or (self.repair_names and repair_call_name(name, self.schemas))):
                     return p, True
             p = self.buf.find(FUNC_START, p + 1)
         return -1, False
@@ -1029,6 +1075,15 @@ class OutputParser:
                 if b < 0:
                     return out
                 name = rest[a + 10:b]
+                if self.repair_names and self.schemas and name not in self.schemas:
+                    fixed = repair_call_name(name, self.schemas)
+                    if fixed:
+                        name = fixed                       # stream it under the declared name
+                    else:
+                        # undeclared: nothing is announced (a client that runs the call would run a tool that was
+                        # never declared); the whole call is decided when it ends - nested repair, else text
+                        self.ss, self.sp = "suppressed", self.sp + b + 1
+                        return out
                 self.scall = ToolCall(name=name, arguments={})
                 props = ((self.schemas.get(name) or {}).get("parameters") or {}).get("properties") or {}
                 self.sdeclared = {k: (v or {}).get("type") for k, v in props.items()}
@@ -1140,6 +1195,12 @@ class OutputParser:
                         name = body[:end].strip()[len("<function="):].split(">", 1)[0].strip()
                         if name in self.schemas:
                             call = parse_tool_call(body[:end], self.schemas.get(name))
+                        elif self.repair_names:
+                            fixed = self._repair_call(name, body[:end])
+                            if fixed:
+                                fname, fbody = fixed
+                                call = parse_tool_call(fbody, self.schemas.get(fname))
+                                call.name = fname
                     except ValueError:
                         pass
                     raw = self.buf[:len(CALL_START) + end + len(CALL_END)]
@@ -1353,7 +1414,8 @@ class OutputParser:
                 body = self.buf[:i]
                 self.buf = self.buf[i + drop:]
                 batch, self.batch = self.batch, False
-                out += self._finish_call(body)
+                # drop 0 outside a batch: the call #1881 ended at its </function> wrote no </tool_call>
+                out += self._finish_call(body, closed=bool(drop) or batch)
                 if batch and out[-1].kind == "tool_call":
                     self.state, self.lead = "call", False
 
@@ -1380,6 +1442,22 @@ class OutputParser:
             self.buf = ""
             self._reset_scan()
             return out
+        if self.state == "call" and self.ss == "suppressed":
+            # a call whose name was undeclared (nothing announced): the output ended inside it.  A declared call
+            # nested inside it is the call the model meant; the rest is flushed as text below.
+            head = self.buf.strip()
+            name = head[len(FUNC_START):].split(">", 1)[0].strip() if head.startswith(FUNC_START) else head
+            fixed = self._repair_call(name, self.buf)
+            if fixed:
+                fname, fbody = fixed
+                try:
+                    call = parse_tool_call(fbody, self.schemas.get(fname))
+                    call.name = fname
+                    self.buf, self.state, self.lead = "", "content", True
+                    self._reset_scan()
+                    return out + [Event("tool_call", call=call)]
+                except ValueError:
+                    pass
         if self.state == "reasoning" and self.buf == THINK_END:   # the output ends on a held `</think>`: its end
             self.buf, self.state = "", "content"
         if self.buf:
@@ -1390,11 +1468,20 @@ class OutputParser:
             self.buf = ""
         return out
 
-    def _finish_call(self, body: str) -> list[Event]:
+    def _finish_call(self, body: str, closed: bool = True) -> list[Event]:
         """A whole call body in the template's form -> its tool_call event.  With recover, one that still does not
-        parse is the text it is instead of an error that ends the request."""
+        parse is the text it is instead of an error that ends the request (`closed`: with the </tool_call> the model
+        wrote after it, which that text then ends with)."""
         name = body.strip()[len(FUNC_START):].split(">", 1)[0].strip()
         bare, self.bare = self.bare, False
+        text = body if bare else CALL_START + body + (CALL_END if closed else "")
+        if self.repair_names and self.schemas and name not in self.schemas:
+            fixed = self._repair_call(name, body)
+            if fixed is None:                       # names no declared tool: the text it is, not a call
+                self._reset_scan()
+                self.state = "content"
+                return [Event("content", self._track(text))]
+            name, body = fixed
         try:
             call = parse_tool_call(body, self.schemas.get(name))
         except ValueError:
@@ -1402,9 +1489,33 @@ class OutputParser:
                 raise
             self._reset_scan()
             self.state = "content"
-            return [Event("content", self._track(body if bare else CALL_START + body + CALL_END))]
+            return [Event("content", self._track(text))]
+        call.name = name                            # the declared spelling (the model's may be sloppy)
         if self.scall is not None:
             call.id = self.scall.id
         self._reset_scan()
         self.state, self.lead = "content", True
         return [Event("tool_call", call=call)]
+
+    def _repair_call(self, name: str, body: str) -> tuple[str, str] | None:
+        """An undeclared call -> (declared name, body) for the call the model meant: the name written sloppily, a
+        declared call nested inside a wrapper the model named "tools" (it echoes the template's `<tools>` block),
+        or - one tool declared - a call whose name it dropped."""
+        fixed = repair_call_name(name, self.schemas)
+        if fixed:
+            return fixed, body
+        at = body.find(FUNC_START, body.find(">") + 1)
+        while at >= 0:
+            gt = body.find(">", at)
+            if gt < 0:
+                break
+            inner = body[at + len(FUNC_START):gt].strip()
+            fixed = inner if inner in self.schemas else repair_call_name(inner, self.schemas)
+            if fixed:
+                end = function_end(body[at:])
+                if end >= 0:
+                    return fixed, body[at:at + end]
+            at = body.find(FUNC_START, at + len(FUNC_START))
+        if not name.strip() and len(self.schemas) == 1:
+            return next(iter(self.schemas)), body
+        return None
