@@ -5730,7 +5730,7 @@ class ImageSources(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             f = Path(d) / "x.png"
             f.write_bytes(b"x")
-            with mock.patch.object(Path, "read_bytes", side_effect=PermissionError("denied")),                     self.assertRaisesRegex(ValueError, "could not be read from"):
+            with mock.patch.object(Path, "read_bytes", side_effect=PermissionError("denied")),                     self.assertRaisesRegex(ValueError, "the image could not be read"):
                 Vision.load(str(f))
 
     def test_a_url_is_read_up_to_the_cap(self):
@@ -5759,7 +5759,9 @@ class ImageSources(unittest.TestCase):
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         base = f"http://127.0.0.1:{httpd.server_address[1]}"
         try:
-            with mock.patch.object(server, "IMAGE_URL_MAX", 1000):
+            # about the size cap, not about who may be fetched: the test server is on loopback, which _require_public
+            # refuses on purpose (serve/test_image_url_guard.py), so that check stands down here
+            with mock.patch.object(server, "_require_public"), mock.patch.object(server, "IMAGE_URL_MAX", 1000):
                 for q in ("", "?length"):
                     with self.subTest(q=q):
                         self.assertEqual(server.Vision.load(base + "/small" + q), b"x" * 100)
