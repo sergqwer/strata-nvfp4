@@ -45,8 +45,8 @@ async function copyText(text, btn) {
     const ta = document.createElement("textarea");
     ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove();
   }
-  if (btn) {
-    const use = btn.querySelector("use");
+  const use = btn && btn.querySelector("use");     // a copy button's icon (a copyable line of text has none)
+  if (use) {
     use.setAttribute("href", `${SPRITE}#i-check`);
     setTimeout(() => use.setAttribute("href", `${SPRITE}#i-copy`), 1500);
   }
@@ -368,7 +368,8 @@ function render(m) {
   if (!modelOp && !localLoad && live.queued > 0) setPill("queued", tr("pill.queued", "{n} queued", {n: live.queued}));
   if (tab === "monitor") renderMonitor(live, hw, st, eng, h, last, m.requests || [], m.totals, m.requests_kept);
   if (tab === "monitor") renderConvCache(m.conversation_cache);
-  if (tab === "about") renderAbout(eng, hw, st);
+  if (tab === "monitor") renderGpus(m.gpus);
+  if (tab === "about") renderAbout(eng, hw, st, m.gpus);
 }
 
 // #596: the conversation cache - the prompt's state the engine keeps between requests (always), and the whole
@@ -479,8 +480,10 @@ function renderMonitor(live, hw, st, eng, h, last, requests, totals, kept) {
   spark("sp-speed", h.tok_s);
   spark("sp-prefill", h.prefill_tok_s_mean);
   // a model split across several cards (issue #112): the cards show their total / mean / hottest, and each card's own
-  const per = (f) => (hw.gpus || []).map((g) => `GPU ${g.index} ${f(g)}`).join(" · ");
-  const multi = (hw.gpus || []).length > 1;
+  // (the engine's cards only: "gpus" lists every card of the PC, the GPUs card below shows them all)
+  const engineGpus = (hw.gpus || []).filter((g) => g.engine !== false);
+  const per = (f) => engineGpus.map((g) => `GPU ${g.index} ${f(g)}`).join(" · ");
+  const multi = engineGpus.length > 1;
   setMetric("gpu", hw.gpu_util == null ? null : fmt(hw.gpu_util), "%",
             multi ? per((g) => (g.util == null ? "–" : `${fmt(g.util)}%`)) : st.gpu_name || (st.gpu_note ? "not available" : ""));
   spark("sp-gpu", h.gpu_util, 100);
@@ -500,13 +503,7 @@ function renderMonitor(live, hw, st, eng, h, last, requests, totals, kept) {
   spark("sp-pcie", h.gpu_pcie_rx_mb);
   setMetric("cpu", hw.cpu == null ? null : fmt(hw.cpu), "%", st.threads ? `${st.cores ? `${st.cores} cores · ` : ""}${st.threads} threads` : "");
   spark("sp-cpu", h.cpu, 100);
-  if (hw.disk_read_mb == null) {
-    setMetric("disk", null, "", st.psutil ? "" : "needs psutil (setup installs it)");
-  } else {
-    const big = hw.disk_read_mb >= 1000;
-    setMetric("disk", big ? fmt(hw.disk_read_mb / 1024, 2) : fmt(hw.disk_read_mb, hw.disk_read_mb < 10 ? 1 : 0), big ? "GB/s" : "MB/s",
-              hw.disk_write_mb == null ? "" : `write ${fmt(hw.disk_write_mb, 1)} MB/s`);
-  }
+  renderDisk(hw, st);
   spark("sp-disk", h.disk_read_mb);
 
   // context fill: the running request, else the last one
@@ -560,6 +557,126 @@ function renderMonitor(live, hw, st, eng, h, last, requests, totals, kept) {
   $("req-totals").textContent = renderTotals(totals);
 }
 
+// the Disk read card: the drives that hold the model's files (the pack, the PLE table, ...), each with its own rate
+// when there are several; every drive's total when the server could not tell which (a container's overlay)
+const rate = (mb) => (mb == null ? "–" : mb >= 1000 ? `${fmt(mb / 1024, 2)} GB/s` : `${fmt(mb, mb < 10 ? 1 : 0)} MB/s`);
+function renderDisk(hw, st) {
+  const sub = $("ms-disk");
+  delete sub.dataset.copy;
+  sub.classList.remove("copyable");
+  sub.title = "";
+  if (!st.psutil) {                                 // actionable: the exact command for the Python the server runs in
+    setMetric("disk", null, "", st.psutil_install ? "psutil missing · click to copy the install command" : "psutil missing");
+    if (st.psutil_install) {
+      sub.dataset.copy = st.psutil_install;
+      sub.classList.add("copyable");
+      sub.title = `Run this, then restart the server:\n${st.psutil_install}`;
+    }
+    return;
+  }
+  const disks = st.disks || [], now = hw.disks || [];
+  const where = st.disk_scope === "model" && disks.length
+    ? (now.length > 1 ? now.map((d) => `${d.label} ${rate(d.read_mb)}`).join(" · ") : disks[0].label)
+    : "all drives";
+  sub.title = disks.map((d) => `${d.label}: ${d.roles.join(", ")}`).join("\n") ||
+              "The drive that holds the model is not known here: the total of every drive";
+  if (hw.disk_read_mb == null) { setMetric("disk", null, "", where); return; }
+  const big = hw.disk_read_mb >= 1000;
+  setMetric("disk", big ? fmt(hw.disk_read_mb / 1024, 2) : fmt(hw.disk_read_mb, hw.disk_read_mb < 10 ? 1 : 0), big ? "GB/s" : "MB/s",
+            `${where}${hw.disk_write_mb == null ? "" : ` · write ${fmt(hw.disk_write_mb, 1)} MB/s`}`);
+}
+
+// The GPUs card: one row per card of the PC - the engine's device number for it (CUDA0, ...), what it does there (a
+// layer-split stage and its layers, the whole model, a peer / helper expert cache, the image encoder, or nothing) and
+// its own load, VRAM, temperature and power (serve/gpus.py)
+function gpuRole(c) {
+  const lay = c.layers || [], stage = `stage ${c.stage} of ${c.stages}`;
+  const range = lay[0] == null ? "" : lay[1] == null ? `Layers ${lay[0]}+` : `Layers ${lay[0]}–${lay[1]}`;
+  // [badge class, badge, detail line, what it means (the badge's tooltip)]
+  const role = {
+    stage: ["st-badge--generating", range || `Stage ${c.stage}`, range ? stage : `of ${c.stages}`,
+            "A layer-split stage: these layers, their attention and KV cache, and an expert cache of its own"],
+    model: ["st-badge--generating", "Whole model", "every layer", "One card runs every layer"],
+    peer: ["st-badge--reading", "Peer expert tier", "", "--peer-device: caches the experts the first card does not hold"],
+    helper: ["st-badge--reading", "Expert cache helper", "", "--expert-cache-device: holds experts and computes them for the stages"],
+    encoder: ["st-badge--queued", "Image encoder", "vision only", "The image encoder runs here (the config's vision cuda_device)"],
+  }[c.role] || ["", "Not used", c.visible ? "visible to the engine" : "not visible to the engine",
+                c.visible ? "The engine sees this card but gives it nothing to do" : "Outside CUDA_VISIBLE_DEVICES: the engine does not see this card"];
+  const extra = [];
+  if (c.experts) extra.push(`${fmt(c.experts)} experts${c.gib ? ` · ${fmt(c.gib, 1)} GB` : ""}`);
+  if (c.encoder && c.role !== "encoder") extra.push("+ image encoder");
+  // planned: from the engine's args - it is unloaded or still starting, or it has no log to say what it did
+  if (c.planned) extra.push(c.engine_state === "unloaded" ? "model unloaded" : c.engine_state === "starting" ? "starting" : "as configured");
+  return [role[0], role[1], [role[2], ...extra].filter(Boolean).join(" · "), role[3]];
+}
+// the PCIe link: what the card runs at, against the best it gets in this slot.  A card idles at Gen1 to save power,
+// so a lower generation counts only under load (then the best one is shown with "now Gen1"); a narrower link than the
+// slot's, any link under x8, or a card that could run a newer generation than the slot gives is marked.
+const pcieGen = (g) => (g ? `${g}.0` : "?");
+function gpuLink(c) {
+  if (!c.pcie_gen && !c.pcie_width) return null;
+  const maxG = c.pcie_gen_max, maxW = c.pcie_width_max, busy = (c.util || 0) >= 30;
+  const narrow = c.pcie_width != null && ((maxW && c.pcie_width < maxW) || c.pcie_width < 8);
+  const slowGen = c.pcie_gen && maxG && c.pcie_gen < maxG;
+  const slot = c.pcie_gen_gpu_max && maxG && c.pcie_gen_gpu_max > maxG;
+  const idle = slowGen && !busy;
+  const main = `PCIe ${pcieGen(idle ? maxG : c.pcie_gen)} x${c.pcie_width ?? "?"}`;
+  const sub = [], best = [];
+  if (slowGen && !idle) best.push(pcieGen(maxG));
+  if (narrow && maxW && c.pcie_width < maxW) best.push(`x${maxW}`);
+  if (best.length) sub.push(`max ${best.join(" ")}`);
+  if (idle) sub.push(`now ${pcieGen(c.pcie_gen)} at idle`);
+  if (slot) sub.push(`card ${pcieGen(c.pcie_gen_gpu_max)}, slot ${pcieGen(maxG)}`);
+  if (c.link_gbps) sub.push(`${fmt(c.link_gbps, 1)} GB/s measured`);
+  if (c.pcie_frac != null && c.role !== "unused") sub.push(`share ${fmt(c.pcie_frac, 2)}`);
+  const why = [narrow ? `x${c.pcie_width} link${maxW && c.pcie_width < maxW ? ` of x${maxW}` : ""}` : null,
+               slowGen && busy ? `Gen${c.pcie_gen} under load, the slot gives Gen${maxG}` : null,
+               slot ? `the card supports Gen${c.pcie_gen_gpu_max}, the slot Gen${maxG}` : null].filter(Boolean);
+  return {main, sub: sub.join(" · "), warn: why.length > 0,
+          title: (why.length ? `Limits prompt speed and the PCIe share: ${why.join("; ")}. ` : "") +
+                 (idle ? "An idle card drops its PCIe generation to save power; under load it runs at the one shown." : "")};
+}
+function gpuBar(label, text, pct, tone) {
+  const w = pct == null ? 0 : Math.max(0, Math.min(100, pct));
+  return `<div class="gpu-bar"><div class="bar-row"><span>${esc(label)}</span><span class="muted">${esc(text)}</span></div>
+    <div class="st-progress"${tone ? ` data-tone="${tone}"` : ""}><div class="st-progress__bar" style="width:${w.toFixed(1)}%"></div></div></div>`;
+}
+function renderGpus(v) {
+  const cards = (v && v.cards) || [];
+  $("gpu-card").hidden = !cards.length;
+  if (!cards.length) return;
+  const used = cards.filter((c) => c.role !== "unused" && c.role !== "encoder");
+  const stages = cards.filter((c) => c.role === "stage").length;
+  $("gpu-title").textContent = cards.length > 1 ? `GPUs (${cards.length})` : "GPU";
+  const reps = new Set(cards.filter((c) => c.replica != null).map((c) => c.replica)).size;
+  $("gpu-sum").textContent = reps > 1 ? `${reps} replicas on ${used.length} cards`
+    : stages > 1 ? `layer split across ${stages} cards${used.length > stages ? ` + ${used.length - stages} expert cache` : ""}`
+    : used.length > 1 ? `the model on ${used.length} cards` : used.length ? "" : "no card is in use by the engine";
+  $("gpu-list").innerHTML = cards.map((c) => {
+    const [cls, label, detail, means] = gpuRole(c);
+    const link = gpuLink(c);
+    const memPct = c.mem_total ? (100 * (c.mem_used || 0)) / c.mem_total : null;
+    const id = [c.cuda != null ? `CUDA${c.cuda}` : null, c.replica != null ? `replica ${c.replica + 1}` : null, c.pci]
+      .filter(Boolean).join(" · ");
+    const vit = [c.temp == null ? null : `${fmt(c.temp)} °C`,
+                 c.power == null ? null : `${fmt(c.power)} W${c.power_limit ? ` <span class="muted">/ ${fmt(c.power_limit)}</span>` : ""}`]
+      .filter(Boolean);
+    return `<div class="gpu-row" data-role="${esc(c.role)}">
+      <div class="gpu-id"><div class="gpu-name"><span class="gpu-idx">GPU ${esc(c.index)}</span>${esc(c.name || "unknown card")}</div>
+        <div class="muted small" title="${esc(c.uuid || "")}">${esc(id || "–")}</div></div>
+      <div class="gpu-role"><span class="st-badge ${cls}" title="${esc(means)}">${esc(label)}</span><div class="muted small">${esc(detail)}</div></div>
+      ${gpuBar("Load", c.util == null ? "–" : `${fmt(c.util)}%`, c.util, "info")}
+      ${gpuBar("VRAM", c.mem_total ? `${gb(c.mem_used)} / ${gb(c.mem_total, 0)} GB` : "–", memPct, null)}
+      ${link ? `<div class="gpu-link${link.warn ? " gpu-link--warn" : ""}" title="${esc(link.title)}"><span class="gpu-link__main">${esc(link.main)}</span>
+        <span class="muted small">${esc(link.sub)}</span></div>` : '<div class="gpu-link muted">–</div>'}
+      <div class="gpu-vitals">${vit.length ? vit.map((x) => `<span>${x}</span>`).join("") : '<span class="muted">–</span>'}</div>
+    </div>`;
+  }).join("");
+  $("gpu-note").textContent = v.mock ? "Mock GPUs (STRATA_MOCK_GPUS): fixture cards, not this PC's."
+    : v.mapping === "assumed" ? "The engine's device numbers could not be matched to the cards (CUDA_VISIBLE_DEVICES): CUDA0 is shown on GPU 0, and so on."
+    : "";
+}
+
 function facts(el, rows) {
   el.innerHTML = rows.filter((r) => r[1] != null && r[1] !== "").map(([k, v, copy]) =>
     `<dt>${esc(k)}</dt><dd>${copy ? `<code>${esc(v)}</code><button class="st-btn st-btn--icon" data-copy="${esc(v)}" aria-label="Copy">${icon("copy")}</button>` : esc(v)}</dd>`).join("");
@@ -573,7 +690,7 @@ function projectionText(c) {
          `${single ? ` (layer ${single.replace("single", "")}'s direction)` : ""}. Per chat in Sampling. Its package ` +
          "describes the vector as a refusal-direction projection; measure the speed yourself";
 }
-function renderAbout(eng, hw, st) {
+function renderAbout(eng, hw, st, gv) {
   const kv = {int8: "8-bit", q4_0: "4-bit (Hadamard-rotated)", fp16: "16-bit"}[eng.kv] || eng.kv;
   facts($("facts-engine"), [
     ["Model", eng.model],
@@ -585,10 +702,21 @@ function renderAbout(eng, hw, st) {
     ["Images", eng.images ? "on" : "off"],
     ["Experimental speed projection", projectionText(eng.cvec)],
   ]);
+  const cards = (gv && gv.cards) || [];
+  // every card with its PCIe link; with several, what each one does
+  const gpuRows = cards.length
+    ? cards.map((c) => [cards.length > 1 ? `GPU ${c.index}` : "GPU",
+                        `${c.name || "unknown"}${c.mem_total ? `, ${gb(c.mem_total, 0)} GB` : ""}` +
+                        `${gpuLink(c) ? `, ${gpuLink(c).main}` : ""}` +
+                        (cards.length > 1 ? ` · ${gpuRole(c)[1]}${c.cuda != null ? ` (CUDA${c.cuda})` : ""}` : "")])
+    : [["GPU", st.gpu_name ? `${st.gpu_name}${hw.gpu_mem_total ? `, ${gb(hw.gpu_mem_total, 0)} GB` : ""}` : (st.gpu_note || "not readable (NVML)")]];
   facts($("facts-hw"), [
-    ["GPU", st.gpu_name ? `${st.gpu_name}${hw.gpu_mem_total ? `, ${gb(hw.gpu_mem_total, 0)} GB` : ""}` : (st.gpu_note || "not readable (NVML)")],
+    ...gpuRows,
     ["CPU", st.cpu_name ? `${st.cpu_name}${st.threads ? `, ${st.threads} threads` : ""}` : null],
     ["RAM", hw.ram_total ? `${gb(hw.ram_total, 0)} GB` : null],
+    ["Model drive", (st.disks || []).map((d) => `${d.label} (${d.roles.join(", ")})`).join(" · ") || null],
+    // the disk reading needs psutil: the command that installs it for the Python this server runs under
+    ["Install psutil", st.psutil ? null : st.psutil_install, true],
   ]);
   const base = location.origin;
   facts($("facts-api"), [

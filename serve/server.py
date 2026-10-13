@@ -5527,18 +5527,56 @@ class Service:
         return req
 
     def start_telemetry(self):
-        """The hardware sampler behind GET /metrics (serve/telemetry.py), recording this server's tok/s too."""
+        """The hardware sampler behind GET /metrics (serve/telemetry.py), recording this server's tok/s too.  Its
+        thread also keeps the GPU layout (serve/gpus.py: which card each engine device is and what it does), and the
+        disk reading follows the drives of the model's files."""
         if getattr(self, "telemetry", None) is None:
-            from serve.telemetry import Telemetry
+            from serve.gpus import Layout
+            from serve.telemetry import Telemetry, model_files
+            self.gpu_layout = Layout(self)
+            spawn = getattr(self.engine, "spawn", None)
+            files = model_files(spawn[1], spawn[2]) if spawn and len(spawn) > 2 else []
             self.telemetry = Telemetry(extra=lambda: {"tok_s": self._tok_s(), "tok_s_mean": self._tok_s_mean(),
                                                     "prefill_tok_s_mean": self._prefill_tok_s_mean()},
                                        gpu_index=int(getattr(self, "gpu_index", 0) or 0),
                                        gpu_indices=getattr(self, "gpu_indices", None),
-                                       amd=getattr(self, "backend", None) == "hip")
+                                       amd=getattr(self, "backend", None) == "hip",
+                                       on_tick=self._gpu_layout_tick, files=files)
             if getattr(self, "engine", None) is not None and hasattr(self.engine, "gpu_busy"):
                 # #1317: the quick frozen-engine check does not end an engine whose GPU is busy (a long prompt chunk on a
                 # slow card keeps the GPU at work while the host thread sleeps)
                 self.engine.gpu_busy = lambda: (self.telemetry.snapshot()["now"].get("gpu_util") or 0) >= 10
+
+    def _gpu_layout_tick(self):
+        """On the telemetry thread, each second: the engines' GPU layout again (cached pieces: the device mapping
+        once per environment, the engine's log once per start), and the gpu_* totals moved to the cards the engines
+        use when that differs from the config's "gpu" list (no list, or CUDA's own order put another card first)."""
+        tel = getattr(self, "telemetry", None)
+        if tel is None:
+            return
+        cards = tel.snapshot()["static"].get("gpus") or []
+        used = self.gpu_layout.refresh(cards, amd=getattr(self, "backend", None) == "hip")
+        if used and used != sorted(tel.engine_cards()):
+            tel.set_engine_cards(used)
+
+    def gpu_view(self) -> dict:
+        """GET /metrics' "gpus": one row per card of the PC - name, PCI bus id, its last reading, the engine's device
+        number for it and its role (serve/gpus.py)."""
+        tel = getattr(self, "telemetry", None)
+        if tel is None or getattr(self, "gpu_layout", None) is None:
+            return {"cards": [], "mapping": None, "mock": False}
+        snap = tel.snapshot()
+        readings = {g.get("index"): g for g in snap["now"].get("gpus") or []}
+        enc = getattr(self, "vision_gpu", None)
+        if enc is None:
+            from serve.gpus import mock_fixture
+            enc = (mock_fixture() or {}).get("encoder")
+        out = self.gpu_layout.rows(snap["static"].get("gpus") or [], readings, encoder=enc if isinstance(enc, int) else None)
+        if enc == "engine":                             # the encoder shares the engine's first card
+            for row in out["cards"]:
+                if row.get("cuda") == 0 and row.get("replica") in (None, 0):
+                    row["encoder"] = True
+        return out
 
     def _tok_s(self):
         """tok/s over the last RATE_WINDOW_S seconds.  Returns 0.0 while nothing is generating.  With parallel requests:
@@ -5665,6 +5703,7 @@ class Service:
         parked = self.conv_log.poll(getattr(self.engine, "log_path", None), getattr(self.engine, "log_start", None))
         return {"engine": engine, "live": live, "requests": hist[::-1][:None if all_requests else 12],
                 "conversation_cache": conversation_cache_view(engine, hist, totals, parked),
+                "gpus": self.gpu_view(),
                 "requests_kept": len(hist), "totals": totals, "hardware": tel["now"],
                 "hardware_static":
                 tel["static"], "history": tel["history"], "time": now}
@@ -5751,6 +5790,15 @@ class Service:
                 "gpu": {"name": static.get("gpu_name"), "used_mib": scaled(hw.get("gpu_mem_used"), 2 ** 20),
                         "total_mib": scaled(hw.get("gpu_mem_total"), 2 ** 20), "util_pct": hw.get("gpu_util"),
                         "temp_c": hw.get("gpu_temp"), "power_w": hw.get("gpu_power")} if static.get("gpu_name") else None,
+                # every card: the engine's device number for it and what it does there (serve/gpus.py)
+                "gpus": [{"index": g.get("index"), "cuda": g.get("cuda"), "name": g.get("name"), "role": g.get("role"),
+                          "layers": g.get("layers"), "used_mib": scaled(g.get("mem_used"), 2 ** 20),
+                          "total_mib": scaled(g.get("mem_total"), 2 ** 20), "util_pct": g.get("util"),
+                          "temp_c": g.get("temp"), "power_w": g.get("power"),
+                          "pcie": {"gen": g.get("pcie_gen"), "width": g.get("pcie_width"),
+                                   "gen_max": g.get("pcie_gen_max"), "width_max": g.get("pcie_width_max"),
+                                   "measured_gbps": g.get("link_gbps")}}
+                         for g in self.gpu_view()["cards"]],
                 "ram": {"used_gib": scaled(hw.get("ram_used"), 2 ** 30, 1),
                         "total_gib": scaled(hw.get("ram_total"), 2 ** 30, 1)} if hw.get("ram_total") else None}}
 
@@ -10392,6 +10440,11 @@ def _main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> i
     svc.terminal_configured_split = (layer_split_value(cfg) if a.engine == "strata" and layer_split_of(cfg)
                                      else None)
     svc.backend = cfg.get("backend")                    # "hip": the AMD cards' readings come from sysfs (#301)
+    vis = cfg.get("vision") if isinstance(cfg.get("vision"), dict) else {}
+    if str(vis.get("cuda_device", "")).strip().isdigit():  # the Monitor's GPU list: the card the image encoder runs on
+        svc.vision_gpu = int(str(vis["cuda_device"]).strip())
+    elif vis.get("gpu"):
+        svc.vision_gpu = "engine"
     if a.config:
         svc.config_path = a.config                      # #564: the web page's Settings view
     if a.config:                                        # the Chat settings shared with other apps, from last time
