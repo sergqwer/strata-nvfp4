@@ -1000,7 +1000,16 @@ buffer (and at most 16 MiB), which the budget counts like the rest of the snapsh
 Rewinds refresh the affected pages, and running state and
 checkpoints are captured again. Retained active K/V counts against the same byte
 budget and is discarded before evicting parked entries under memory pressure.
-Oldest parked entries are evicted first.
+Oldest parked entries are evicted first. A new conversation that starts with a
+checkpoint inside a parked one (subagents that share a system prompt and tool
+list, a compacted history) restores that prefix and leaves the parked
+conversation where it is, so its next turn still resumes in full; the engine
+log says "borrowed". A match on a parked conversation's live state or its newest
+checkpoint is that conversation going on and moves it into the session as
+before; so does a match that reaches a pinned shared prefix (`pin=N`), which
+keeps one conversation holding the pin. When the outgoing conversation fits only
+in the parked one's room, it keeps its place and the parked one is moved in
+whole, as before.
 Oversized snapshots or host allocation failures fall back to ordinary prompt processing.
 `--conversation-cache-min-tokens N` (default 0 = park every conversation) parks only conversations of at least N
 tokens. A parked conversation costs one of the slots whatever its length, and parking is a switch-time decision, so a
