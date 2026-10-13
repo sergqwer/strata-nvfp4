@@ -25,6 +25,7 @@
 #include <deque>
 #include <functional>
 #include <mutex>
+#include <set>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -39,6 +40,10 @@ struct ConversationDiskOptions {
     uint64_t min_free_bytes = 0;     ///< a write needs the file plus this much free on the disk (session preflight)
     bool persist = false;            ///< keep the files for later runs, bound to `identity`
     SessionFileIdentity identity;    ///< persist: the session files' identity (model and settings fingerprints)
+    /// (strata-nvfp4) several engines use the folder at once - the replicas of one server, one per GPU - as one pool:
+    /// rescan() takes in what the others wrote, and open() leaves alone the files of other identities and the young
+    /// leftovers another engine may still be writing.  Needs `persist` (the files are bound to the identity).
+    bool shared = false;
     /// Called with every diagnostic line (no trailing newline), from the caller's or the writer's thread.
     std::function<void(const std::string&)> log;
     /// Tests: called on the writer thread before each write starts.
@@ -66,6 +71,7 @@ public:
 
     bool enabled() const { return open_; }
     bool persistent() const { return open_ && options_.persist; }
+    bool shared() const { return open_ && options_.shared; }
     /// Creates the folder (0700 on POSIX) and starts the writer.  This tier's files a previous run left there are
     /// removed, or with `persist` taken in when their identity matches (the others removed).  False (and the tier
     /// stays off) when the folder cannot be used.
@@ -122,6 +128,9 @@ public:
                    const std::function<bool()>& cancel, uint64_t& id, std::string& error, bool* cancelled = nullptr);
     /// Whether entry `id` is on the disk (or queued / being written).
     bool has(uint64_t id) const;
+    /// `shared`: the entries other engines published since the last look come in (their index files), and the ones
+    /// another engine removed (index gone) leave this list.  Cheap (one folder listing); returns how many came in.
+    size_t rescan();
     /// The engine runs a request (true) or is idle (false): the background writer starts a queued job only while
     /// idle, or when someone waits for it (wait_idle, take).
     void set_busy(bool busy);
@@ -175,6 +184,7 @@ private:
     bool write_index(Entry& e, std::string& error) const;
     bool read_index(const std::string& path, Entry& e) const;
     std::string scan_folder(size_t& stale, std::error_code& ec);   // open(): take in or remove; its log part
+    std::set<std::string> seen_index_;   ///< shared: index files looked at already (taken in, or another identity's)
 
     ConversationDiskOptions options_;
     std::function<Clock::time_point()> now_;

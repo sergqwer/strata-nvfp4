@@ -480,6 +480,49 @@ int main() {
         check(tier.best(prompt_of(450), {}, false).tokens == 400, "mark: a still on the disk");
     }
 
+    {   // shared (replicas): two engines, one folder, one pool
+        fs::remove_all(dir);
+        auto sharedo = [&](uint64_t model) {
+            auto o = opts(dir, GiB, 0);
+            o.persist = true;
+            o.shared = true;
+            o.identity = {model, 7};
+            return o;
+        };
+        ConversationDiskTier t1(sharedo(1)), t2(sharedo(1));
+        check(t1.open(e) && t2.open(e), "shared: both open");
+        uint64_t a = 0, b = 0;
+        check(t1.write_now(image(400, 50), nullptr, {}, a, e), "shared: engine 1 writes A");
+        check(t1.rescan() == 0 && t1.size() == 1, "shared: an engine does not take in its own entry again");
+        check(t2.best(prompt_of(450), {}, false).tokens == 0, "shared: engine 2 has not looked yet");
+        check(t2.rescan() == 1 && t2.size() == 1 && logged("1 conversation from other engines"),
+              "shared: engine 2 takes A in");
+        const auto m = t2.best(prompt_of(450), {}, false);
+        SavedConversation back;
+        check(m.tokens == 400 && t2.take(m.id, m.tokens, back, e, {}, true) && same(back, image(400, 50)),
+              "shared: engine 2 restores A, written by engine 1, exactly");
+        check(t2.write_now(image(800, 51), nullptr, {}, b, e) && t2.size() == 1 && tier_files(dir) == 2,
+              "shared: engine 2's newer copy of A supersedes engine 1's (its files go)");
+        check(t1.rescan() == 1 && t1.size() == 1 && t1.best(prompt_of(900), {}, false).tokens == 800 &&
+              logged("1 removed by them"), "shared: engine 1 sees A's old copy gone and the new one in");
+        // a foreign identity's entry and a young leftover stay at a start; an old leftover goes
+        {
+            ConversationDiskTier other(sharedo(9));
+            check(other.open(e) && other.put(image(300, 52, 9000)), "shared: another identity writes");
+        }
+        const fs::path young = dir / ("." + std::string(ConversationDiskTier::file_prefix()) + "aa-1-0.bin.1.tmp");
+        const fs::path old = dir / ("." + std::string(ConversationDiskTier::file_prefix()) + "bb-1-0.bin.2.tmp");
+        touch(young);
+        touch(old);
+        fs::last_write_time(old, fs::file_time_type::clock::now() - std::chrono::minutes(30));
+        const size_t before = tier_files(dir);
+        ConversationDiskTier t3(sharedo(1));
+        check(t3.open(e) && t3.size() == 1, "shared: a third engine takes in the pool");
+        check(tier_files(dir) == before - 1 && fs::exists(young) && !fs::exists(old),
+              "shared: another identity's files and a young leftover stay, the old leftover goes");
+        fs::remove(young);
+    }
+
     fs::remove_all(dir);
     std::printf("conversation_disk_test: %d checks passed\n", checks);
     return 0;
