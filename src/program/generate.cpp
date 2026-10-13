@@ -57,6 +57,7 @@
 #include "strata/kernels/native_qsa_indexer.hpp"
 #include "strata/kernels/native_rope.hpp"
 #include "strata/kernels/rope_dynamic.hpp"
+#include "strata/kernels/rope_far.hpp"
 #include "strata/core/rope_dynamic.hpp"
 #include "strata/kernels/mrope.hpp"
 #include "strata/kernels/kv_q4.hpp"
@@ -2860,6 +2861,19 @@ int main(int argc, char** argv) {
     // resolved after the model file has had its say, right before session_init.
     strata::kernels::RopeScaling rope_cfg;   // type filled here; the rest at the resolution below
     strata::core::RopeDynamic rope_dyn;      // --rope-scaling dynamic: the yarn knobs, resolved below
+    // STRATA_ROPE_FAR=W[:k] (experimental, kernels/rope_far.hpp): keys more than W cells back score at W + (d - W) / k;
+    // k by the dialog's length (all of it inside the trained context) unless given; nothing changes up to it
+    struct RopeFarCfg {
+        bool on = false, yarn = false;   // STRATA_ROPE_FAR_MODE=yarn: yarn's per-pair rates beyond W
+        int w = 131072;
+        double k_fixed = 0, live = 1.0, orig = 262144, step = 0.125;
+        double k_for(int64_t n) const {
+            if (!on || (double) n <= orig) return 1.0;
+            if (k_fixed > 0) return k_fixed;
+            const double k = ((double) n - w) / (orig - w);
+            return std::max(1.0, std::ceil(k / step - 1e-9) * step);
+        }
+    } rope_far_cfg;
     {
         using RST = strata::kernels::RopeScalingType;
         // dynamic: yarn's knobs, applied by the dialog's length (STRATA_ROPE_DYNAMIC=1 turns yarn or the absent
@@ -3227,6 +3241,31 @@ int main(int argc, char** argv) {
                          rope_dyn.base.attn_factor, rope_dyn.reread ? "; a change reads the prompt again" : "");
         }
         strata::kernels::rope_scaling_set(rope_cfg);
+        if (const char* e = std::getenv("STRATA_ROPE_FAR"); e != nullptr && e[0] != '\0' && e[0] != '0') {
+            const char* krot = std::getenv("STRATA_KV_ROT");
+            const bool plain_k = o.kv == "fp16" || (o.kv == "int8" && krot != nullptr && krot[0] == '0');
+            rope_far_cfg.on = true;
+            rope_far_cfg.w = std::atoi(e);
+            if (const char* c = std::strchr(e, ':')) rope_far_cfg.k_fixed = std::atof(c + 1);
+            if (const char* m = std::getenv("STRATA_ROPE_FAR_MODE")) rope_far_cfg.yarn = std::strcmp(m, "yarn") == 0;
+            rope_far_cfg.orig = o.yarn_orig_ctx > 0 ? o.yarn_orig_ctx : rope_cfg.orig_ctx;
+            if (!plain_k || rope_dyn.on || rope_far_cfg.w <= 0 || (double) rope_far_cfg.w >= rope_far_cfg.orig) {
+                std::fprintf(stderr, "strata generate: STRATA_ROPE_FAR=W[:k] needs 0 < W < the trained context, --kv fp16 "
+                                     "or int8 with STRATA_KV_ROT=0, and no dynamic rope scaling\n");
+                return 2;
+            }
+            if (!strata::kernels::rope_far_init((int) o.max_context)) {
+                std::fprintf(stderr, "strata generate: STRATA_ROPE_FAR: no VRAM for its table\n");
+                return 2;
+            }
+            std::fprintf(stderr, "strata generate: rope far (experimental): keys more than %d cells back score at %d + "
+                                 "(d - %d) / k, k %s\n", rope_far_cfg.w, rope_far_cfg.w, rope_far_cfg.w,
+                         rope_far_cfg.k_fixed > 0 ? "fixed" : "by the dialog's length");
+            if (!o.serve) {
+                rope_far_cfg.live = rope_far_cfg.k_for((int64_t) o.tokens.size() + o.max_new);
+                if (!strata::kernels::rope_far_update(rope_far_cfg.w, rope_far_cfg.live, rope_cfg, rope_far_cfg.yarn)) return 2;
+            }
+        }
         if (rope_cfg.type != RST::None) {
             const char* tn = rope_cfg.type == RST::YaRN ? "yarn" : "linear";
             std::fprintf(stderr,
@@ -12531,6 +12570,15 @@ int main(int argc, char** argv) {
                     return 1;
                 }
             }
+            if (rope_far_cfg.on && rope_far_cfg.k_for(n) != rope_far_cfg.live) {   // STRATA_ROPE_FAR: the table only
+                rope_far_cfg.live = rope_far_cfg.k_for(n);
+                if (!strata::kernels::rope_far_update(rope_far_cfg.w, rope_far_cfg.live, strata::kernels::rope_scaling(),
+                                                       rope_far_cfg.yarn)) {
+                    std::printf("ERR rope far: the table update failed\n");
+                    return 1;
+                }
+                std::fprintf(stderr, "strata serve: rope far: k %.4g\n", rope_far_cfg.live);
+            }
             // KV streaming: the drafter's ring may hold cells past `resume` from a longer turn; the main layers'
             // host copies and slots are always current (every writer writes both), so they need nothing
             if (use_mtp && resume > 0 && reread_to <= 0) mtp.kv_restore(resume);
@@ -13973,6 +14021,15 @@ int main(int argc, char** argv) {
                 if (rope_dyn.on && p + T > rope_dyn.limit() && rope_dyn.factor_for(p + T) != rope_dyn.live) {
                     if (!ver.wait_commit(err) || !dyn_switch(p, p, rope_dyn.live, rope_dyn.factor_for(p + T), "decode")) {
                         std::printf("ERR %s\n", err.c_str());
+                        return 1;
+                    }
+                }
+                if (rope_far_cfg.on && rope_far_cfg.k_for(p + T) != rope_far_cfg.live) {
+                    rope_far_cfg.live = rope_far_cfg.k_for(p + T);
+                    if (!ver.wait_commit(err) ||
+                        !strata::kernels::rope_far_update(rope_far_cfg.w, rope_far_cfg.live, strata::kernels::rope_scaling(),
+                                                       rope_far_cfg.yarn)) {
+                        std::printf("ERR rope far: the table update failed\n");
                         return 1;
                     }
                 }

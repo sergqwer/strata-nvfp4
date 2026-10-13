@@ -2,6 +2,7 @@
 #include "strata/kernels/qsa_decode_attn.hpp"
 #include "strata/kernels/kv_q8.hpp"
 #include "strata/kernels/kv_q4.hpp"
+#include "strata/kernels/rope_far.hpp"
 #if defined(STRATA_HIP_GFX906)
 #include "strata/kernels/gfx_arch.hpp"
 #endif
@@ -114,13 +115,32 @@ __device__ __forceinline__ int reduce12_head_of_lane(int lane) {
     return ((lane >> 4) & 1) * 8 + ((lane >> 3) & 1) * 4 + ((lane >> 2) & 1) * 2 + ((lane >> 1) & 1);
 }
 
-template <int KV_MODE, bool LANE_CELL = false, bool QUERY_SWIZZLE = false, bool REDUCE12 = false>
+// STRATA_ROPE_FAR (rope_far.hpp): a key d > w cells behind the query turns by its pairs' far angle for m = d - w
+// (lanes 0-3 hold the pairs' first halves, lanes 4-7 the second: NEOX, 64 rotary dims of 256).  Warp-uniform.
+__device__ __forceinline__ void far_rotate(float (&k8)[8], int lane, const RopeFarDev& far, int w, int d) {
+    if (d <= w) return;
+    const int m = d - w < far.max_m ? d - w : far.max_m - 1;
+    float o[8];
+#pragma unroll
+    for (int j = 0; j < 8; ++j) o[j] = __shfl_xor_sync(0xffffffffu, k8[j], 4);
+    if (lane < 8) {
+        const float2* cs = reinterpret_cast<const float2*>(far.cs) + (size_t) m * 32 + (lane & 3) * 8;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            const float2 t = __ldg(cs + j);
+            k8[j] = lane < 4 ? k8[j] * t.x - o[j] * t.y : o[j] * t.y + k8[j] * t.x;
+        }
+    }
+}
+
+template <int KV_MODE, bool LANE_CELL = false, bool QUERY_SWIZZLE = false, bool REDUCE12 = false, bool FAR = false>
 __global__ void __launch_bounds__(THREADS) attn_chunk_kernel(const float* __restrict__ q, QsaAttnPools p,
                                                              const int32_t* __restrict__ ids,
                                                              const int32_t* __restrict__ step, int n_kv_heads,
                                                              int page_size, float scale, float* __restrict__ part_acc,
                                                              float* __restrict__ part_m, float* __restrict__ part_l,
-                                                             int n_chunks, int cap = 0, long long scratch_stride = 0) {
+                                                             int n_chunks, int cap = 0, long long scratch_stride = 0,
+                                                             RopeFarDev far = RopeFarDev{}) {
     // batched form: query blockIdx.z, with its own q row, selection, step and scratch
     q += (size_t) blockIdx.z * (size_t) (n_kv_heads * G) * HD;
     ids += (size_t) blockIdx.z * (size_t) cap;
@@ -224,6 +244,7 @@ __global__ void __launch_bounds__(THREADS) attn_chunk_kernel(const float* __rest
         } else {
         float k8[8];
         load8<KV_MODE>(p, false, srow[c], lane * 8, k8);
+        if constexpr (FAR) far_rotate(k8, lane, far, __ldg(far.ctl), __ldg(step + kStepPos) - __ldg(ids + c0 + c));
 #pragma unroll
         for (int h = 0; h < G; ++h) {
             const int qflip = QUERY_SWIZZLE ? (lane & 4) : 0;
@@ -650,6 +671,16 @@ void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int3
     }
 #endif
 #define STRATA_ATTN_LC(M) attn_chunk_kernel<M, true><<<grid, THREADS, 0, st>>>(q, pools, ids, steps, (int) s.n_head_kv, (int) s.page_size, scale, part_acc, part_m, part_l, n_chunks, (int) cap, stride)
+    if (rope_far_on() && kv_mode <= 1) {   // STRATA_ROPE_FAR: the warp kernel with the far rotation
+        if (kv_mode == 1)
+            attn_chunk_kernel<1, false, false, false, true><<<grid, THREADS, 0, st>>>(q, pools, ids, steps,
+                (int) s.n_head_kv, (int) s.page_size, scale, part_acc, part_m, part_l, n_chunks, (int) cap, stride,
+                rope_far());
+        else
+            attn_chunk_kernel<0, false, false, false, true><<<grid, THREADS, 0, st>>>(q, pools, ids, steps,
+                (int) s.n_head_kv, (int) s.page_size, scale, part_acc, part_m, part_l, n_chunks, (int) cap, stride,
+                rope_far());
+    } else
     if (lane_cell) {
         if (kv_mode == 3) STRATA_ATTN_LC(3);
         else if (kv_mode == 2) STRATA_ATTN_LC(2);
@@ -735,6 +766,14 @@ void qsa_decode_attn_step(const float* q, const QsaAttnPools& pools, const int32
     const float scale = 1.0f / sqrtf((float) HD);
     const dim3 grid((unsigned) n_chunks, (unsigned) s.n_head_kv);
     cudaStream_t st = (cudaStream_t) stream;
+    if (rope_far_on() && kv_mode <= 1) {   // STRATA_ROPE_FAR
+        if (kv_mode == 1)
+            attn_chunk_kernel<1, false, false, false, true><<<grid, THREADS, 0, st>>>(q, pools, ids, step,
+                (int) s.n_head_kv, (int) s.page_size, scale, part_acc, part_m, part_l, n_chunks, 0, 0, rope_far());
+        else
+            attn_chunk_kernel<0, false, false, false, true><<<grid, THREADS, 0, st>>>(q, pools, ids, step,
+                (int) s.n_head_kv, (int) s.page_size, scale, part_acc, part_m, part_l, n_chunks, 0, 0, rope_far());
+    } else
     if (kv_mode == 3)
         STRATA_ATTN_CHUNK(3)<<<grid, THREADS, 0, st>>>(q, pools, ids, step, (int) s.n_head_kv, (int) s.page_size,
                                                         scale, part_acc, part_m, part_l, n_chunks, 0, 0);

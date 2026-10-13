@@ -1,5 +1,6 @@
 // src/kernels/cuda/qsa_select.cu - see include/strata/kernels/qsa_select.hpp.
 #include "strata/core/emulate.hpp"
+#include "strata/kernels/rope_far.hpp"
 #include <cstdlib>
 #include <cstring>
 #include "strata/kernels/qsa_select.hpp"
@@ -813,12 +814,34 @@ __global__ void __launch_bounds__(TK_T) block_topk_wide_kernel(const float* __re
 // qsa_block_scores takes it for every call without an active-block count and at most MQ queries: the captured decode
 // window, the uncaptured decode, and prefill's pooled16 call.
 constexpr int MQ = 8;
+// STRATA_ROPE_FAR (rope_far.hpp): a pooled key whose block starts d > w cells before the query turns by its pairs'
+// far angle for m = d - w.  Lanes 0-7 hold the 32 pairs' first halves (4 each), lanes 8-15 the second.
+__device__ __forceinline__ float4 far_rotate4(float4 k, int lane, const RopeFarDev& far, int w, int64_t d) {
+    if (d <= w) return k;
+    const int64_t m = d - w < far.max_m ? d - w : far.max_m - 1;
+    float4 o;
+    o.x = __shfl_xor_sync(0xffffffffu, k.x, 8);
+    o.y = __shfl_xor_sync(0xffffffffu, k.y, 8);
+    o.z = __shfl_xor_sync(0xffffffffu, k.z, 8);
+    o.w = __shfl_xor_sync(0xffffffffu, k.w, 8);
+    if (lane >= 16) return k;
+    const float4* cs4 = reinterpret_cast<const float4*>(far.cs + (size_t) m * 64 + (lane & 7) * 8);
+    const float4 a = __ldg(cs4), b = __ldg(cs4 + 1);   // pairs 4l..4l+3: (c, s) x 4
+    const float c[4] = {a.x, a.z, b.x, b.z}, sn[4] = {a.y, a.w, b.y, b.w};
+    const float kv[4] = {k.x, k.y, k.z, k.w}, ov[4] = {o.x, o.y, o.z, o.w};
+    float r[4];
+#pragma unroll
+    for (int j = 0; j < 4; ++j) r[j] = lane < 8 ? kv[j] * c[j] - ov[j] * sn[j] : ov[j] * sn[j] + kv[j] * c[j];
+    return make_float4(r[0], r[1], r[2], r[3]);
+}
+template <bool FAR = false>
 __global__ void __launch_bounds__(SCORE_WARPS * 32) block_scores_multi_kernel(const float* __restrict__ pooled,
                                                                               const float* __restrict__ dead,
                                                                               const float* __restrict__ q_idx,
                                                                               const int32_t* __restrict__ steps, int nq,
                                                                               int64_t max_blocks, float* __restrict__ out,
-                                                                              bool early_exit) {
+                                                                              bool early_exit,
+                                                                              RopeFarDev far = RopeFarDev{}) {
     __shared__ __align__(16) float qs[MQ * IDX_HEADS * IDX_DIM];
     __shared__ int64_t s_nkv[MQ], s_nbid[MQ];
     if (!early_exit)
@@ -846,7 +869,9 @@ __global__ void __launch_bounds__(SCORE_WARPS * 32) block_scores_multi_kernel(co
         for (int qi = 0; qi < nq; ++qi) {
             const int64_t n_bid = s_nbid[qi];
             if (b > n_bid) continue;
-            const float4 k4 = (b == n_bid) ? kd : kp;
+            float4 k4 = (b == n_bid) ? kd : kp;
+            if constexpr (FAR)   // the block's rotation position is its first cell; the query is cell n_kv - 1
+                if (b < n_bid) k4 = far_rotate4(k4, lane, far, __ldg(far.ctl), s_nkv[qi] - 1 - b * R);
             const float* q = qs + qi * IDX_HEADS * IDX_DIM + lane * 4;
             float score = 0.0f;
 #pragma unroll
@@ -1101,6 +1126,10 @@ void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx
     if (multi && nq <= MQ && active_blocks <= 0) {   // no active count: decode (captured or not) and prefill's pooled16
         // STRATA_QSA_EARLY_EXIT=0 keeps the old staging (every CTA loads the queries first); the scores are the same bits
         static const bool early = [] { const char* v = std::getenv("STRATA_QSA_EARLY_EXIT"); return v == nullptr || std::atoi(v) != 0; }();
+        if (rope_far_on())   // STRATA_ROPE_FAR: far blocks scored at their compressed distance
+            block_scores_multi_kernel<true><<<256, SCORE_WARPS * 32, 0, (cudaStream_t) stream>>>(pooled, dead, q_idx, steps,
+                (int) nq, max_blocks, scores, early, rope_far());
+        else
         block_scores_multi_kernel<<<256, SCORE_WARPS * 32, 0, (cudaStream_t) stream>>>(pooled, dead, q_idx, steps, (int) nq,
                                                                                      max_blocks, scores, early);
         const cudaError_t e = cudaGetLastError();
