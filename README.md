@@ -2,7 +2,7 @@
 
 **Qwen3.8-Flash-Next (125B hybrid MoE) with NVFP4 experts on one RTX 20, 30, 40 or 50 card (12 GB of VRAM or more)
 and 64 GB of RAM or more, text and pictures.** A fork of [Niko1221/Strata](https://github.com/Niko1221/Strata), on
-upstream 0.1.43.1. Setup installs, ready-made from Hugging Face, the original Qwen in NVFP4 (our GPTQ, or NVIDIA's
+upstream 0.1.44. Setup installs, ready-made from Hugging Face, the original Qwen in NVFP4 (our GPTQ, or NVIDIA's
 checkpoint converted), censored as Qwen ships it; on ours an opt-in switch turns the censorship off. Upstream's GGUF
 models are still offered.
 
@@ -51,8 +51,49 @@ files by hand.
 
 ## What's new
 
-- **On upstream 0.1.43.1 (0.1.43.1-nvfp4.1).** Upstream's changes that matter here
-  ([the port and its checks](docs/NVFP4.md#upstream-01431-2026-10-13-release-01431-nvfp41)):
+- **On upstream 0.1.44 (0.1.44-nvfp4.1), which ships this fork's NVFP4 engine path.** Upstream's "NVFP4 packs" are a
+  port of this fork's work: its NVFP4 experts, MMQ tails, mixed formats and CPU rows are upstream's code now, and this
+  fork runs upstream's copy. Upstream's `--family nvfp4 --model NVFP4 | NVFP4-NVIDIA` install this fork's
+  `qwen-nvfp4-gptq` / `qwen-nvidia-nvfp4` here, one install path
+  ([the port and its checks](docs/NVFP4.md#upstream-0144-2026-10-14-release-0144-nvfp41)). One GPU and one dialog
+  run as before: with the same expert cache, the default settings give the same bits as 0.1.43.1-nvfp4.1's engine.
+  Upstream's changes that matter here:
+  - **Unsloth's UD-Q5_K_XL, UD-Q6_K_XL and Q8_0** are new sizes of `--family unsloth`, and UD-Q4_K_XL is no longer
+    experimental; images are on by default for them. Upstream writes `STRATA_HC_Q8=1` (and `STRATA_MMQ_KQ=1` for Q5/Q6)
+    into their configs. This fork's UD-Q3_K_XL stays a size.
+  - **Qwen3.6-35B-A3B** (`--family qwen36`, Unsloth's GGUFs with the MTP layer, text only so far) is a new family
+    with its own engine path. It runs here exactly as on upstream (the same tokens and logits, bit for bit): on an
+    RTX 5090 UD-Q4_K_XL keeps every expert in VRAM and answers at ~410 tokens/s with its MTP drafts, a 33K prompt in
+    5.3 s. UD-Q6_K_XL does not fit a 32 GB card whole: 153 of its 256 experts per layer stay in VRAM, the rest
+    run on the CPU, ~130-150 tokens/s. Setup recommends the largest size the RAM allows (Q8_0 from 64 GB); on a
+    32 GB card UD-Q4_K_XL is the fast one.
+  - **IQ3_S is the recommended GGUF size** from 64 GB of RAM (it was IQ3_XXS).
+  - **A picture in a long conversation no longer loses the cached state** (#2228); **a long prompt gives way to a
+    short request** at the next chunk (#2170); a quoted `<tool_call>` / `<tool_response>` in a message is text (#2026).
+  - **Two GPUs:** the auto split keeps room on its fullest card (#1440); a slow link costs more only from a 4x gap
+    (#2007); the VRAM check covers every card (#2192).
+  - Opt-in: `--adapt-async 1` in the arena (#1904), `STRATA_PIN_BY_NEED=1` on Windows (#1905), `--prefill-head-alias`.
+- **Also in 0.1.44-nvfp4.1:**
+  - **Several GPUs (layer split, #7):** a prompt is read in chunks per stage so the stages work at the same time, a
+    card on a slow link holds every expert of its layers, the CPU prompt share works on a split. On rented RTX 4090s
+    a 32K prompt reads at 6,936 tokens/s on 2 cards (4,056 before; one card 5,472) and 9,703-9,997 on 4 (3,880
+    before); a pair with one card on a ~2 GB/s link is no longer slower than its first card alone.
+  - **Pinned memory on Windows:** on a split each GPU page-locks its own layers up to its adapter's budget, not 8 GiB
+    for all; where little can be page-locked the copies run faster (this RTX 5090 with nothing pinned: a 32K prompt
+    at 87-88% of the pinned speed, 70-71% before).
+  - **Several dialogs at once (`"parallel"`):** a window graph out of VRAM no longer ends the engine, and the slots'
+    K/V grows with their context instead of taking it all up front (4 slots at 262K: 2.8 GiB instead of 14.6; one 24
+    GB card with 4 dialogs: 94 tokens/s in all where the engine ended before). `parallel` stays 1 by default.
+  - **Dialogs parked on the disk** (opt-in `--conversation-disk-dir`, from xrip's upstream PR #1937): a dialog the RAM
+    cache has no room for goes to a folder; a 100K dialog comes back in ~1 s instead of 11-12 s, also after the tray
+    restarts the engine ([numbers](docs/NVFP4.md#dialogs-parked-on-the-disk-2026-10-13-branch-extrasdialog-park)).
+    For one user `--conversation-cache-mib 8192` (4 dialogs in RAM) is enough; the disk tier is off by default.
+  - **Model settings** has the dialogs and the context size (to 512K, with the RoPE extension past 262K); the
+    controls are back inside the card.
+  - The Windows zip ships `strata_kq.dll` (upstream's K-quant prompt kernels, for UD-Q5_K_XL / UD-Q6_K_XL and
+    Qwen3.6).
+- **On upstream 0.1.43.1 (prepared as 0.1.43.1-nvfp4.1, published within 0.1.44-nvfp4.1).** Upstream's changes
+  that matter here ([the port and its checks](docs/NVFP4.md#upstream-01431-2026-10-13-release-01431-nvfp41)):
   - **Non-finite logits are caught** (#879, #1892): when a decode window's logits turn NaN, the server sends none of
     its tokens, drops the damaged caches and reads the prompt again from token 0, instead of answering "!". On by
     default (`STRATA_NAN_GUARD=0` turns it off); this fork's fresh engine after a "!" reply stays as a backstop.
@@ -466,7 +507,7 @@ The switches kept only for A/B runs (each gives the same bits or a measured alte
 
 A long Claude Code conversation once turned into "!" mid-reply (token 0, what the sampler gives when no logit is
 finite), and the cause is not found yet
-([docs](docs/NVFP4.md#-after-a-long-conversation-2026-10-05-release-0139-nvfp42)). Since 0.1.43.1-nvfp4.1
+([docs](docs/NVFP4.md#-after-a-long-conversation-2026-10-05-release-0139-nvfp42)). Since 0.1.44-nvfp4.1
 upstream's guard (#879) catches non-finite logits first: the window's tokens are not sent, the caches are dropped, the
 prompt is read again and the engine log has a `non-finite logits (#879)` line. The server still starts a fresh engine
 at the next request after a reply of "!". To find out what was damaged, give the engine `STRATA_BANG_AUDIT=1` and
