@@ -9,7 +9,8 @@ Tools from MCP servers (serve/mcp.py, `"mcp_servers"` in the config or --mcp-con
 ask for them with `"strata_mcp": true` - the web app does; other clients see exactly the API they always saw.
 Images (optional, when the config has a "vision" entry): OpenAI image_url parts and Anthropic image blocks (base64
 data, http(s) URLs or local file paths) go through `strata-vision` (the model's mmproj file) and reach the engine as
-embeddings (`GENI`).  JPEG/PNG/BMP/GIF go straight in; WebP, TIFF, AVIF, ... (agents like omp send WebP) are
+embeddings (`GENI`).  An http(s) URL must resolve to a public address, checked again on every redirect
+(_require_public).  JPEG/PNG/BMP/GIF go straight in; WebP, TIFF, AVIF, ... (agents like omp send WebP) are
 converted to PNG first with Pillow.
 Requests whose prompt plus max tokens exceed the engine's context are REJECTED with 400, never truncated.
 An unset (or 0, or -1) max tokens means "unlimited": whatever the prompt leaves of the context.
@@ -28,6 +29,7 @@ import hashlib
 import hmac
 import codecs
 import ctypes
+import ipaddress
 import json
 import math
 import os
@@ -2019,6 +2021,70 @@ class StrataEngine:
 
 
 IMAGE_URL_MAX = 32 << 20        # an image URL is read up to this (the web app attaches pictures of up to 20 MB)
+IMAGE_UNREADABLE = ("the image could not be read: an image must be a data: URL, a public http(s) URL or a readable "
+                    "local file path")
+
+
+def _addresses(host: str) -> list[str]:
+    """host's IP addresses, or [] when it does not resolve.  A name that is already an address is that address."""
+    try:
+        ipaddress.ip_address(host)
+        return [host]
+    except ValueError:
+        pass
+    try:
+        return sorted({i[4][0] for i in socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)})
+    except (OSError, UnicodeError):
+        return []
+
+
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+
+
+def _is_global(address: str) -> bool:
+    """A routable, public address.  Loopback, link-local (169.254.0.0/16, the cloud metadata address), the private
+    ranges and the IPv6 unique-local ones are refused, as is anything Python does not consider global.  An IPv6
+    address that carries an IPv4 one (mapped, 6to4, Teredo, NAT64) is judged by that IPv4 address too."""
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    if ip.version == 6:
+        inner = [ip.ipv4_mapped, ip.sixtofour, ip.teredo[1] if ip.teredo else None,
+                 ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF) if ip in _NAT64 else None]
+        if any(v is not None and not v.is_global for v in inner):
+            return False
+    return ip.is_global
+
+
+def _require_public(url: str) -> None:
+    """Refuse an image URL that does not lead to a public host (from shoftee/Strata 07abd70a).  The URL comes from the
+    request, so without this the server fetches whatever it is pointed at on this machine's behalf and hands the
+    model (and so the client) the bytes: the link-local metadata address a cloud instance keeps its credentials on,
+    a service on localhost, a host on the LAN.  Every address the name resolves to is checked: a name with one
+    public and one private address must not pass on the public one.  (urllib resolves the name again when it
+    connects, so a DNS answer that changes in between is not covered.)"""
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https"):
+        raise ValueError("only an http or https image URL is fetched")
+    host = parts.hostname
+    if not host:
+        raise ValueError("that image URL has no host")
+    addresses = _addresses(host)
+    if not addresses:
+        raise ValueError(f"the host of that image URL does not resolve ({host})")
+    if not all(_is_global(a) for a in addresses):
+        raise ValueError(f"that image URL points at {host}, which is not a public address: an image on this computer "
+                         "or the local network is sent as a data: URL (or, to this computer's server, a file path)")
+
+
+class _PublicRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Checks every hop: urllib follows redirects by itself, so a URL that passed would still reach a private
+    address through a 302.  Asked before each new request is built."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _require_public(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def network_path(path: str) -> bool:
@@ -2182,17 +2248,22 @@ class Vision:
         if path and os.path.isfile(path):
             try:
                 return Path(path).read_bytes()
-            except OSError as e:
-                raise ValueError(f"the image could not be read from {path} ({e})") from None
-        raise ValueError("an image must be a data: URL, an http(s) URL or a local file path")
+            except OSError:
+                # a file this user cannot read answers what a file that is not there answers (shoftee 07abd70a):
+                # two answers would let a caller tell which paths exist on this computer, one at a time
+                pass
+        raise ValueError(IMAGE_UNREADABLE)
 
     @staticmethod
     def download(url: str) -> bytes:
         """An image URL's bytes, at most IMAGE_URL_MAX of them: the whole response was read, so a huge or endless one
-        filled the memory.  One that cannot be read is a ValueError (a 400 that says so), not a dropped connection."""
+        filled the memory.  One that cannot be read is a ValueError (a 400 that says so), not a dropped connection.
+        The host must be public, checked again on every redirect (_require_public)."""
         too_big = f"the image URL's file is over {IMAGE_URL_MAX >> 20} MiB"
+        _require_public(url)
+        opener = urllib.request.build_opener(_PublicRedirectHandler())
         try:
-            with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "strata"}), timeout=60) as r:
+            with opener.open(urllib.request.Request(url, headers={"User-Agent": "strata"}), timeout=60) as r:
                 size = r.headers.get("Content-Length") or ""
                 if size.isdigit() and int(size) > IMAGE_URL_MAX:
                     raise ValueError(too_big)

@@ -1520,7 +1520,12 @@ you> /image C:\Users\me\Pictures\receipt.jpg
 you> What is the total on this receipt?
 ```
 
-**OpenAI API** (an `image_url` part: a `data:` URL, an `http(s)://` URL or a local file path):
+**OpenAI API** (an `image_url` part: a `data:` URL, an `http(s)://` URL or a local file path). An `http(s)` URL must
+resolve to a public address, on the first request and on every redirect: loopback, link-local (`169.254.0.0/16`,
+where a cloud instance keeps its credentials), the private ranges and the IPv6 unique-local ones are refused, so a
+request cannot use the server to reach what only this computer or its network can. Send a picture from this
+machine or the LAN as a `data:` URL, or as a local file path. A local file that is missing and one that cannot be
+read get the same answer.
 
 ```python
 import base64
