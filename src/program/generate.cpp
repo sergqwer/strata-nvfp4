@@ -5302,6 +5302,12 @@ int main(int argc, char** argv) {
         const bool per_stage_pin = !arena_async && arena_per_stage();
         const uint64_t arena_cap_bytes = arena_async || per_stage_pin ? 0 : arena_pin_limit();
         if (!arena_async) shared_snap0 = shared_snapshot();
+        // extras/wddm-pin: under WDDM the opened-here arena (a layer split, helpers, STRATA_ARENA_SYNC) also warms
+        // cuBLAS and the prompt path's GEMM kernels now, as the early open does: they then take their VRAM before the
+        // expert cache is sized (gemm_prewarm_wait there) instead of after it.  Without it CUDA0 of a split ended with
+        // 89 MiB free, and Windows paged: a 32K prompt at 4,467 tok/s instead of 8,233 (RTX 5090, --split-device 0,
+        // STRATA_ARENA_SYNC=1).  Not elsewhere: a Linux split's cache, chunk and bits stay as they were.
+        if (!arena_async && under_wddm()) strata::prefill::gemm_prewarm(o.prefill_chunk > 0);
         if (multi_gpu && !arena_async && !split_at.empty() && !per_stage_pin) {
             static const bool spread_ok = [] {
                 const char* v = std::getenv("STRATA_ARENA_PIN_SPREAD");
