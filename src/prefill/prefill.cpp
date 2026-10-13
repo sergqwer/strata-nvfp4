@@ -170,6 +170,13 @@ inline bool force_pageable() {
 // spinners starved a pinned host thread (DGX Spark IQ3_S 8K prompt 91 -> 1,222 tok/s with sleeping waits); on Windows
 // the 5070 read an 8K Q2_0 prompt 1.2% slower with them (1,469.5 -> 1,452 tok/s, 10 pairs), so they stay spinning
 // there.  Same output either way.  STRATA_STAGER_SLEEP=1/0 forces either.
+// extras/wddm-pin (Linux): the stager's copy threads and the stream issuer spread over the CPUs that are neither the
+// host's nor a pool worker's (aux_cpus::spread_current_thread) instead of inheriting the host thread's one CPU.
+// STRATA_STAGER_SPREAD=0: placed as before (the aux set while --aux-cpus is on, else where they were created).
+inline bool stager_spread() {
+    static const bool v = [] { const char* e = std::getenv("STRATA_STAGER_SPREAD"); return e == nullptr || e[0] != '0'; }();
+    return v;
+}
 inline bool stager_sleep() {
     static const bool v = [] {
         const char* e = std::getenv("STRATA_STAGER_SLEEP");
@@ -555,7 +562,7 @@ struct Stager {
                 // they were created (a small spare set would then hold all of them: it limits the copy rate of a long read)
                 static const bool keep = [] { const char* v = std::getenv("STRATA_AUX_STAGER"); return v != nullptr && std::atoi(v) == 0; }();
                 if (keep) strata::aux_cpus::note_owned_thread();
-                else strata::aux_cpus::pin_current_thread();
+                else if (!(stager_spread() && strata::aux_cpus::spread_current_thread())) strata::aux_cpus::pin_current_thread();
                 work();
             });
         return true;
@@ -2583,7 +2590,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
         const bool threaded_issue = stream_all && issuer_on;
         if (threaded_issue) {
             issuer = std::thread([&] {
-                strata::aux_cpus::pin_current_thread();
+                if (!(stager_spread() && strata::aux_cpus::spread_current_thread())) strata::aux_cpus::pin_current_thread();
                 const core::OnDevice od(m.device);
                 for (size_t idx = 0; idx < seq.size(); ++idx) {
                     while (idx >= a_consumed.load(std::memory_order_acquire) + (size_t) m.ring) {

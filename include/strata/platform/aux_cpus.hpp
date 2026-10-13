@@ -159,6 +159,8 @@ struct State {
     std::vector<int> allowed;                     ///< the process's CPUs, snapshotted before any thread is pinned
     std::vector<int> plan;                        ///< the aux CPUs (empty: nothing to do)
     std::vector<int> workers;                     ///< the pool's CPUs: their threads are never touched
+    int host_cpu = -1;                            ///< the host thread's CPU (set_topology)
+    bool topo = false;                            ///< set_topology ran (the pool exists)
     cpu_set_t target;
     std::set<int> owned;                          ///< tids of pool workers and host threads
     std::map<int, cpu_set_t> original;            ///< tid -> the mask it had before this module moved it
@@ -260,6 +262,34 @@ inline void pin_current_thread() {
     if (s.owned.find(tid) == s.owned.end()) detail::move_locked(s, tid);
 }
 
+/// extras/wddm-pin: a bulk-copy thread (the prompt path's stager and stream issuer) goes to every CPU the process had at
+/// start except the host's and the pool workers' own (their SMT siblings stay in): on Linux a thread inherits its
+/// creator's mask, and these are created by the host thread, pinned to ONE CPU - so all the stager's copy threads and
+/// the issuer shared the host's CPU (a 2x RTX 4090 split with 88% of the arena unpinned staged ~3.7 GB/s per stage,
+/// and 8 threads gave nothing over 4).  Owned afterwards: the sweep leaves it there.  False (nothing changed) before
+/// the pool exists or when no CPU would be left; the caller then places it as before.
+inline bool spread_current_thread() {
+    detail::State& s = detail::state();
+    std::lock_guard<std::mutex> lk(s.mu);
+    if (!s.topo || s.allowed.empty()) return false;
+    cpu_set_t m;
+    for (int pass = 0; pass < 2; ++pass) {   // without the workers' CPUs; with them if nothing else is left
+        CPU_ZERO(&m);
+        int n = 0;
+        for (int c : s.allowed) {
+            if (c == s.host_cpu) continue;
+            if (pass == 0 && std::find(s.workers.begin(), s.workers.end(), c) != s.workers.end()) continue;
+            CPU_SET(c, &m);
+            ++n;
+        }
+        if (n > 0) break;
+        if (pass == 1) return false;
+    }
+    if (sched_setaffinity(0, sizeof m, &m) != 0) return false;
+    s.owned.insert(detail::self_tid());
+    return true;
+}
+
 /// Puts back the placement every moved thread had.  Returns how many were restored.
 inline int restore() {
     detail::State& s = detail::state();
@@ -324,6 +354,8 @@ inline std::string set_topology(int host_cpu, const std::vector<int>& worker_cpu
                               : derive(allowed, host_cpu, worker_cpus);
         s.plan = plan;
         s.workers = worker_cpus;
+        s.host_cpu = host_cpu;
+        s.topo = true;
         CPU_ZERO(&s.target);
         for (int c : plan) CPU_SET(c, &s.target);
         s.have_plan.store(!plan.empty(), std::memory_order_release);
@@ -350,6 +382,7 @@ inline bool configure(const std::string& spec, std::string& err) {
 inline void note_owned_thread() {}
 inline int sweep() { return 0; }
 inline void pin_current_thread() {}
+inline bool spread_current_thread() { return false; }
 inline int restore() { return 0; }
 inline void set_enabled(bool) {}
 inline bool enabled() { return false; }
