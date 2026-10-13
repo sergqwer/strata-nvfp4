@@ -374,6 +374,35 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### Model settings: dialogs, dialogs at once, the context (2026-10-14, branch extras/gui-settings)
+
+- **The controls were outside the card.** The Model settings card's label column was `max-content`. Since the
+  "uncensored" entry's long help (0.1.41-nvfp4.7), the labels took the whole row on a screen wider than 1000 px, and
+  every select and field was squeezed to ~30 px past the card's right edge. Narrower screens stacked them and were
+  fine. Now: label | control (1fr | 180-280 px), one column below 640 px, and headings for the groups.
+- **New entries.** All are kept in the run config and used from the next start; an empty field is the default.
+  - **Dialogs.**
+    - `parallel`: dialogs at once, `--batch N`, 1-8. Empty: one at a time.
+    - The RAM cache: `--conversation-cache-slots` (default 4) and `--conversation-cache-mib` (empty: off).
+    - The disk tier: `--conversation-disk-dir`, `--conversation-disk-mib` (default 32768) and
+      `--conversation-disk-persist`.
+    - A key that needs another one is refused with its name: slots or a folder without RAM, a disk size or persist
+      without a folder.
+  - **Context.** `--max-context` offers setup's sizes, 8K-512K. It is never empty: without it the engine runs 4096
+    tokens.
+    - Past 262,144 the page adds what setup writes there: `--rope-scaling yarn` (or linear) and `--rope-scale`
+      context / 262144, so 2 at 512K.
+    - Back within 262,144 both are removed. `none` past it is refused, as setup refuses it.
+    - Checked on the engine (73ef678b): "rope scaling yarn, factor 2 ... --max-context 524288", K/V 6.70 GiB at full
+      length, the disk tier on and persistent.
+- **"1 per GPU" is marked, never chosen for you.** The choice equal to the config's GPU count says "1 per GPU". The
+  default stays one at a time, because each extra dialog slows one that runs alone:
+  - one 5090, 2 at once: 175.8 → 158.6 tok/s (-10%);
+  - a layer split over 2 GPUs, 4 at once: ~147 → 95.6 tok/s (-35%).
+- **Tests.** `serve/test_runconfig`: 26. The server's suite: 863 OK, 13 skipped. The page was driven headless
+  (Chromium; light and dark; 1440, 900 and 390 px): the values were saved and read back, and a refused combination
+  left the file unchanged.
+
 ### Several dialogs at once (2026-10-13, branch extras/parallel-dialogs)
 
 - **Dialogs that take turns re-read each other.** Without `--conversation-cache-mib` (the tray never passed it; the
