@@ -164,4 +164,22 @@ inline int64_t min_spare(const std::vector<int64_t>& cuts, int64_t n_layers, con
     return lo;
 }
 
+/// extras/split-prefill (opt-in, STRATA_SPLIT_PF_CHUNKS=k): the chunk a layer split reads a `tokens`-token request
+/// segment in, so the stages overlap.  The prompt path pipelines a split over chunks (Prefill::run_impl: stage s+1
+/// reads chunk c while stage s reads c+1), but the auto chunk is the largest one the caches can lend, so a prompt up
+/// to that size is ONE chunk and the stages run one after the other.  Here the segment is cut into
+/// n = min(k, tokens / min_chunk) chunks of equal size (ceil(tokens / n), 256-aligned): no chunk below `min_chunk`
+/// (and no short tail that streams every expert again), never above `max_chunk`.  Above k * max_chunk tokens the
+/// chunks are max_chunk's, as without it.  k <= 1, or a segment too short for two chunks: `max_chunk` unchanged.
+inline int64_t pipeline_chunk(int64_t tokens, int64_t max_chunk, int64_t k, int64_t min_chunk) {
+    if (k <= 1 || tokens <= 0 || max_chunk <= 0) return max_chunk;
+    const int64_t lo = min_chunk < 256 ? 256 : min_chunk;
+    int64_t n = tokens / lo;
+    if (n > k) n = k;
+    if (n <= 1) return max_chunk;
+    int64_t c = (tokens + n - 1) / n;
+    c = (c + 255) / 256 * 256;
+    return c < max_chunk ? c : max_chunk;
+}
+
 }  // namespace strata::program::split_rules

@@ -140,6 +140,16 @@ int main() {
         CHECK(!floors_exceed_minimum(share_floors({0, 0}, L)));
         CHECK(!below_floors({}, 48, {}));
     }
+    // extras/split-prefill: STRATA_SPLIT_PF_CHUNKS=k cuts a segment into equal chunks of at least min_chunk
+    CHECK(pipeline_chunk(32037, 32768, 8, 2048) == 4096);    // 8 chunks: 7 x 4096 + 3365
+    CHECK(pipeline_chunk(32037, 31232, 4, 2048) == 8192);    // 4 chunks: 3 x 8192 + 7461 (no 805-token tail)
+    CHECK(pipeline_chunk(32037, 31232, 2, 2048) == 16128);   // 2 chunks of ~16K
+    CHECK(pipeline_chunk(5000, 32768, 8, 2048) == 2560);     // only 2 chunks fit the 2048 floor
+    CHECK(pipeline_chunk(2048, 32768, 8, 2048) == 32768);    // one chunk anyway: unchanged
+    CHECK(pipeline_chunk(200000, 32768, 4, 2048) == 32768);  // above k x max: the configured chunk
+    CHECK(pipeline_chunk(32037, 32768, 0, 2048) == 32768);   // off
+    CHECK(pipeline_chunk(32037, 32768, 1, 2048) == 32768);
+    CHECK(pipeline_chunk(32037, 32768, 64, 100) == 512);     // a floor under 256 is 256; k caps the count: 62 x 512 + 293
     if (failed == 0) std::printf("split_rules_test: ok\n");
     return failed ? 1 : 0;
 }
