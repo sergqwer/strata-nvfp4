@@ -11072,6 +11072,27 @@ int main(int argc, char** argv) {
                 resume == req_pin && live_ok)
                 for (const ConvCheckpoint& c : checks)
                     if ((int64_t) c.ids.size() == resume && c.pinned) pin_sibling = true;
+            // STRATA_PARK_REWIND_MAX=N (opt-in): a request that resumes from a checkpoint of the conversation the session
+            // itself holds, leaving N tokens or fewer of it behind, does not park the session first.  That is every next
+            // turn of a chat whose client sends the last reply back without its thinking: the prompt matches the turn's
+            // checkpoint, not the live end, so the whole session was parked (its K/V copied to the host) and the copy
+            // dropped as superseded one request later.  What is left behind is the old reply, cheaper to read again than
+            // the conversation is to copy.  A request that leaves more behind (another conversation on the shared system
+            // prompt) parks as before.  Parking is a cache: the tokens are the same either way.  (Xiaomi2008 8e4ccbe9)
+            bool own_rewind = false;
+            {
+                static const int64_t rewind_max = [] {
+                    const char* e = std::getenv("STRATA_PARK_REWIND_MAX");
+                    return e ? std::max<int64_t>(0, (int64_t) std::atoll(e)) : (int64_t) 0;
+                }();
+                if (rewind_max > 0 && !from_live && !incoming && !borrow && slot_source < 0 && live_ok && resume > 0 &&
+                    req_imgs.empty() && live_imgs.empty() && (int64_t) live.size() >= resume &&
+                    (int64_t) live.size() - resume <= rewind_max) {
+                    own_rewind = true;   // the session holds the checkpoint's tokens: its own conversation
+                    for (int64_t i = 0; i < resume && own_rewind; ++i)
+                        own_rewind = live[(size_t) i] == (int32_t) ids[(size_t) i];
+                }
+            }
             if (borrow) {
                 conversations.guard(parked.serial);   // parking the outgoing conversation must not evict the donor
                 const bool parked_ok = park_current(0);
@@ -11094,7 +11115,7 @@ int main(int argc, char** argv) {
                         return 1;
                     }
                 }
-            } else if ((!from_live || incoming || slot_source >= 0) && !pin_sibling &&
+            } else if ((!from_live || incoming || slot_source >= 0) && !pin_sibling && !own_rewind &&
                        !park_current(incoming ? incoming->bytes() : 0)) {
                 std::printf("ERR %s\n", err.c_str());
                 return 1;
