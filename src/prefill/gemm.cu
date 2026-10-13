@@ -459,6 +459,55 @@ void gemm_prewarm_wait() {
     if (g_prewarm.valid()) g_prewarm.wait();
 }
 
+// extras/mgpu-fixes: see gemm.hpp
+double compute_probe_ms(int dev) {
+#if defined(STRATA_USE_HIP) || defined(__HIPCC__)
+    (void) dev;
+    return -1.0;
+#else
+    int prev = 0;
+    (void) cudaGetDevice(&prev);
+    if (cudaSetDevice(dev) != cudaSuccess) {
+        (void) cudaGetLastError();
+        return -1.0;
+    }
+    const int n = 4096;
+    const size_t bytes = (size_t) n * n * sizeof(__half);
+    __half *a = nullptr, *b = nullptr, *c = nullptr;
+    cublasHandle_t h = nullptr;
+    cudaEvent_t e0 = nullptr, e1 = nullptr;
+    double ms = -1.0;
+    // 0x3C3C = 1.06 in every element: non-zero operands, so the card draws the power a real product does
+    if (cudaMalloc((void**) &a, bytes) == cudaSuccess && cudaMalloc((void**) &b, bytes) == cudaSuccess &&
+        cudaMalloc((void**) &c, bytes) == cudaSuccess && cudaMemset(a, 0x3C, bytes) == cudaSuccess &&
+        cudaMemset(b, 0x3C, bytes) == cudaSuccess && cublasCreate(&h) == CUBLAS_STATUS_SUCCESS &&
+        cudaEventCreate(&e0) == cudaSuccess && cudaEventCreate(&e1) == cudaSuccess) {
+        const __half one = __float2half(1.0f), zero = __float2half(0.0f);
+        auto run = [&](int reps) {
+            for (int i = 0; i < reps; ++i)
+                (void) cublasHgemm(h, CUBLAS_OP_N, CUBLAS_OP_N, n, n, n, &one, a, n, b, n, &zero, c, n);
+        };
+        run(120);   // the clocks ramp up from idle (and a power limit pulls them down) first
+        (void) cudaEventRecord(e0);
+        run(40);
+        (void) cudaEventRecord(e1);
+        float f = 0.0f;
+        if (cudaEventSynchronize(e1) == cudaSuccess && cudaEventElapsedTime(&f, e0, e1) == cudaSuccess && f > 0.0f)
+            ms = (double) f / 40.0;
+    }
+    (void) cudaGetLastError();
+    if (e0) (void) cudaEventDestroy(e0);
+    if (e1) (void) cudaEventDestroy(e1);
+    if (h) (void) cublasDestroy(h);
+    if (a) (void) cudaFree(a);
+    if (b) (void) cudaFree(b);
+    if (c) (void) cudaFree(c);
+    (void) cudaGetLastError();
+    (void) cudaSetDevice(prev);
+    return ms;
+#endif
+}
+
 Gemm::~Gemm() {
 #if defined(STRATA_PREFILL_MMQ) && defined(__HIPCC__)
     delete static_cast<strata::prefill::mmq::Context*>(mmq_ctx_);
