@@ -2927,6 +2927,73 @@ bool FileExpertSource::pin_cache_complement(
         // memory, registered slice by slice (as the arena does when its one registration is refused).  The opt-in
         // capped prefix (a RAM budget with STRATA_PARTIAL_PIN=1) keeps its own registration instead.
         const bool sliced = pin && !paced && arena == nullptr && !(budget_bytes > 0 && partial_on) && slice_cap_gib != 0.0;
+        // G2b (opt-in, path 2 only - path 1 keeps its bytes): STRATA_COMPLEMENT_LAYOUT=layer lays the copy out like the
+        // arena, one layer per slice.  The copy is otherwise in profile order (a RAM budget) or by layer with cuts at
+        // whatever expert ends a layer's worth of bytes, so every slice can hold experts of many layers.  The experts
+        // the slices will hold (the hottest while they fit the cap below) come first, grouped by layer, each group
+        // page-aligned and registered as one slice; the rest follow in the old order and stay unpinned.  Not with a
+        // layer split's lend regions (their own order).  STRATA_COMPLEMENT_LARGE=1: the sliced copy in 2 MiB pages.
+        static const bool layer_layout = [] {
+            const char* v = std::getenv("STRATA_COMPLEMENT_LAYOUT");
+            return v != nullptr && std::strcmp(v, "layer") == 0;
+        }();
+        static const bool large_copy = [] {
+            const char* v = std::getenv("STRATA_COMPLEMENT_LARGE");
+            return v != nullptr && std::strcmp(v, "1") == 0;
+        }();
+        std::vector<uint64_t> group_cut;   // layer layout: each layer group's start, then the pinned tier's end
+        if (sliced && layer_layout && stage_lend_regions_.empty() && bytes > 0) {
+            constexpr uint64_t kPg = 4096;
+            uint64_t cap = std::numeric_limits<uint64_t>::max();
+            if (slice_cap_gib > 0) {
+                cap = (uint64_t) (slice_cap_gib * 1073741824.0);
+            } else if (slice_cap_gib == -1.0) {
+                uint64_t limit = 0;
+                std::string why;
+                if (shared_pin_limit(limit, why)) cap = limit;
+            }
+            std::vector<size_t> order;
+            order.reserve(offsets.size());
+            for (size_t i = 0; i < offsets.size(); ++i)
+                if (offsets[i] != kNoComplement) order.push_back(i);
+            std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return offsets[a] < offsets[b]; });
+            std::vector<uint8_t> hot(offsets.size(), 0);
+            uint64_t acc = (uint64_t) n_layers_ * kPg;   // room for each group's page padding
+            for (const size_t i : order) {
+                const uint64_t b = layer_blob_bytes_[i / (size_t) n_expert_];
+                if (acc > cap || b > cap - acc) break;
+                acc += b;
+                hot[i] = 1;
+            }
+            std::vector<uint64_t> moved(offsets.size(), kNoComplement);
+            uint64_t at = 0;
+            for (int64_t l = 0; l < n_layers_; ++l) {
+                at = (at + kPg - 1) / kPg * kPg;
+                const uint64_t start = at;
+                for (int64_t e = 0; e < n_expert_; ++e) {
+                    const size_t i = (size_t) l * (size_t) n_expert_ + (size_t) e;
+                    if (!hot[i]) continue;
+                    moved[i] = at;
+                    at += layer_blob_bytes_[(size_t) l];
+                }
+                if (at > start) group_cut.push_back(start);
+            }
+            at = (at + kPg - 1) / kPg * kPg;
+            group_cut.push_back(at);
+            for (const size_t i : order)
+                if (!hot[i]) {
+                    moved[i] = at;
+                    at += layer_blob_bytes_[i / (size_t) n_expert_];
+                }
+            std::fprintf(stderr, "FileExpertSource: STRATA_COMPLEMENT_LAYOUT=layer: %zu layer slices of %.2f GiB (the "
+                                 "hottest), %.2f GiB after them in the old order; the copy %.2f -> %.2f GiB\n",
+                         group_cut.size() - 1, (double) group_cut.back() / 1073741824.0,
+                         (double) (at - group_cut.back()) / 1073741824.0, (double) bytes / 1073741824.0,
+                         (double) at / 1073741824.0);
+            offsets.swap(moved);
+            bytes = at;
+        }
+        bool large_pages = false;   // the sliced copy got 2 MiB pages (resident by nature: nothing to lock)
         if (arena == nullptr) {
             if (!note.empty()) {
                 std::fprintf(stderr, "FileExpertSource: %s; trying pageable memory%s\n", note.c_str(),
@@ -2944,7 +3011,30 @@ bool FileExpertSource::pin_cache_complement(
             } else if (sliced) {   // page-aligned: the slices are registered on page boundaries, none sharing a page
                 const uint64_t page = 4096, span = (bytes + page - 1) / page * page;
 #if defined(_WIN32)
-                arena = VirtualAlloc(nullptr, (SIZE_T) span, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+                if (large_copy) {   // STRATA_COMPLEMENT_LARGE=1: the privilege enabled in this process's token first
+                    HANDLE tok = nullptr;
+                    if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &tok)) {
+                        TOKEN_PRIVILEGES tp{};
+                        tp.PrivilegeCount = 1;
+                        if (LookupPrivilegeValueW(nullptr, L"SeLockMemoryPrivilege", &tp.Privileges[0].Luid)) {
+                            tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+                            (void) AdjustTokenPrivileges(tok, FALSE, &tp, 0, nullptr, nullptr);
+                        }
+                        CloseHandle(tok);
+                    }
+                    const SIZE_T lp = GetLargePageMinimum();
+                    if (lp > 0) {
+                        const SIZE_T lb = (SIZE_T) ((span + lp - 1) / lp * lp);
+                        arena = VirtualAlloc(nullptr, lb, MEM_RESERVE | MEM_COMMIT | MEM_LARGE_PAGES, PAGE_READWRITE);
+                        if (arena != nullptr) large_pages = true;
+                        std::fprintf(stderr, "FileExpertSource: STRATA_COMPLEMENT_LARGE=1: %s\n",
+                                     arena != nullptr ? "the copy is in 2 MiB pages"
+                                                      : ("large pages refused (VirtualAlloc error " +
+                                                         std::to_string((unsigned long) GetLastError()) +
+                                                         "): 4 KiB pages").c_str());
+                    }
+                }
+                if (arena == nullptr) arena = VirtualAlloc(nullptr, (SIZE_T) span, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
                 if (arena != nullptr) vmem = true;
                 else errno = ENOMEM;
 #else
@@ -2985,6 +3075,8 @@ bool FileExpertSource::pin_cache_complement(
                     // 9.2 / 8.5 s, 54.79 GiB 9.1 s.
                     constexpr uint64_t kPage = 4096;
                     const auto reg_t0 = std::chrono::steady_clock::now();
+                    size_t vram_before = 0, vram_after = 0, vram_total = 0;   // G2b: what the registration takes of VRAM
+                    (void) cudaMemGetInfo(&vram_before, &vram_total);
                     std::vector<uint64_t> starts;
                     starts.reserve(offsets.size());
                     for (const uint64_t o : offsets)
@@ -2998,7 +3090,11 @@ bool FileExpertSource::pin_cache_complement(
                         if (o > cut.back() && len >= layer_bytes && (o % kPage == 0 || len >= layer_bytes + layer_bytes / 2))
                             cut.push_back(o);
                     }
-                    const uint64_t span = (bytes + kPage - 1) / kPage * kPage;
+                    uint64_t span = (bytes + kPage - 1) / kPage * kPage;
+                    if (group_cut.size() >= 2) {   // STRATA_COMPLEMENT_LAYOUT=layer: one slice per layer group
+                        cut.assign(group_cut.begin(), group_cut.end() - 1);
+                        span = group_cut.back();   // the last slice ends with the pinned tier
+                    }
                     uint64_t cap = span;
                     std::string cap_why = "STRATA_COMPLEMENT_PIN_GIB";
                     if (slice_cap_gib > 0) {
@@ -3034,6 +3130,9 @@ bool FileExpertSource::pin_cache_complement(
                         }
                         slices.push_back({a, e, (const uint8_t*) alias});
                     }
+                    (void) cudaMemGetInfo(&vram_after, &vram_total);
+                    std::fprintf(stderr, "FileExpertSource: path 2: VRAM free %lld MiB before the slices, %lld MiB after\n",
+                                 (long long) (vram_before >> 20), (long long) (vram_after >> 20));
                     slice_pin = slices.empty() ? 0 : std::min(slices.back().end, bytes);
                     lock_off = slices.empty() ? 0 : slices.back().end;
                     int64_t held = 0, total = 0;   // the experts one slice holds whole
@@ -3155,8 +3254,9 @@ bool FileExpertSource::pin_cache_complement(
                 if (!paced && !sliced) lock_off = partial_pin;
                 // (paced, sliced: lock_off was set above)
                 const strata::platform::LockResult lr =
-                    lock_off < bytes ? strata::platform::lock_resident((uint8_t*) arena + lock_off, bytes - lock_off)
-                                     : strata::platform::LockResult{true, 0, ""};
+                    large_pages ? strata::platform::LockResult{true, 0, "large pages are resident without a lock"}
+                    : lock_off < bytes ? strata::platform::lock_resident((uint8_t*) arena + lock_off, bytes - lock_off)
+                                       : strata::platform::LockResult{true, 0, ""};
                 locked = lr.locked_bytes;
                 note += (note.empty() ? "" : "; ") + lr.note;
                 if (!paced && !sliced)   // path 1 failed and no slices were tried
