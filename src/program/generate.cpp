@@ -11834,7 +11834,7 @@ int main(int argc, char** argv) {
                         std::fprintf(stderr, "strata serve: layer split: CUDA%d's PCIe share (pcie_frac %.2f) acts on %lld of "
                                              "its %lld layers: the others' experts are not pinned (a capped pin: several GPUs "
                                              "under WDDM, or STRATA_ARENA_PIN_GIB)\n",
-                                     st == 0 ? 0 : stages[(size_t) st - 1]->dev, split_drive.pcie_num[st] / 256.0,
+                                     st == 0 || split_same ? 0 : stages[(size_t) st - 1]->dev, split_drive.pcie_num[st] / 256.0,
                                      (long long) on, (long long) (le - lb));
                 }
             for (int st = 0; st + 1 < n_stages; ++st) stage_ver(st).set_next(&stage_ver(st + 1), &split_drive);
