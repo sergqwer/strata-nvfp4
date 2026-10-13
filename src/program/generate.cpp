@@ -11875,12 +11875,31 @@ int main(int argc, char** argv) {
             // equal chunks of at least STRATA_SPLIT_PF_MIN tokens (default 2048), so its stages overlap on different
             // chunks instead of running one after the other on one big chunk (split_rules::pipeline_chunk).  Unset or
             // one GPU: the chunk as before.
-            // extras/mgpu-fixes: ON by default on a layer split (unset = 2 chunks per stage); 0 or 1 = off.
+            // extras/mgpu-fixes: ON by default on a layer split; STRATA_SPLIT_PF_CHUNKS=k sets k, 0 or 1 = off.  The
+            // default depends on how much of its layers' experts each LENDING cache holds (STRATA_SPLIT_PF_RES, 0.5):
+            //  - at least that: 2 chunks per stage.  A chunk then streams little more than what it lends, so smaller
+            //    chunks cost little and the stages overlap (4x 4090: each cache holds all 6144 pairs of its 12 layers);
+            //  - less: every chunk streams most of the experts again, so more chunks only add passes - the fewest
+            //    chunks the auto chunk allows, of equal size (2x 4090: 31232 + an 805-token tail that streamed every
+            //    expert again on both cards -> 2 x 16128).
             static const int64_t pf_pipe_env = [] {
                 const char* v = std::getenv("STRATA_SPLIT_PF_CHUNKS");
                 return v != nullptr ? (int64_t) std::max(0, std::atoi(v)) : (int64_t) -1;
             }();
-            const int64_t pf_pipe_k = pf_pipe_env >= 0 ? pf_pipe_env : (int64_t) (2 * pf_parts.size());
+            static const double pf_res_thr = [] {
+                const char* v = std::getenv("STRATA_SPLIT_PF_RES");
+                return v != nullptr ? std::atof(v) : 0.5;
+            }();
+            double pf_res_min = 1.0;   // the smallest share of its layers' experts a lending cache holds
+            for (const PfPart& p : pf_parts) {
+                const int64_t pairs = (p.le - p.lb) * g.n_expert;
+                if (p.first >= 0 && pairs > 0) pf_res_min = std::min(pf_res_min, (double) p.cache->slots() / (double) pairs);
+            }
+            auto pf_pipe_k_for = [&](int64_t tokens) -> int64_t {
+                if (pf_pipe_env >= 0) return pf_pipe_env;
+                const int64_t fewest = o.prefill_chunk > 0 ? (tokens + o.prefill_chunk - 1) / o.prefill_chunk : 1;
+                return pf_res_min >= pf_res_thr ? std::max<int64_t>(fewest, (int64_t) (2 * pf_parts.size())) : fewest;
+            };
             static const int64_t pf_pipe_min = [] {
                 const char* v = std::getenv("STRATA_SPLIT_PF_MIN");
                 return v != nullptr ? (int64_t) std::max(256, std::atoi(v)) : (int64_t) 2048;
@@ -11893,6 +11912,7 @@ int main(int argc, char** argv) {
                 const auto t_ln = Clock::now();
                 // what this segment needs, capped by the configured chunk: a request lends only what its own
                 // prompt needs, so a large chunk costs a short prompt nothing
+                const int64_t pf_pipe_k = pf_pipe_k_for(tokens);
                 const int64_t pipe_chunk = pf_pipe_k > 1 && pf_parts.size() > 1
                                                ? strata::program::split_rules::pipeline_chunk(tokens, o.prefill_chunk,
                                                                                              pf_pipe_k, pf_pipe_min)
