@@ -37,11 +37,23 @@ void set_arena_pin_order(const std::vector<int>& slices);
 /// segment.  `per_dev_cap[d]` (bytes, 0 = none) caps what device d pins; its slices go from its first layer up and stop
 /// at the cap or at the driver's first refusal (the rest stays resident through the working-set lock).  Empty = off.
 void set_arena_slice_devices(const std::vector<int>& slice_dev, const std::vector<uint64_t>& per_dev_cap,
-                             const std::vector<int>& slice_stage = {});
+                             const std::vector<int>& slice_stage = {},
+                             const std::vector<std::string>& per_dev_why = {});
 bool arena_slice_devices_set();
 /// STRATA_ARENA_PIN_PER_STAGE: 1 forces the per-stage registration on a layer split (any OS, also --split-device 0),
 /// 0 keeps the portable one; -1 unset (the engine decides: on under WDDM on a multi-GPU layer split).
 int arena_pin_per_stage_env();
+
+/// #243 / extras/wddm-pin: the WDDM shared (non-local) segment of CUDA device `dev`'s adapter - its budget and this
+/// process's use of it (DXGI QueryVideoMemoryInfo, the adapter found by cudaDeviceProp::luid).  False off Windows.
+bool shared_pin_budget(int dev, uint64_t& budget, uint64_t& usage, std::string& why);
+/// What stays free of that budget (STRATA_PIN_MARGIN_GIB, default 4 GiB).
+uint64_t shared_pin_margin();
+/// What a registration for device `dev` may pin on Windows: its adapter's budget - usage - the margin (without the DXGI
+/// numbers RAM/2 - 8 GiB).  False where there is no such budget (not Windows); `why` says where the number came from.
+bool shared_pin_limit_for(int dev, uint64_t& limit, std::string& why);
+/// The same for the current device (PIN's fix/lowram-slice-pin name).
+bool shared_pin_limit(uint64_t& limit, std::string& why);
 
 struct PinnedArena {
     void* base = nullptr;

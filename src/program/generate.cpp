@@ -3415,18 +3415,60 @@ int main(int argc, char** argv) {
             stage_of_l[(size_t) l] = (int) st;
             max_dev = std::max(max_dev, d);
         }
+        // the cap per GPU: STRATA_ARENA_PIN_GIB=N GiB each (0: none); unset (or auto) under WDDM what its adapter's shared
+        // (non-local) budget has left less a margin (shared_pin_limit_for: DXGI QueryVideoMemoryInfo; 8 GiB when it
+        // cannot be read, as the portable cap); elsewhere none.  Each stage stops at its GPU's cap or the driver's first
+        // refusal; the rest stays resident in RAM and reaches the GPU through the prompt path's pinned staging ring.
         const int pin_env = strata::core::arena_pin_cap_gib();   // -1 unset, -2 auto, 0 none, N GiB
-        const uint64_t per_cap = pin_env > 0 ? (uint64_t) pin_env << 30 :
-                                 pin_env == -1 && multi_gpu && under_wddm() ? (8ull << 30) : 0;
-        strata::core::set_arena_slice_devices(owner, std::vector<uint64_t>((size_t) max_dev + 1, per_cap), stage_of_l);
-        char capb[96];
-        if (per_cap > 0) std::snprintf(capb, sizeof capb, "at most %llu GiB per GPU", (unsigned long long) (per_cap >> 30));
-        else std::snprintf(capb, sizeof capb, "no cap");
+        std::vector<uint64_t> caps((size_t) max_dev + 1, 0);
+        std::vector<std::string> whys((size_t) max_dev + 1);
+        std::string capsum;
+        for (int d = 0; d <= max_dev; ++d) {
+            if (std::find(owner.begin(), owner.end(), d) == owner.end()) continue;
+            std::string& w = whys[(size_t) d];
+            if (pin_env > 0) {
+                caps[(size_t) d] = (uint64_t) pin_env << 30;
+                w = "STRATA_ARENA_PIN_GIB=" + std::to_string(pin_env);
+            } else if (pin_env == 0) {
+                w = "STRATA_ARENA_PIN_GIB=0: no cap";
+            } else if (under_wddm()) {
+                uint64_t lim = 0;
+                if (strata::core::shared_pin_limit_for(d, lim, w)) {
+                    caps[(size_t) d] = lim > 0 ? lim : 1;   // 1 byte: no slice fits, nothing pinned
+                } else {
+                    caps[(size_t) d] = 8ull << 30;
+                    w += ": 8 GiB (no shared-memory budget to read)";
+                }
+            }
+            char b[96];
+            if (caps[(size_t) d] == 0) std::snprintf(b, sizeof b, "%sCUDA%d no cap", capsum.empty() ? "" : ", ", d);
+            else std::snprintf(b, sizeof b, "%sCUDA%d %.2f GiB", capsum.empty() ? "" : ", ", d,
+                               (double) caps[(size_t) d] / 1073741824.0);
+            capsum += b;
+        }
+        strata::core::set_arena_slice_devices(owner, caps, stage_of_l, whys);
         std::fprintf(stderr, "strata generate: expert arena: registered per stage, each stage's layers in its own CUDA "
-                             "context (not portable; STRATA_ARENA_PIN_PER_STAGE=%s), %s (%s)\n",
-                     per_stage_env == 1 ? "1" : "unset: multi-GPU under WDDM", capb,
-                     pin_env > 0 ? "STRATA_ARENA_PIN_GIB" : per_cap > 0 ? "the WDDM default" : "STRATA_ARENA_PIN_GIB=0 or not WDDM");
+                             "context (not portable; STRATA_ARENA_PIN_PER_STAGE=%s); the cap per GPU: %s\n",
+                     per_stage_env == 1 ? "1" : "unset: multi-GPU under WDDM", capsum.c_str());
         return true;
+    };
+    // extras/wddm-pin: each split GPU's adapter, its shared (non-local) WDDM segment before and after the arena opens -
+    // whether a registration was charged to one adapter or to all of them (Windows: DXGI; nothing elsewhere)
+    struct SharedSnap { int dev; uint64_t budget, usage; };
+    std::vector<SharedSnap> shared_snap0;
+    auto shared_snapshot = [&]() {
+        std::vector<SharedSnap> v;
+        if (split_at.empty() || !(multi_gpu || split_same)) return v;
+        int d0 = 0;
+        if (cudaGetDevice(&d0) != cudaSuccess) { (void) cudaGetLastError(); d0 = 0; }
+        std::vector<int> devs{d0};
+        for (const int d : split_devs) if (std::find(devs.begin(), devs.end(), d) == devs.end()) devs.push_back(d);
+        for (const int d : devs) {
+            SharedSnap sn{d, 0, 0};
+            std::string why;
+            if (strata::core::shared_pin_budget(d, sn.budget, sn.usage, why)) v.push_back(sn);
+        }
+        return v;
     };
     // This fork, #7: one GPU only.  On a layer split, with a peer device or helper caches the arena (mlock and up to
     // 8 GiB of cudaHostRegister under WDDM) would be made before the other cards' contexts, which upstream creates
@@ -3444,6 +3486,7 @@ int main(int argc, char** argv) {
     if (!o.mmap_experts) arena_src.set_gguf(o.native_preset);   // plan v0.3 P6: a native pack may take its experts from shard 1
     if (arena_async) {
         const uint64_t pin_limit = arena_per_stage() ? 0 : arena_pin_limit();   // extras/wddm-pin: --split-device 0
+        shared_snap0 = shared_snapshot();
         int arena_dev = 0;
         cudaGetDevice(&arena_dev);
         strata::prefill::gemm_prewarm(o.prefill_chunk > 0);   // with the prompt path's GEMM kernels
@@ -5258,6 +5301,7 @@ int main(int argc, char** argv) {
         // extras/wddm-pin: per-stage registration (arena_per_stage above); otherwise the portable one and its cap
         const bool per_stage_pin = !arena_async && arena_per_stage();
         const uint64_t arena_cap_bytes = arena_async || per_stage_pin ? 0 : arena_pin_limit();
+        if (!arena_async) shared_snap0 = shared_snapshot();
         if (multi_gpu && !arena_async && !split_at.empty() && !per_stage_pin) {
             static const bool spread_ok = [] {
                 const char* v = std::getenv("STRATA_ARENA_PIN_SPREAD");
@@ -5286,6 +5330,15 @@ int main(int argc, char** argv) {
                                    o.shared_expert_arena)) {
             std::fprintf(stderr, "strata generate: %s\n", err.c_str());
             return 1;
+        }
+        for (const SharedSnap& b0 : shared_snap0) {   // extras/wddm-pin: what the arena was charged per adapter
+            uint64_t budget = 0, usage = 0;
+            std::string why;
+            if (strata::core::shared_pin_budget(b0.dev, budget, usage, why))
+                std::fprintf(stderr, "strata generate: expert arena: CUDA%d's adapter, shared GPU memory (WDDM non-local): "
+                                     "%.2f GiB in use of a %.2f GiB budget, %+.2f GiB since before the arena\n", b0.dev,
+                             (double) usage / 1073741824.0, (double) budget / 1073741824.0,
+                             ((double) usage - (double) b0.usage) / 1073741824.0);
         }
         if (!arena_src.ram_warning().empty())   // #633: said before the load's numbers, which it explains
             std::fprintf(stderr, "strata generate: WARNING: %s\n", arena_src.ram_warning().c_str());

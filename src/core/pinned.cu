@@ -318,6 +318,7 @@ struct SliceDevices {
     std::vector<int> dev;
     std::vector<uint64_t> cap;
     std::vector<int> stage;   ///< per slice: its stage (a new stage starts where it changes); empty: where dev changes
+    std::vector<std::string> why;   ///< per device: where its cap came from (the log line)
 };
 SliceDevices& slice_devices() {
     static SliceDevices v;
@@ -326,9 +327,10 @@ SliceDevices& slice_devices() {
 }  // namespace
 
 void set_arena_slice_devices(const std::vector<int>& slice_dev, const std::vector<uint64_t>& per_dev_cap,
-                             const std::vector<int>& slice_stage) {
+                             const std::vector<int>& slice_stage, const std::vector<std::string>& per_dev_why) {
     slice_devices().dev = slice_dev;
     slice_devices().cap = per_dev_cap;
+    slice_devices().why = per_dev_why;
     slice_devices().stage = slice_stage.size() == slice_dev.size() ? slice_stage : std::vector<int>{};
 }
 
@@ -348,38 +350,64 @@ int arena_pin_cap_gib() {
     return v < 0 ? -1 : v;
 }
 
-namespace {
+uint64_t shared_pin_margin() {
+    // extras/wddm-pin: STRATA_PIN_MARGIN_GIB, what stays free of the shared-memory budget (default 4 GiB, #243's)
+    static const uint64_t v = [] {
+        const char* e = std::getenv("STRATA_PIN_MARGIN_GIB");
+        return e != nullptr && *e != '\0' && std::atof(e) >= 0.0 ? (uint64_t) (std::atof(e) * 1073741824.0) : (4ull << 30);
+    }();
+    return v;
+}
+
+bool shared_pin_budget(int dev, uint64_t& budget, uint64_t& usage, std::string& why) {
+    budget = usage = 0;
+    cudaDeviceProp p{};
+    if (cudaGetDeviceProperties(&p, dev) != cudaSuccess) {
+        (void) cudaGetLastError();
+        why = "no CUDA device properties";
+        return false;
+    }
+    return strata::platform::gpu_shared_memory_budget(p.luid, budget, usage, why);   // false off Windows
+}
+
+// #243: how much a sliced registration may pin on Windows.  Page-locked memory a GPU maps is charged to its shared
+// (non-local) WDDM segment; pinned slice by slice until the driver refused one (28 GiB of a 63 GB PC), that segment was
+// left full and every later cudaMalloc failed "out of memory".  The margin (4 GiB) stays free for what the engine
+// allocates after the arena; without the DXGI numbers, RAM/2 - 8 GiB (the budget is about half the RAM).
+// extras/wddm-pin: for a given device (its adapter's budget), and public.
+bool shared_pin_limit_for(int dev, uint64_t& limit, std::string& why) {
 #ifdef _WIN32
-// #243: how much of the arena the sliced registration may pin on Windows when the whole arena was refused.
-// Page-locked memory the GPU maps is charged to its shared (non-local) WDDM segment; pinned slice by slice until
-// the driver refused one (28 GiB of a 63 GB PC), that segment was left full and every later cudaMalloc failed
-// "out of memory".  4 GiB of the budget stay free for what the engine allocates after the arena; without the DXGI
-// numbers, RAM/2 - 8 GiB (the budget is about half the RAM).  False: no limit could be worked out.
-bool sliced_pin_limit(uint64_t& limit, std::string& why) {
     constexpr uint64_t GiB = 1ull << 30;
     char buf[256];
-    int dev = 0;
-    cudaDeviceProp p{};
     uint64_t budget = 0, usage = 0;
-    std::string err = "no CUDA device properties";
-    if (cudaGetDevice(&dev) == cudaSuccess && cudaGetDeviceProperties(&p, dev) == cudaSuccess &&
-        strata::platform::gpu_shared_memory_budget(p.luid, budget, usage, err)) {
-        limit = budget > usage + 4 * GiB ? budget - usage - 4 * GiB : 0;
-        std::snprintf(buf, sizeof buf, "the GPU's shared-memory budget %.1f GiB - %.1f GiB in use - 4 GiB",
-                      (double) budget / GiB, (double) usage / GiB);
+    std::string err;
+    const uint64_t margin = shared_pin_margin();
+    if (shared_pin_budget(dev, budget, usage, err)) {
+        limit = budget > usage + margin ? budget - usage - margin : 0;
+        std::snprintf(buf, sizeof buf, "the shared-memory budget of CUDA%d's adapter %.1f GiB - %.1f GiB in use - %.1f GiB",
+                      dev, (double) budget / GiB, (double) usage / GiB, (double) margin / GiB);
         why = buf;
         return true;
     }
-    (void) cudaGetLastError();
     const uint64_t ram = strata::platform::total_physical_memory();
-    if (ram == 0) return false;
+    if (ram == 0) { why = err; return false; }
     limit = ram / 2 > 8 * GiB ? ram / 2 - 8 * GiB : 0;
     std::snprintf(buf, sizeof buf, "%s: RAM/2 - 8 GiB of %.1f GiB", err.c_str(), (double) ram / GiB);
     why = buf;
     return true;
-}
+#else
+    (void) dev;
+    limit = 0;
+    why = "no shared-memory budget outside Windows";
+    return false;
 #endif
-}  // namespace
+}
+
+bool shared_pin_limit(uint64_t& limit, std::string& why) {
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess) { (void) cudaGetLastError(); dev = 0; }
+    return shared_pin_limit_for(dev, limit, why);
+}
 
 namespace {
 std::vector<uint64_t> uniform_bounds(uint64_t bytes, uint64_t slice) {
@@ -495,6 +523,7 @@ void register_per_stage(PinnedArena& a, const std::vector<uint64_t>& bounds, uin
                       std::chrono::duration<double>(std::chrono::steady_clock::now() - td).count(),
                       got < want ? ", the rest unpinned: " : "", got < want ? stop.c_str() : "");
         a.stage_note += b;
+        if ((size_t) d < sd.why.size() && !sd.why[(size_t) d].empty()) a.stage_note += " (cap: " + sd.why[(size_t) d] + ")";
         s0 = s1;
     }
     cudaSetDevice(prev);
@@ -552,7 +581,7 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds,
             // #243 (opt-in, STRATA_ARENA_PIN_GIB=auto): not up to the driver's refusal but below the shared-memory
             // budget, for a PC where the full sliced pin leaves WDDM refusing later allocations.  Not the default: a
             // 64 GB PC pins 30 GiB past that budget without trouble, and capping it at 26 cost ~20% prompt speed.
-            if (!capped && env_gib == -2) limited = sliced_pin_limit(limit, limit_why);
+            if (!capped && env_gib == -2) limited = shared_pin_limit(limit, limit_why);
 #endif
             const std::vector<int>& order = pin_order();
             if (capped && !order.empty()) {
