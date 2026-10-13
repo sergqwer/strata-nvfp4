@@ -170,6 +170,12 @@ public:
     /// run `init`.
     bool set_stage_helper(Prefill* helper, std::string& err);
 
+    /// extras/split-prompt-fast: the static residency table this path reads (init's `host_res`).  A layer split's
+    /// CUDA0 path that runs every layer for a prompt (STRATA_SPLIT_PROMPT_FAST=1) reads a copy whose rows past its
+    /// own layers are all -1 (the later stages' slot numbers index THEIR caches), then gets init's table back.
+    void set_host_res(const int32_t* host_res);
+    const int32_t* host_res() const;
+
     /// The CPU expert pool (decode's, idle while a prompt is read). With STRATA_PREFILL_CPU_SHARE set, a chunk below
     /// stream_all_min() tokens - an agent's tool output - hands it the non-resident experts routed by at most MAXT of
     /// its tokens, fewest first, up to a share of the experts it would stream (`auto`: measured, where both sides end

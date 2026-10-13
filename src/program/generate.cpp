@@ -1619,6 +1619,129 @@ bool checkpoint_restore(const ConvCheckpoint& c, strata::core::SessionState& ss,
     return false;
 }
 
+// ---- extras/split-prompt-fast (STRATA_SPLIT_PROMPT_FAST=1, a 2-card layer split): CUDA0 reads a prompt through
+// EVERY layer, like one GPU (its session is carved for the whole model), and the later stage keeps decoding its own
+// layers.  The later stage's state - its carve `part`: the GDN rows, the QSA layers' indexer running state and their
+// K/V cells [0, upto) - is copied between CUDA0's session and the stage's own through host memory (no P2P): from the
+// stage before a prompt (its decode wrote cells CUDA0 never saw), back to it after.
+static cudaError_t fast_copy(void* dst, const void* src, size_t bytes) {   // as conversation_copy.hpp: a private stream
+    if (bytes == 0) return cudaSuccess;
+    int dev = 0;
+    cudaError_t e = cudaGetDevice(&dev);
+    if (e != cudaSuccess) return e;
+    thread_local std::vector<cudaStream_t> streams;
+    if (dev < 0) dev = 0;
+    if ((size_t) dev >= streams.size()) streams.resize((size_t) dev + 1, nullptr);
+    if (!streams[(size_t) dev]) {
+        e = cudaStreamCreateWithFlags(&streams[(size_t) dev], cudaStreamNonBlocking);
+        if (e != cudaSuccess) { streams[(size_t) dev] = nullptr; return e; }
+    }
+    e = cudaMemcpyAsync(dst, src, bytes, cudaMemcpyDefault, streams[(size_t) dev]);
+    if (e != cudaSuccess) return e;
+    return cudaStreamSynchronize(streams[(size_t) dev]);
+}
+
+static bool fast_carve_ok(const strata::core::SessionState& a, const strata::core::SessionState& part) {
+    return part.gdn_ord0 >= a.gdn_ord0 && part.gdn_ord0 + part.gdn_alloc <= a.gdn_ord0 + a.gdn_alloc &&
+           part.qsa_ord0 >= a.qsa_ord0 && part.qsa_ord0 + part.qsa_alloc <= a.qsa_ord0 + a.qsa_alloc;
+}
+
+static bool fast_state_copy(const strata::core::SessionState& src, int src_dev, strata::core::SessionState& dst,
+                            int dst_dev, const strata::core::SessionState& part, const strata::core::ModelGeometry& g,
+                            int64_t upto, std::string& err) {
+    namespace sc = strata::core;
+    sc::ConversationStateSizes z;
+    if (!sc::conversation_state_sizes(g, z, err)) return false;
+    if (!fast_carve_ok(src, part) || !fast_carve_ok(dst, part)) {
+        err = "split prompt fast: a session does not hold the later stage's layers";
+        return false;
+    }
+    const int64_t n_gdn = g.n_gdn_layers();
+    const size_t row = n_gdn > 0 ? z.gdn / (size_t) n_gdn : 0;
+    std::vector<uint8_t> h;
+    auto fail = [&](const char* what, cudaError_t e) {
+        err = std::string("split prompt fast: ") + what + ": " + cudaGetErrorString(e);
+        return false;
+    };
+    auto xfer = [&](void* d, const void* s, size_t n) -> bool {
+        if (n == 0) return true;
+        if (d == nullptr || s == nullptr) { err = "split prompt fast: a state buffer is missing"; return false; }
+        if (h.size() < n) h.resize(n);
+        {
+            const sc::OnDevice a(src_dev);
+            if (const cudaError_t e = fast_copy(h.data(), s, n); e != cudaSuccess) return fail("state read", e);
+        }
+        const sc::OnDevice b(dst_dev);
+        if (const cudaError_t e = fast_copy(d, h.data(), n); e != cudaSuccess) return fail("state write", e);
+        return true;
+    };
+    for (const int dv : {src_dev, dst_dev}) {
+        const sc::OnDevice o(dv);
+        if (const cudaError_t e = cudaDeviceSynchronize(); e != cudaSuccess) return fail("device sync", e);
+    }
+    if (part.gdn_alloc > 0 && row > 0 &&
+        !xfer((uint8_t*) dst.gdn_state + (size_t) (part.gdn_ord0 - dst.gdn_ord0) * row,
+              (const uint8_t*) src.gdn_state + (size_t) (part.gdn_ord0 - src.gdn_ord0) * row, (size_t) part.gdn_alloc * row))
+        return false;
+    const int64_t blk = strata::kernels::qsa_real_shapes().idx_block;
+    for (int64_t q = part.qsa_ord0; q < part.qsa_ord0 + part.qsa_alloc; ++q) {
+        const sc::QsaState& S = src.qsa_states[q];
+        const sc::QsaState& D = dst.qsa_states[q];
+        if (!xfer(D.idx_tail, S.idx_tail, z.tail) || !xfer(D.idx_dead, S.idx_dead, z.dead) ||
+            !xfer(D.idx_block_pos, S.idx_block_pos, z.block_pos))
+            return false;
+        if (upto > 0) {
+            sc::ConversationKv img;
+            {
+                const sc::OnDevice a(src_dev);
+                if (!sc::conversation_kv_save(img, S, g, upto, true, err)) { err = "split prompt fast: K/V read: " + err; return false; }
+            }
+            const sc::OnDevice b(dst_dev);
+            if (!sc::conversation_kv_restore(img, D, g, upto, true, err)) { err = "split prompt fast: K/V write: " + err; return false; }
+        }
+        // the indexer row of the block being filled (the K/V image holds the completed ones): as the source has it
+        const int64_t prow = blk > 0 ? upto / blk : 0;
+        if (S.idx_pooled != nullptr && D.idx_pooled != nullptr && prow < S.idx_pooled_rows && prow < D.idx_pooled_rows &&
+            !xfer(D.idx_pooled + prow * g.idx_key_dim, S.idx_pooled + prow * g.idx_key_dim, (size_t) g.idx_key_dim * 4))
+            return false;
+    }
+    const sc::OnDevice b(dst_dev);
+    if (const cudaError_t e = cudaDeviceSynchronize(); e != cudaSuccess) return fail("device sync", e);
+    return true;
+}
+
+/// A mid-prompt checkpoint's part for the later stage, read from CUDA0's whole-model session (the stage did not run):
+/// the same payload `checkpoint_save(part, stage session)` makes - its GDN rows and indexer state from CUDA0, its PLE
+/// history from the stage itself (a stage past layer 1 never changes it while reading a prompt).
+static bool fast_part_save(ConvCheckpoint& c, const strata::core::SessionState& full, const strata::core::SessionState& part,
+                           const strata::core::ModelGeometry& g) {
+    namespace sc = strata::core;
+    std::string err;
+    sc::ConversationStateSizes z;
+    if (!sc::conversation_state_sizes(g, z, err) || !fast_carve_ok(full, part)) {
+        std::fprintf(stderr, "strata serve: split prompt fast: checkpoint part: %s\n", err.empty() ? "carve" : err.c_str());
+        return false;
+    }
+    const int64_t n_gdn = g.n_gdn_layers();
+    const size_t row = n_gdn > 0 ? z.gdn / (size_t) n_gdn : 0;
+    const size_t layers = (size_t) std::max<int64_t>(part.qsa_alloc, 0);
+    c.gdn.resize((size_t) part.gdn_alloc * row);
+    c.ple.resize(part.ple_hist ? z.ple : 0);
+    c.tails.resize(layers * z.tail); c.dead.resize(layers * z.dead); c.block_pos.resize(layers * z.block_pos);
+    bool ok = fast_copy(c.gdn.data(), (const uint8_t*) full.gdn_state + (size_t) (part.gdn_ord0 - full.gdn_ord0) * row,
+                        c.gdn.size()) == cudaSuccess &&
+              fast_copy(c.ple.data(), part.ple_hist, c.ple.size()) == cudaSuccess;
+    for (size_t j = 0; ok && j < layers; ++j) {
+        const sc::QsaState& S = full.qsa_states[(size_t) part.qsa_ord0 + j];
+        ok = fast_copy(c.tails.data() + j * z.tail, S.idx_tail, z.tail) == cudaSuccess &&
+             fast_copy(c.dead.data() + j * z.dead, S.idx_dead, z.dead) == cudaSuccess &&
+             fast_copy(c.block_pos.data() + j * z.block_pos, S.idx_block_pos, z.block_pos) == cudaSuccess;
+    }
+    if (!ok) std::fprintf(stderr, "strata serve: split prompt fast: checkpoint part copy: %s\n",
+                          cudaGetErrorString(cudaGetLastError()));
+    return ok;
+}
+
 // --control-vector-scaled: llama.cpp's `common_control_vector_load` (every file's `direction.<l>` times its scale,
 // summed; layer 0 has none) and `llama_adapter_cvec::apply` with the projection-mode patch (project: the unit
 // direction and its norm as the scale), into the tables `cvec_upload` takes.  `summary` is what INFO reports;
@@ -3231,7 +3354,15 @@ int main(int argc, char** argv) {
         }
         std::fclose(f);
     };
-    if (stage_trim) {
+    // extras/split-prompt-fast: CUDA0 reads prompts through every layer, so it keeps all of their dense weights (the
+    // later stages still trim theirs)
+    const bool split_fast_env = [] {
+        const char* v = std::getenv("STRATA_SPLIT_PROMPT_FAST");
+        return v != nullptr && v[0] != 0 && v[0] != '0';
+    }();
+    if (stage_trim && split_fast_env)
+        std::fprintf(stderr, "strata generate: layer split: CUDA0 keeps every layer's dense weights (STRATA_SPLIT_PROMPT_FAST)\n");
+    if (stage_trim && !split_fast_env) {
         add_foreign(0, split_at[0], skip, o.mmap_experts);
         strata::core::NativeDense::set_layer_range(0, (int) split_at[0]);
         std::fprintf(stderr, "strata generate: layer split: CUDA0 loads the dense weights of layers 0-%lld only\n",
@@ -4765,13 +4896,35 @@ int main(int argc, char** argv) {
                                  "follows)\n", st.dev, (double) fb / 1073741824.0);
         }
 
+    // extras/split-prompt-fast (opt-in, STRATA_SPLIT_PROMPT_FAST=1): a prompt is read on CUDA0 through every layer, as
+    // on one GPU (the later stage's experts stream over CUDA0's link), and the later stage's state is copied to it
+    // afterwards; decode runs on the split as before.  CUDA0's session is then carved for the whole model (+ the later
+    // layers' K/V and GDN rows on CUDA0).  Two cards only, CUDA0 holding every layer's dense weights (no trim), no
+    // --batch slots.  Unset: nothing changes.
+    const bool split_fast = [&] {
+        const char* v = std::getenv("STRATA_SPLIT_PROMPT_FAST");
+        if (v == nullptr || v[0] == 0 || v[0] == '0') return false;
+        const char* why = !multi_gpu ? "it needs a layer split across GPUs"
+                        : stages.size() != 1 || split_at.size() != 1 || split_same ? "two cards only (one later stage) for now"
+                        : trim_asked && split_auto ? "CUDA0 must hold every layer's dense weights (not with --layer-split auto and the trim)"
+                        : o.batch > 0 ? "not with --batch slots (their sessions are carved per stage)"
+                        : nullptr;
+        if (why != nullptr) {
+            std::fprintf(stderr, "strata serve: STRATA_SPLIT_PROMPT_FAST ignored: %s\n", why);
+            return false;
+        }
+        std::fprintf(stderr, "strata serve: layer split: prompts read on CUDA0 through all %lld layers, the later stage's "
+                             "state copied to CUDA%d after each (STRATA_SPLIT_PROMPT_FAST)\n",
+                     (long long) g.n_layers, stages[0]->dev);
+        return true;
+    }();
     // ---- CUDA0's session, and the stages' sessions: sized to each device's own layer range (the carve).  A
     // stage that runs [lb, le) carves only those layers' GDN rows and QSA pools - before the carve every stage
     // held all 48 layers' state whatever layers it ran, which is the same disease the chunked-QSA-prefill PR
     // fixed in llama.cpp: allocation sized by the whole model instead of the device's own work.
     {
         const strata::core::OnDevice on0(0);
-        const int64_t hi0 = multi_gpu ? split_at[0] : -1;
+        const int64_t hi0 = multi_gpu && !split_fast ? split_at[0] : -1;   // split_fast: CUDA0 reads every layer
         // the elastic K/V (--kv-grow, see kvg_ensure): one GPU, the whole K/V in VRAM (no streaming), a profiled cache
         // that can give slots up, and every expert in RAM for the CPU to compute the ones it gives up
         {
@@ -7218,7 +7371,10 @@ int main(int argc, char** argv) {
         if (split_ring_decided || !o.serve || !multi_gpu || host_res.empty()) return;
         split_ring_decided = true;
         int64_t res_n = 0;
-        for (const int32_t r : host_res) res_n += r >= 0;
+        // split_fast: CUDA0 reads every prompt alone, so what counts is what ITS cache holds (the later layers stream)
+        const size_t res_end = split_fast ? std::min(host_res.size(), (size_t) split_at[0] * (size_t) g.n_expert)
+                                          : host_res.size();
+        for (size_t i = 0; i < res_end; ++i) res_n += host_res[i] >= 0;
         const double res_share = (double) res_n / (double) host_res.size();
         const int ring = strata::program::split_ring_slots(std::getenv("STRATA_SPLIT_RING"), res_share);
         if (ring > 0) {
@@ -7969,7 +8125,7 @@ int main(int argc, char** argv) {
         }
         // a layer split: a one-chunk prompt runs the stages one after the other, so each stage's prompt path gets the
         // next stage's GPU (the last one the first's) to stream and compute a share of its experts meanwhile
-        if (multi_gpu && !stages.empty()) {
+        if (multi_gpu && !stages.empty() && !split_fast) {   // split_fast: the later stage does not read prompts
             std::vector<std::pair<strata::prefill::Prefill*, int>> paths{{&sp, 0}};
             for (const auto& st : stages) paths.emplace_back(&st->sp, st->dev);
             for (size_t i = 0; i < paths.size(); ++i) {
@@ -8799,13 +8955,17 @@ int main(int argc, char** argv) {
             const char* v = std::getenv("STRATA_SPLIT_MTP_BATCH");
             return v == nullptr || strata::program::draft_kv::split_env_on(v);
         }();
-        sp.on_chunk = [&](const float* R_rows, int64_t T, int64_t p0, std::string& e) -> bool {
+        // split_fast: the wrapper below built this chunk's draft K/V on the drafter's GPU already
+        bool fast_drafted = false;
+        void* fast_rows_dev = nullptr;    // split_fast: a piece of CUDA0's final rows on the drafter's GPU (process lifetime)
+        void* fast_rows_host = nullptr;
+        auto draft_rows = [&](const float* R_rows, int64_t T, int64_t p0, std::string& e) -> bool {
             std::vector<int32_t> nxt((size_t) T);
             for (int64_t t = 0; t < T; ++t) nxt[(size_t) t] = (int32_t) cur[(size_t) (p0 + t + 1)];
             // E-9: batched through the prompt path when it can (a layer split: only with STRATA_SPLIT_MTP_BATCH=1)
             bool batched = false;
             const strata::program::draft_kv::Plan dkv = strata::program::draft_kv::plan(
-                use_mtp, multi_gpu, split_mtp_batch, strata::core::native_embed() != nullptr);
+                use_mtp, multi_gpu, split_mtp_batch && !split_fast, strata::core::native_embed() != nullptr);
             if (dkv.try_batched || dkv.why != nullptr) {
                 strata::prefill::Prefill& dsp = multi_gpu ? stages.back()->sp : sp;   // the drafter's stage
                 const char* why = dkv.why;
@@ -8827,6 +8987,10 @@ int main(int argc, char** argv) {
             if (use_mtp && std::getenv("STRATA_SNAPSHOT_VERIFY") != nullptr)
                 std::fprintf(stderr, "strata serve: DRAFT_PREFILL path=%s mode=%d cells=%lld\n",
                              batched ? "batched" : "token", mtp.kv_state().kv_mode, (long long) T);
+            return true;
+        };
+        sp.on_chunk = [&](const float* R_rows, int64_t T, int64_t p0, std::string& e) -> bool {
+            if (!fast_drafted && !draft_rows(R_rows, T, p0, e)) return false;
             // progress for the server window: PP <position reached> <prompt tokens> <ms> <fresh tokens/s>
             const int64_t done = p0 + T;
             pp_reached = done;
@@ -8867,6 +9031,43 @@ int main(int argc, char** argv) {
         if (multi_gpu) {   // the batched prompt is reported by its last stage (the drafter's rows are there)
             stages.back()->sp.on_chunk = std::move(sp.on_chunk);
             sp.on_chunk = nullptr;
+            if (split_fast) {   // CUDA0 is the last stage of every prompt: its rows go to the drafter's GPU in pieces
+                sp.on_chunk = [&](const float* R_rows, int64_t T, int64_t p0, std::string& e) -> bool {
+                    GpuStage& st1 = *stages.back();
+                    if (use_mtp) {
+                        constexpr int64_t kPiece = 1024;
+                        const size_t row_b = (size_t) g.n_embd * (size_t) g.hc * sizeof(float);
+                        if (fast_rows_dev == nullptr) {
+                            const strata::core::OnDevice on(st1.dev);
+                            if (cudaMalloc(&fast_rows_dev, (size_t) kPiece * row_b) != cudaSuccess ||
+                                cudaHostAlloc(&fast_rows_host, (size_t) kPiece * row_b, cudaHostAllocPortable) != cudaSuccess) {
+                                (void) cudaGetLastError();
+                                e = "split prompt fast: the draft rows' buffers do not fit";
+                                return false;
+                            }
+                        }
+                        for (int64_t t = 0; t < T; t += kPiece) {
+                            const int64_t nr = std::min<int64_t>(kPiece, T - t);
+                            if (fast_copy(fast_rows_host, (const uint8_t*) R_rows + (size_t) t * row_b, (size_t) nr * row_b) !=
+                                cudaSuccess) { e = "split prompt fast: reading the draft rows failed"; return false; }
+                            const strata::core::OnDevice on(st1.dev);
+                            if (fast_copy(fast_rows_dev, fast_rows_host, (size_t) nr * row_b) != cudaSuccess) {
+                                e = "split prompt fast: writing the draft rows failed";
+                                return false;
+                            }
+                            if (!draft_rows((const float*) fast_rows_dev, nr, p0 + t, e)) return false;
+                            if (cudaDeviceSynchronize() != cudaSuccess) {   // the next piece reuses the buffer
+                                e = std::string("split prompt fast: ") + cudaGetErrorString(cudaGetLastError());
+                                return false;
+                            }
+                        }
+                    }
+                    fast_drafted = true;
+                    const bool ok = st1.sp.on_chunk(R_rows, T, p0, e);
+                    fast_drafted = false;
+                    return ok;
+                };
+            }
             for (size_t i = 0; i <= stages.size(); ++i) {
                 strata::prefill::Prefill& stage_sp = i == 0 ? sp : stages[i - 1]->sp;
                 strata::core::SessionState& stage_ss = i == 0 ? ss : stages[i - 1]->ss;
@@ -8876,10 +9077,16 @@ int main(int argc, char** argv) {
                     ConvCheckpoint part;   // this stage's state at `done` (its stream is synchronized)
                     part.ids.assign(cur.begin(), cur.begin() + done);
                     if (!checkpoint_save(part, stage_ss, g)) { e = "saving a checkpoint part failed"; return false; }
+                    ConvCheckpoint part1;   // split_fast: the later stage did not read it - its part from CUDA0's session
+                    if (split_fast && i == 0) {
+                        part1.ids = part.ids;
+                        if (!fast_part_save(part1, ss, stages[0]->ss, g)) { e = "saving a checkpoint part failed"; return false; }
+                    }
                     std::lock_guard<std::mutex> lk(part_mu);
                     auto& v = part_at[done];
                     v.resize(stages.size() + 1);
                     v[i] = std::move(part);
+                    if (split_fast && i == 0) v[1] = std::move(part1);
                     return true;
                 };
             }
@@ -12008,7 +12215,7 @@ int main(int argc, char** argv) {
                 // what this segment needs, capped by the configured chunk: a request lends only what its own
                 // prompt needs, so a large chunk costs a short prompt nothing
                 const int64_t pf_pipe_k = pf_pipe_k_for(tokens);
-                const int64_t pipe_chunk = pf_pipe_k > 1 && pf_parts.size() > 1
+                const int64_t pipe_chunk = pf_pipe_k > 1 && pf_parts.size() > 1 && !split_fast
                                                ? strata::program::split_rules::pipeline_chunk(tokens, o.prefill_chunk,
                                                                                              pf_pipe_k, pf_pipe_min)
                                                : o.prefill_chunk;
@@ -12027,6 +12234,9 @@ int main(int argc, char** argv) {
                 bool any = false;
                 for (PfPart& p : pf_parts) {
                     if (p.first < 0) continue;
+                    // split_fast: only CUDA0 reads the prompt; the later stage's cache stays whole (nothing to refill
+                    // over its link afterwards)
+                    if (split_fast && &p != &pf_parts.front()) continue;
                     if (!p.lent.empty()) {
                         if (want <= p.lent_chunk) continue;            // its current loan already covers this
                         // ONLY this participant's loan goes back: `refill` would return the other participants'
@@ -12102,6 +12312,44 @@ int main(int argc, char** argv) {
             // far is copied into <slot> (this admission's own, or a free one the server reserved for a solo request),
             // the request ends with `YIELDED <slot> <tokens>` + DONE cancel, and the server sends it again later: it
             // continues from the slot with the same chunks.  #656's cooperative preemption, with a slot as the park.
+            // split_fast: the prompt read on CUDA0 through every layer (its own chunk, loan and ring, the later layers'
+            // experts all streamed: their residency rows index the later stage's cache, so CUDA0 reads them as -1), the
+            // later stage's state brought to CUDA0 before (its decode wrote cells CUDA0 never saw) and copied back after
+            std::vector<int32_t> fast_res;
+            auto sp_run = [&](const int64_t* tk, int64_t cnt, int64_t q0, std::string& e) -> bool {
+                if (!split_fast) return sp.run(tk, cnt, q0, e);
+                GpuStage& st1 = *stages[0];
+                const auto f0 = Clock::now();
+                if (!fast_state_copy(st1.ss, st1.dev, ss, 0, st1.ss, g, q0, e)) return false;
+                const auto f1 = Clock::now();
+                fast_res.assign(host_res.begin(), host_res.end());
+                for (size_t i = (size_t) split_at[0] * (size_t) g.n_expert; i < fast_res.size(); ++i)
+                    fast_res[i] = strata::core::kNotResident;
+                const int32_t* res0 = sp.host_res();
+                sp.set_stage(0, g.n_layers, nullptr);
+                sp.set_host_res(fast_res.data());
+                const bool ok = sp.run(tk, cnt, q0, e);
+                sp.set_host_res(res0);
+                sp.set_stage(0, split_at[0], &st1.sp);
+                const auto f2 = Clock::now();
+                // a stopped read: the later stage gets the chunks CUDA0 finished (the state is at pp_reached)
+                const int64_t upto = ok ? q0 + cnt : pp_reached;
+                std::string ce;
+                if ((ok || upto > q0) && !fast_state_copy(ss, 0, st1.ss, st1.dev, st1.ss, g, upto, ce)) {
+                    if (ok) { e = ce; return false; }
+                    std::fprintf(stderr, "strata serve: split prompt fast: %s\n", ce.c_str());
+                }
+                st1.ss.ple_prev[0] = ss.ple_prev[0];
+                st1.ss.ple_prev[1] = ss.ple_prev[1];
+                static const bool fast_trace = std::getenv("STRATA_SPLIT_PROMPT_FAST_TRACE") != nullptr;
+                if (fast_trace || cnt >= 1024)
+                    std::fprintf(stderr, "strata serve: split prompt fast: %lld tokens at %lld on CUDA0 in %.0f ms; the "
+                                         "later stage's state to CUDA0 %.0f ms, back %.0f ms\n", (long long) cnt,
+                                 (long long) q0, std::chrono::duration<double, std::milli>(f2 - f1).count(),
+                                 std::chrono::duration<double, std::milli>(f1 - f0).count(),
+                                 std::chrono::duration<double, std::milli>(Clock::now() - f2).count());
+                return ok;
+            };
             auto read_part = [&](int64_t a0, int64_t b0, std::string& e) -> bool {
                 // (a layer split reads its stages as a pipeline over one run's chunks: beside slots a chunk at a time, with
                 // none decoding in pieces of STRATA_BATCH_YIELD_CHUNKS chunks (default 8; 0 = one run) so a BYIELD is taken)
@@ -12111,11 +12359,11 @@ int main(int argc, char** argv) {
                 }();
                 const int64_t C = std::max<int64_t>(sp.chunk(), 1);
                 const int64_t piece = strata::program::batch_read_piece(o.batch > 0, piped, !stages.empty(), batch_on(), C, yield_chunks);
-                if (piece <= 0) return sp.run(ids.data() + a0, b0 - a0, a0, e);
+                if (piece <= 0) return sp_run(ids.data() + a0, b0 - a0, a0, e);
                 for (int64_t q = a0; q < b0;) {
                     const int64_t r = std::min(b0, q + piece);
                     const auto tq = Clock::now();
-                    if (!sp.run(ids.data() + q, r - q, q, e)) return false;
+                    if (!sp_run(ids.data() + q, r - q, q, e)) return false;
                     q = r;
                     if (q >= b0) continue;
                     int ys = -1;

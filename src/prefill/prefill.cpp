@@ -4513,6 +4513,9 @@ bool Prefill::drain_pipeline(std::string& err) {
     return ok;
 }
 
+void Prefill::set_host_res(const int32_t* host_res) { impl_->host_res = host_res; }
+const int32_t* Prefill::host_res() const { return impl_->host_res; }
+
 bool Prefill::run(const int64_t* tokens, int64_t n, int64_t pos0, std::string& err) {
     const bool body_ok = run_impl(tokens, n, pos0, err);
 
