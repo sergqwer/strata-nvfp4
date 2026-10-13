@@ -81,7 +81,19 @@ files by hand.
     longer takes page-locked memory before the second card's context exists; a refused hand-off buffer between the
     cards makes the prompt chunk smaller instead of stopping the start; and when the token embedding cannot be
     page-locked and the draft head runs on the other card, the engine says so at start instead of failing later with
-    an illegal memory access. One GPU runs exactly as before.
+    an illegal memory access; a later card's PCIe share starts from NVFP4's 0.25 like the first card's, not 0.55.
+    One GPU runs exactly as before.
+  - **Tool calls:** Python-style `True` / `False` become JSON booleans where the schema allows one (jarydkrish); a
+    call missing its `</tool_call>` ends at its own `</function>` (upstream PR #1881, LeGeRyChEeSe); a quoted
+    `</tool_response>` stays text (upstream PR #1840, Mert Özkan); opt-in `"tool_name_repair": true` maps a call to an
+    undeclared tool onto the declared one it meant (ANBAL534).
+  - **Image URLs** are fetched only from public addresses, re-checked on every redirect (shoftee); `data:` URLs and
+    local files work as before.
+  - **A NaN stays a NaN** in the PLE and prompt path's BF16 conversions, so the NaN guard sees it (sebastianrcnt);
+    every other value converts to the same bits.
+  - **The Monitor shows every GPU:** its role (layer-split stage, peer tier, helper cache, image encoder), VRAM, load,
+    temperature, power and PCIe link (current / max, with the engine's measured bandwidth); the Disk card reads the
+    model's drives. The Windows bundle's server env gets `psutil` (`update.cmd` installs it).
 - **Two more exact models for a 128 GB PC, and Unsloth's files faster (0.1.42-nvfp4.2).**
   - **`--family qwen-nvfp4-mix`**: our GPTQ NVFP4 with Q8_0 experts in 38 of its 48 layers. It picks Q8_0's top token
     95.0% of the time (GPTQ: 93.6%), at about half GPTQ's speed (91-95 tokens/s on an RTX 5090). Every expert stays
