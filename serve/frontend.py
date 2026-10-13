@@ -245,7 +245,10 @@ VISION_TAGS = {"<|vision_start|>": "\U000F0E03", "<|image_pad|>": "\U000F0E04", 
 # #2026: `</tool_call>` the same way.  A user asking for the string verbatim handed the model the real end-of-call token
 # (type 4, matched everywhere); it copied that token into its answer and the reply came back empty.  An assistant
 # message keeps its own: a client replaying the model's raw call text sends the tokens the model wrote.
-TOOL_LITERAL_TAGS = {"</tool_call>": "\U000F0E07"}
+# `</tool_response>` closes a tool result the same way (a transcript or a test pasted into a message took
+# that token too).  A user message that *is* the template's wrapped tool result keeps it: see
+# wrapped_tool_result below.
+TOOL_LITERAL_TAGS = {"</tool_call>": "\U000F0E07", "</tool_response>": "\U000F0E08"}
 LITERAL_TAGS = {**THINK_TAGS, **VISION_TAGS, **TOOL_LITERAL_TAGS}
 THINK_MARKS = {v: k for k, v in LITERAL_TAGS.items()}
 CONTROL_MARK0 = 0xF0E10      # the control tokens' marks start here, clear of the two sets above
@@ -287,6 +290,21 @@ def _has_tag(v, tags: dict[str, str] = LITERAL_TAGS) -> bool:
     return False
 
 
+def wrapped_tool_result(content) -> bool:
+    """#2026: the template reads a *user* message whose text starts with `<tool_response>` and ends with
+    `</tool_response>` as a wrapped tool result (the template's multi_step_tool scan) and writes the closer as the
+    model's own token.  Marking that one would turn it into text and the message would stop being read as a result, so
+    its closer stays as written.  Content in the template's list form (a message with an image) is read as the
+    template renders it: the text items in order, an image or video item as its vision markers."""
+    if isinstance(content, list):
+        content = "".join(item["text"] if isinstance(item, dict) and item.get("type") not in ("image", "video")
+                          and isinstance(item.get("text"), str) else "<|vision_start|>" for item in content)
+    if not isinstance(content, str):
+        return False
+    text = content.strip()
+    return text.startswith("<tool_response>") and text.endswith("</tool_response>")
+
+
 def mark_think_literals(messages: list[dict], tools: list[dict] | None, tags: dict[str, str] = LITERAL_TAGS):
     """#537: (messages, tools) with every literal <think> / </think> (#554: and vision marker) in their text swapped for
     LITERAL_TAGS' marks (or `tags`': literal_tags() adds the control tokens' texts), and
@@ -297,10 +315,19 @@ def mark_think_literals(messages: list[dict], tools: list[dict] | None, tags: di
         return messages, tools, False
     out = []
     own = {t: v for t, v in tags.items() if t not in TOOL_LITERAL_TAGS}     # what an assistant message keeps as written
+    wrapped = {t: v for t, v in tags.items() if t != "</tool_response>"}    # what a wrapped tool result keeps
     for m in messages:
         m = dict(m)
         content = m.get("content")
-        mine = own if m.get("role") == "assistant" else tags
+        # an assistant message's raw call text keeps its closers, and the template's own wrapped tool result its
+        # </tool_response> closers: they are the model's tokens there, not a string a user quoted.  A `</tool_call>`
+        # inside a wrapped result is still a quote (#2026), as in any other user message.
+        if m.get("role") == "assistant":
+            mine = own
+        elif m.get("role") == "user" and wrapped_tool_result(content):
+            mine = wrapped
+        else:
+            mine = tags
         for k, v in m.items():
             if k != "role":
                 m[k] = _mark_deep(v, mine)

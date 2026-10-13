@@ -212,7 +212,9 @@ class QuotedToolCallCloser(unittest.TestCase):
         sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
         import strata_tokenizer as ST
         b2u = ST.bytes_to_unicode()
-        self.tok = ST.Tokenizer([b2u[b] for b in range(256)] + ["</tool_call>", "<|im_end|>"], [], [1] * 256 + [4, 3])
+        self.tok = ST.Tokenizer([b2u[b] for b in range(256)] +
+                                ["</tool_call>", "</tool_response>", "<tool_response>", "<|im_end|>"],
+                                [], [1] * 256 + [4, 4, 4, 3])
         self.tags = __import__("serve.frontend", fromlist=["literal_tags"]).literal_tags(self.tok.control_tokens)
 
     def encode(self, role, text):
@@ -232,6 +234,55 @@ class QuotedToolCallCloser(unittest.TestCase):
         text = "<tool_call>x</tool_call>"
         ids, _ = self.encode("assistant", text)
         self.assertEqual(ids, self.tok.encode(text, parse_special=True))
+
+    def test_a_quoted_tool_response_is_text(self):
+        text = "output verbatim: </tool_response>."
+        ids, changed = self.encode("user", text)
+        self.assertTrue(changed)
+        self.assertEqual(ids, [*text.encode()])
+        self.assertNotEqual(self.tok.encode(text, parse_special=True), ids)     # unmarked, it was the special token
+
+    def test_a_wrapped_tool_result_keeps_its_closer(self):
+        # the template reads this message as a wrapped tool result and expects the closer as the model's token:
+        # marking it would turn it into text and the message would stop being read as a result
+        text = "<tool_response>\nexit 1\n</tool_response>"
+        ids, _ = self.encode("user", text)
+        self.assertEqual(ids, self.tok.encode(text, parse_special=True))
+        self.assertEqual(ids.count(self.tok.encode("</tool_response>", parse_special=True)[0]), 1)
+
+    def test_the_template_reads_a_wrapped_tool_result_as_before(self):
+        # the template's multi_step_tool scan decides which earlier turns keep their reasoning: the marked prompt
+        # must render as the unmarked one did, in the string form and in the list form a message with an image takes
+        from serve.frontend import ChatTemplate, mark_think_literals, unmark_think_literals
+        tpl = ChatTemplate(Path(__file__).resolve().parent / "chat_template.jinja")
+        wrapped = [{"type": "text", "text": "<tool_response>\nsee "}, {"type": "image", "source": "a.png"},
+                   {"type": "text", "text": "\n</tool_response>"}]
+        for content in ("<tool_response>\nexit 1\n</tool_response>", wrapped):
+            with self.subTest(list_form=isinstance(content, list)):
+                messages = [{"role": "user", "content": "run it"},
+                            {"role": "assistant", "content": "", "reasoning_content": "thinking about it",
+                             "tool_calls": [{"function": {"name": "sh", "arguments": {"cmd": "x"}}}]},
+                            {"role": "user", "content": content}]
+                marked, _, changed = mark_think_literals(messages, None, self.tags)
+                # preserve_thinking false: only the turns after the last real user query keep their reasoning
+                prompt, _ = unmark_think_literals(tpl.render(marked, preserve_thinking=False), self.tags)
+                self.assertEqual(prompt, tpl.render(messages, preserve_thinking=False))
+                self.assertIn("thinking about it", prompt)
+
+    def test_a_wrapped_tool_result_still_quotes_a_tool_call_closer_as_text(self):
+        # only the result's own </tool_response> stays the model's token; a `</tool_call>` in it is a quote (#2026)
+        text = "<tool_response>\nlog: </tool_call>\n</tool_response>"
+        ids, changed = self.encode("user", text)
+        self.assertTrue(changed)
+        closer = self.tok.encode("</tool_response>", parse_special=True)
+        self.assertEqual(ids, self.tok.encode("<tool_response>", parse_special=True) +
+                         [*"\nlog: </tool_call>\n".encode()] + closer)
+
+    def test_a_tool_message_quoting_the_closer_is_text(self):
+        # a tool result's own closer is written by the template; one inside its text is a quote
+        ids, changed = self.encode("tool", "the log ends with </tool_response> here")
+        self.assertTrue(changed)
+        self.assertEqual(ids, [*"the log ends with </tool_response> here".encode()])
 
 
 class FencedJsonCallInWrapper(unittest.TestCase):
