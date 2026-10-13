@@ -297,8 +297,11 @@ class WhatARefusalDoesToTheCaller(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         (Path(self.tmp.name) / "engine").mkdir(parents=True, exist_ok=True)
         # the engine folder in the temp dir, and the release's HEAD answered here: no network, nothing in the checkout
+        # and the asset the fork publishes (the Windows engine): on Linux PREBUILT_ASSET names one it does not, and
+        # get_prebuilt says so before it downloads anything to refuse
         for p in (mock.patch.object(setup, "ROOT", Path(self.tmp.name)),
-                  mock.patch.object(setup.urllib.request, "urlopen", lambda req, timeout=None: io.BytesIO())):
+                  mock.patch.object(setup.urllib.request, "urlopen", lambda req, timeout=None: io.BytesIO()),
+                  mock.patch.object(setup, "PREBUILT_ASSET", setup.FORK_ASSETS[0])):
             p.start()
             self.addCleanup(p.stop)
 
