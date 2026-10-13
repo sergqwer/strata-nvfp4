@@ -302,6 +302,15 @@ namespace {
 bool clear_error() { (void) cudaGetLastError(); return true; }
 }  // namespace
 
+namespace {
+std::vector<int>& pin_order() {
+    static std::vector<int> v;
+    return v;
+}
+}  // namespace
+
+void set_arena_pin_order(const std::vector<int>& slices) { pin_order() = slices; }
+
 int arena_pin_cap_gib() {
     const char* e = std::getenv("STRATA_ARENA_PIN_GIB");
     if (e == nullptr || *e == '\0') return -1;
@@ -397,6 +406,29 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds,
             // 64 GB PC pins 30 GiB past that budget without trouble, and capping it at 26 cost ~20% prompt speed.
             if (!capped && env_gib == -2) limited = sliced_pin_limit(limit, limit_why);
 #endif
+            const std::vector<int>& order = pin_order();
+            if (capped && !order.empty()) {
+                // extras/mgpu-fixes (D7): the cap's slices in the caller's order (a layer split's stages in turn)
+                scattered = true;
+                slice_pinned.assign(bounds.size() - 1, 0);
+                uint64_t total = 0;
+                for (const int i : order) {
+                    if (i < 0 || (size_t) i + 1 >= bounds.size() || slice_pinned[(size_t) i]) continue;
+                    const uint64_t off = bounds[(size_t) i], n = bounds[(size_t) i + 1] - bounds[(size_t) i];
+                    if (total + n > limit) continue;
+                    if (cudaHostRegister((uint8_t*) base + off, (size_t) n, cudaHostRegisterPortable | cudaHostRegisterMapped) != cudaSuccess) {
+                        (void) cudaGetLastError();
+                        break;
+                    }
+                    slice_pinned[(size_t) i] = 1;
+                    slice_starts.push_back(off);
+                    slice_index.push_back(i);
+                    total += n;
+                    ++registered_slices;
+                }
+                // `registered_bytes` stays the pinned PREFIX (its readers' meaning); the slices are in slice_pinned
+                for (size_t i = 0; i + 1 < bounds.size() && slice_pinned[i]; ++i) registered_bytes = bounds[i + 1];
+            } else
             for (size_t i = 0; i + 1 < bounds.size(); ++i) {
                 const uint64_t off = bounds[i], n = bounds[i + 1] - bounds[i];
                 if (limited && (off > limit || n > limit - off)) break;
@@ -415,8 +447,37 @@ PinnedArena::PinnedArena(uint64_t bytes, const std::vector<uint64_t>& bounds,
                              (limited ? "slices capped at " + std::string(gib) + " GiB (" + limit_why +
                                         "; STRATA_ARENA_PIN_GIB=auto; N sets a cap; #243); " : std::string())) +
                    std::to_string(registered_slices) + " slices pinned (" + std::to_string(registered_bytes >> 30) +
-                   " GiB); " + note;
-            if (registered_bytes < bytes) {
+                   " GiB)" + (scattered ? std::string(", shared between the layer split's stages") : std::string()) +
+                   "; " + note;
+            if (scattered) {
+                // every unregistered run of slices resident through the working-set lock, as the tail below
+                const char* env = std::getenv("STRATA_ARENA_LOCK");
+                if (backing == PageBacking::LargePages) {
+                    note = "large pages are resident without a lock; " + note;
+                } else if (env == nullptr || std::string(env) != "0") {
+                    std::string lnote;
+                    const size_t n_sl = bounds.size() - 1;
+                    for (size_t i = 0; i < n_sl;) {
+                        if (slice_pinned[i]) { ++i; continue; }
+                        size_t j = i;
+                        while (j < n_sl && !slice_pinned[j]) ++j;   // [i, j): a run of unregistered slices
+                        const uint64_t off = bounds[i], len = bounds[j] - bounds[i];
+                        const strata::platform::LockResult lr = strata::platform::lock_resident((uint8_t*) base + off, len);
+                        if (lr.locked_bytes) locked_ranges.emplace_back(off, lr.locked_bytes);
+                        locked_bytes += lr.locked_bytes;
+                        lnote = lr.note;
+                        i = j;
+                    }
+                    // the bytes after the last slice bound (the arena's slack past the last layer)
+                    const uint64_t last = bounds.back();
+                    if (last < bytes) {
+                        const strata::platform::LockResult lr = strata::platform::lock_resident((uint8_t*) base + last, bytes - last);
+                        if (lr.locked_bytes) locked_ranges.emplace_back(last, lr.locked_bytes);
+                        locked_bytes += lr.locked_bytes;
+                    }
+                    if (!lnote.empty()) note = lnote + "; " + note;
+                }
+            } else if (registered_bytes < bytes) {
                 const char* env = std::getenv("STRATA_ARENA_LOCK");
                 if (backing == PageBacking::LargePages) {   // #779: large pages cannot be paged out: nothing to lock
                     note = "large pages are resident without a lock; " + note;
@@ -503,7 +564,11 @@ void PinnedArena::register_slices(std::atomic<int>& ready) {
 
 PinnedArena::~PinnedArena() {
     if (base) {
-        if (locked_bytes) strata::platform::unlock_resident((uint8_t*) base + (slice_bytes ? registered_bytes : 0), locked_bytes);
+        if (scattered) {
+            for (const auto& r : locked_ranges) strata::platform::unlock_resident((uint8_t*) base + r.first, r.second);
+        } else if (locked_bytes) {
+            strata::platform::unlock_resident((uint8_t*) base + (slice_bytes ? registered_bytes : 0), locked_bytes);
+        }
         if (slice_bytes) {
             for (uint64_t off : slice_starts) cudaHostUnregister((uint8_t*) base + off);
         } else {

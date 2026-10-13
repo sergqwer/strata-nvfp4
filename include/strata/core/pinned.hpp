@@ -27,6 +27,10 @@ enum class PageBacking { LargePages, NormalPages, PinnedByCuda };
 /// decides, as in 0.1.30), 0 = no cap (the whole arena, or as many slices as the driver takes), N > 0 = at most N GiB,
 /// -2 for "auto" (Windows: the sliced pin stays below the GPU's shared-memory budget).
 int arena_pin_cap_gib();
+/// extras/mgpu-fixes (PCIE_ASYM D7): the order in which a CAPPED sliced registration takes the arena's slices (one per
+/// layer of a native pack).  Empty (the default): from slice 0 up, as before.  A layer split sets its stages' layers
+/// in turn, so the cap is shared between the stages instead of all landing on the first one.
+void set_arena_pin_order(const std::vector<int>& slices);
 
 struct PinnedArena {
     void* base = nullptr;
@@ -61,6 +65,12 @@ struct PinnedArena {
     void register_slices(std::atomic<int>& ready);
     std::vector<uint64_t> bounds_;
     std::vector<uint64_t> slice_starts;
+    /// extras/mgpu-fixes (D7): a capped registration that followed set_arena_pin_order - the slices need not be a
+    /// prefix.  `slice_pinned[i]`: slice i is registered; `slice_index[k]`: the slice of slice_starts[k].
+    bool scattered = false;
+    std::vector<char> slice_pinned;
+    std::vector<int> slice_index;
+    std::vector<std::pair<uint64_t, uint64_t>> locked_ranges;   ///< scattered: the working-set locks (offset, bytes)
     void* mapping_base = nullptr;     ///< actual mapping start; differs from base when a shared-file header exists
     uint64_t mapping_bytes = 0;       ///< bytes to release from mapping_base
     ~PinnedArena();
