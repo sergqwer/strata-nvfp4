@@ -333,21 +333,26 @@ def _keep_tool_result_wrap(content, tags: dict[str, str]):
         if len(body) >= len(o) + len(c) and body.startswith(o) and body.endswith(c):
             return wrap(content, True, True)
         return None
-    if not (isinstance(content, list) and content and all(isinstance(x, dict) and "text" in x for x in content)):
+    # (this fork, from #1840's port: a picture between the pair - the template renders it as its vision markers, so the
+    # turn is still a wrapped result; the first and last parts are the text that holds the pair)
+    if not (isinstance(content, list) and content and all(isinstance(x, dict) for x in content)):
         return None
-    texts = [x["text"] for x in content]
-    if not all(isinstance(t, str) for t in texts):
+    if not all(isinstance(x.get("text"), str) or x.get("type") in ("image", "video") for x in content):
+        return None
+    texts = [x["text"] for x in content if isinstance(x.get("text"), str)]
+    if not (isinstance(content[0].get("text"), str) and isinstance(content[-1].get("text"), str)):
         return None
     body = "".join(texts).strip()
     if not (len(body) >= len(o) + len(c) and body.startswith(o) and body.endswith(c)):
         return None
-    if not (texts[0].lstrip().startswith(o) and texts[-1].rstrip().endswith(c)):
+    first, last = content[0]["text"], content[-1]["text"]
+    if not (first.lstrip().startswith(o) and last.rstrip().endswith(c)):
         return None          # the pair is split across parts: mark it all, as before
     if len(content) == 1:
-        return [{**content[0], "text": wrap(texts[0], True, True)}]
-    return ([{**content[0], "text": wrap(texts[0], True, False)}] +
+        return [{**content[0], "text": wrap(first, True, True)}]
+    return ([{**content[0], "text": wrap(first, True, False)}] +
             [_mark_deep(x, tags) for x in content[1:-1]] +
-            [{**content[-1], "text": wrap(texts[-1], False, True)}])
+            [{**content[-1], "text": wrap(last, False, True)}])
 
 
 def mark_think_literals(messages: list[dict], tools: list[dict] | None, tags: dict[str, str] = LITERAL_TAGS):
