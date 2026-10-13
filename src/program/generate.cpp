@@ -11753,6 +11753,22 @@ int main(int argc, char** argv) {
                     return 1;
                 }
             }
+            // extras/mgpu-fixes (D2): the PCIe share acts only on layers whose experts are pinned (pcie_layer); with a
+            // capped pin (several GPUs under WDDM: 8 GiB from layer 0; STRATA_ARENA_PIN_GIB) a stage's pcie_frac printed
+            // at start can act on few or none of its layers - say how many
+            if (srcp != nullptr)
+                for (int st = 0; st < n_stages; ++st) {
+                    if (split_drive.pcie_num[st] <= 0) continue;
+                    const int64_t lb = st == 0 ? 0 : split_at[(size_t) st - 1], le = split_drive.end[st];
+                    int64_t on = 0;
+                    for (int64_t l = lb; l < le; ++l) on += srcp->pcie_layer(l) ? 1 : 0;
+                    if (on < le - lb)
+                        std::fprintf(stderr, "strata serve: layer split: CUDA%d's PCIe share (pcie_frac %.2f) acts on %lld of "
+                                             "its %lld layers: the others' experts are not pinned (a capped pin: several GPUs "
+                                             "under WDDM, or STRATA_ARENA_PIN_GIB)\n",
+                                     st == 0 ? 0 : stages[(size_t) st - 1]->dev, split_drive.pcie_num[st] / 256.0,
+                                     (long long) on, (long long) (le - lb));
+                }
             for (int st = 0; st + 1 < n_stages; ++st) stage_ver(st).set_next(&stage_ver(st + 1), &split_drive);
             std::string plan_s = "0-" + std::to_string(split_at[0] - 1) + " (CUDA0)";
             for (int st = 1; st < n_stages; ++st)
