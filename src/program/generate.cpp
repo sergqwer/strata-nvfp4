@@ -8681,7 +8681,10 @@ int main(int argc, char** argv) {
         if (o.adapt_every > 0 && o.adapt_swaps > 0 && !all_experts_resident)
             drive.d.usage.assign((size_t) (g.n_layers * g.n_expert), 0.0f);
         PcieAuto pcie_auto;
-        if (o.pcie_frac_auto && !all_experts_resident && o.batch == 0 && o.peer_device < 0 && (n_stages == 1 || pcie_auto_split_ok())) {
+        // (this fork: also with --batch.  The share is refined in the solo path's windows only - a request alone - and
+        // the batch windows use the share it found, as every request's own; without it a request alone with --batch
+        // kept the start-up 0.25 where it reaches 0.35 here, part of the -17% decode measured on an RTX 5090)
+        if (o.pcie_frac_auto && !all_experts_resident && o.peer_device < 0 && (n_stages == 1 || pcie_auto_split_ok())) {
             const auto& pl = strata::kernels::cpu::expert_layout();
             double sum = 0.0;
             for (int64_t l = 0; l < g.n_layers; ++l) sum += (double) pl.blob_bytes(l);
@@ -8693,7 +8696,10 @@ int main(int argc, char** argv) {
         const char* fetch_off = d_res == nullptr ? "no residency table" : o.spec_split ? "--spec-split"
                               : multi_gpu || !stages.empty() ? "a layer split" : peer.valid() ? "--peer-device"
                               : remote_opt || drive.d.remote_count > 0 ? "helper GPUs" : o.adapt_async ? "--adapt-async"
-                              : o.pipeline_windows > 0 ? "--pipeline-windows" : o.batch > 0 ? "--batch" : nullptr;
+                              : o.pipeline_windows > 0 ? "--pipeline-windows" : nullptr;
+        // (this fork: --batch is no longer a reason.  The batch windows are serial windows of one GPU too - the residency
+        // hook below takes them - and the tier's rounds in them read the same fetch flags as the solo path's; parallel
+        // dialogs, where a request alone with --batch lost it: 90% cache hits against 93% and -17% decode)
         if (adapt_fetch() > 0) {   // STRATA_ADAPT_FETCH (opt-in)
             const char* off = drive.d.usage.empty() ? "the adaptive tier is off" : fetch_off != nullptr ? fetch_off
                             : o.pcie_mode == "dma" || o.pcie_mode == "direct" ? "--pcie-mode dma / direct"
