@@ -1076,6 +1076,101 @@ Unknown telemetry or insufficient RAM skips parking, and the same figure and flo
 decide whether a session file may be saved or restored (below). An 8 GiB budget
 is a cap, not a recommendation for every machine.
 
+**Parked conversations on the disk (opt-in, `--conversation-disk-dir DIR`).** A conversation the RAM cache above
+evicts (its slots or its byte budget full) is dropped, and a client that comes back to it reads the whole prompt
+again: an agent that alternates between its main conversation and sub-agents, two of them too large for the budget
+together, reads ~150K tokens again on every switch. With `--conversation-disk-dir DIR` the evicted conversation goes to
+`DIR` instead and comes back when a request continues it, through the same validation and restore as a parked one,
+when the disk holds a longer prefix than the session, a `--batch` slot or the RAM cache:
+
+- every image of it (one per stage with `--layer-split`) is one session file (above: the same writer and reader, so
+  the same size, header and hash checks and the free-space preflight `--session-min-free-mib`), with the live state
+  and every checkpoint (they hold no K/V; a prompt that leaves the conversation before its deepest checkpoint still
+  resumes from one); the files' identity is a random number of this run, so only this engine reads them back, and its
+  files (`strata-conv-*`) are removed at start and when it ends;
+- a background thread (CPU nice 10 on Linux) writes them, so a switch never waits for the disk; a conversation asked
+  for again before its write started comes back from RAM, one being written is waited for, then read. A queued image
+  holds its RAM until it is written: parking, and a read back, wait for the queue before they evict more;
+- `--conversation-disk-ttl-min N` (default 30): a conversation stays on the disk N minutes after it was written;
+  `--conversation-disk-mib N` (default 32768): the files' total, oldest out first;
+- a read back removes it from the disk (the session holds it again, and it is parked again on the next switch) -
+  except a match on one of its checkpoints (another conversation borrowing its prefix, #1164's rule) and, with
+  `--conversation-disk-persist`, every read: the entry stays as the copy that survives a crash, and a newer copy of
+  the same conversation removes it once that copy is written (the RAM cache's #342 rule, on the keys);
+- the engine's log has a line for every queue, write, hit (from RAM or from the disk) and wait, with MiB, ms and MB/s,
+  and a totals line after every hit (`strata serve: conversation disk: ...`).
+
+Measured on 2x CMP 50HX (layer split), 2x Xeon E5-2670 v2, 64 GB RAM, NVMe ext4, Flash-Next IQ3_XXS, one RAM slot so
+that a third conversation pushes one to the disk, greedy (plain chat requests, 48 tokens): the follow-up answer
+of a conversation restored from the disk was the same text as the answer the live conversation gave (two
+conversations of 42K tokens, and the same through the RAM cache). A 165,557-token conversation: cold read 77.8 s; back
+from the disk 6.4 s for the whole request - the read 3.6 s (2,639 MiB in two files, 761 MB/s; 3,364 MB in RAM before
+the deepest-checkpoint trim) and the GPU restore 0.87 s. The background writes ran at 80-370 MB/s while the next
+prompt was being read (they share the CPU with it at a lower priority); a request waited for one once (0.9 s), when it
+asked for a conversation still being written. After the engine ended no file was left. Unit test:
+`conversation_disk_test` (CPU only, `-DSTRATA_BUILD_CONVERSATION_TESTS=ON`; also clean under ThreadSanitizer). Not run
+on Windows or HIP.
+
+**Conversations that outlive the engine (opt-in, `--conversation-disk-persist`, with `--conversation-disk-dir`).**
+Who it is for: whoever does not keep Strata running all day - start it, continue yesterday's long session, stop it -
+and whoever restarts the server (an update, a settings change, a reboot). Without it every restart reads every
+conversation from token 0 again (77.6 s for 165K tokens below); with it the next start continues from the disk in
+seconds, paid for with disk space within `--conversation-disk-mib`.
+
+- the files are bound to the session files' identity (the model files' fingerprint, the engine version and the
+  settings that change the saved bytes) instead of a random number of the run; a small index file beside each
+  conversation (its token ids and write time, published by rename after its images) lets the next start take them in
+  without reading the images; files of another model, engine version or settings, a damaged index and leftovers of an
+  interrupted write are removed at start;
+- no time limit: the budget alone decides, the least recently written conversation goes first;
+- on QUIT (the server's stop, Ctrl+C, SIGTERM) the engine writes the current conversation and every parked one that
+  is not on the disk yet (the idle save below; what it cannot stream is parked and moved there as before) and waits
+  for the writes before it ends; the server waits up to 300 s for that (20 s otherwise). Ctrl+C in
+  the server's terminal no longer ends the engine directly (it is in the server's process group): the server's QUIT
+  does, after the save; a second Ctrl+C still ends it at once. A crash or `kill -9` keeps what was already written.
+
+Measured on the same box (one RAM slot; the 165,557-token conversation L current at the stop, two 42K-token ones
+parked): the save at the stop took 6.8 s (L written in 2.9 s, 2,639 MiB at 956 MB/s); the next start took in 3
+conversations (4,311 MiB) and refused none; after the restart all three came back from the disk with the same greedy
+answers as before it - L in 6.7 s instead of 77.6 s. `conversation_disk_test` covers the restart (files kept, taken in,
+read back exactly, another identity's files and a damaged index refused).
+
+**Saved while idle, so a killed engine keeps them (this fork, `--conversation-disk-sync-s N`, with
+`--conversation-disk-persist`; default 60, 0 = at QUIT only).** A tray or a service manager that stops the engine with
+a kill (`taskkill /F /T`, `kill -9`) never reaches the QUIT-time save above, so the live conversation and every one
+parked in RAM died with the process. Now, after N seconds without a request, the engine writes every parked
+conversation that has no copy on the disk (from its RAM image; that image then carries the entry, and its eviction
+later drops it without a second write) and the live one (streamed from the device as SAVE does, so no RAM copy; one
+GPU, no `--batch`, with or without `--mtp`) - on the serving thread, given up within one 16 MiB block when any command
+arrives (`SessionWriteOptions::cancel`; the request that interrupts it waits ~0.1-0.3 s more). The live conversation
+goes first. An entry with the same keys is not written twice; a newer copy of a conversation removes the older ones only
+after it is complete, so a crash at any point leaves one. Also in this fork: the background writer starts a job only
+while the engine is idle (unless RAM or the entry is waited for), at below-normal thread priority on Windows; the index
+files end with a hash (a torn index is refused at start); paths are UTF-8 on every OS (`std::u8string`).
+
+Measured (RTX 5090, Windows 11, NVMe, qwen-nvfp4-gptq with the tray's arguments, 16 GiB x 8 RAM slots): the idle save
+wrote 9 conversations (100K, 64K, 48K, 2x32K, 24K, 2x16K, 8K; 10.9 GB) in 4.8 s; after `taskkill /F /T` and a restart
+every one came back from the disk - 100K in 1.12 s instead of 12.3 s read again, 64K 0.86 s (7.25), 48K 0.87 s (5.88),
+32K 0.60-0.64 s (3.6-3.7), 8K 0.58 s (1.37); a 200K one 1.65 s instead of 24 s. The writes run at 2.9-3.5 GB/s, the
+reads at 3.8-4.6 GB/s from the file cache (the session reader's copy and hash; the NVMe itself reads 6.2 GB/s
+unbuffered). With the elastic K/V fixed (`--no-kv-grow --adapt-swaps 0`, exact settings) the answer after a restore
+from the disk, from RAM and after a restart is the same token for token (8K and 64K conversations); every K/V layer
+read back from the device equals the image (`STRATA_SNAPSHOT_VERIFY=1`). With the elastic K/V a near-tie can flip
+after any restore, RAM or disk alike: the K/V's growth evicts experts by usage heat, which changes where the next
+tokens' experts run. Unit test: `conversation_disk_test` (129 checks).
+
+**One pool for the replicas (this fork, `--conversation-disk-shared`, implies `--conversation-disk-persist`).** With
+`"replicas"` (serve/replicas.py) every replica had its own RAM cache, so a conversation one parked came back only on
+that one. With this flag every replica parks straight into the shared folder (not its RAM cache; the writer does not
+wait for the engine to be idle) and takes in what the others published before each lookup (`rescan`: new index files
+in, entries whose index another engine removed out). The files are bound to the model and settings, not to the
+process, so any replica of the config reads them, and the OS file cache serves a conversation written a moment ago at
+RAM speed. A folder used this way keeps other identities' files and leftovers younger than 10 minutes at a start. The
+router credits every replica with what any replica served, less 2048 tokens for the restore: a conversation goes back
+to its own replica while that one is free and to the first free one when it is busy. One engine in this mode (every
+switch through the disk): 0.38-1.13 s per switch over 9 conversations against 0.2-0.5 s from RAM. Not run on several
+GPUs yet (`conversation_disk_test` runs two engines on one folder).
+
 **The RAM figure (`available_host_bytes()`).** The headroom is the smallest of three
 numbers, sampled each time it is asked and not a reservation (other writers can take the
 room afterwards):
