@@ -256,6 +256,7 @@ bool NativeEmbed::load(const std::vector<std::string>& shards, int64_t n_embd, i
             std::fprintf(stderr, "strata: native embedding: cannot pin %llu MiB, kept in VRAM instead\n",
                          (unsigned long long) (bytes_ >> 20));
             dev_ = d;
+            cudaGetDevice(&vram_dev_);   // this fork (#7): only this device can read it
         } else {
             std::memcpy(host_, gguf.tensor_data(*t), bytes_);
             void* d = nullptr;
@@ -276,6 +277,7 @@ bool NativeEmbed::load(const std::vector<std::string>& shards, int64_t n_embd, i
                 }
                 cudaFreeHost(host_);   // the destructor frees dev_ when host_ is null
                 host_ = nullptr;
+                cudaGetDevice(&vram_dev_);   // this fork (#7): only this device can read it
                 std::fprintf(stderr, "strata: native embedding: no device alias for the mapped table, kept in VRAM\n");
             }
 #else
