@@ -3369,7 +3369,11 @@ int main(int argc, char** argv) {
                                  "(STRATA_ARENA_PIN_GIB changes it)\n");
         return pin_env >= 0 ? (uint64_t) pin_env << 30 : pin_wddm_cap ? (8ull << 30) : 0;
     };
-    const bool arena_async = !o.mmap_experts && !(multi_gpu && split_auto && o.split_skip_if_fits) &&
+    // This fork, #7: one GPU only.  On a layer split, with a peer device or helper caches the arena (mlock and up to
+    // 8 GiB of cudaHostRegister under WDDM) would be made before the other cards' contexts, which upstream creates
+    // first: under WSL2 (about 1 GiB of pinned memory) CUDA1's context can then be refused ("cudaSetDevice(1) failed:
+    // out of memory").  There the arena opens where upstream opens it, as with STRATA_ARENA_SYNC=1.
+    const bool arena_async = !o.mmap_experts && !multi_gpu && o.peer_device < 0 && !remote_caches &&
                              std::getenv("STRATA_ARENA_SYNC") == nullptr;
     std::thread arena_thread;
     bool arena_ok = true;
