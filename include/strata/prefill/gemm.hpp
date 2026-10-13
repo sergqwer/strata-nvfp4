@@ -168,5 +168,9 @@ bool gemm_dequant_side();
 void gemm_prewarm(bool warm_kernels = true);
 /// Waits until gemm_prewarm's thread is done (a no-op without one), so the VRAM it took is counted.
 void gemm_prewarm_wait();
+/// extras/mgpu-fixes: the milliseconds one 4096^3 FP16 cuBLAS GEMM takes on device `dev` after a ramp-up (120 of them
+/// first, 40 timed), so a card held below its rated clock (a power limit, locked clocks) reads slower than its
+/// multiprocessors x clock say.  -1 when it cannot run (HIP builds: -1).  Restores the current device.
+double compute_probe_ms(int dev);
 
 }  // namespace strata::prefill

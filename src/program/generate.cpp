@@ -6162,6 +6162,46 @@ int main(int argc, char** argv) {
                                  "%.2f GiB free before its session carve\n", dev, sms, khz / 1e6, layer_ms[(size_t) i],
                          (double) cap[(size_t) i] / 1073741824.0);
         }
+        // extras/mgpu-fixes: THE CLOCK ATTRIBUTE IS THE RATED ONE.  cudaDevAttrClockRate does not move under a power
+        // limit (nvidia-smi -pl) or locked clocks (-lgc), so a held-back card was priced as a full-speed one.  Each card
+        // now runs a short FP16 GEMM probe (strata::prefill::compute_probe_ms); on cards of one architecture (the probe
+        // compares like with like) a card more than 15% slower per (SM x rated GHz) than the best one has its per-layer
+        // cost scaled by that ratio, so the search gives it fewer layers.  Mixed architectures: the formula as before.
+        // STRATA_SPLIT_COMPUTE_PROBE=0: off.
+        {
+            static const bool cprobe_on = [] {
+                const char* v = std::getenv("STRATA_SPLIT_COMPUTE_PROBE");
+                return v == nullptr || v[0] != '0';
+            }();
+            std::vector<double> per((size_t) ns, -1.0);
+            bool same_arch = true, all_ok = cprobe_on;
+            int cc0 = -1;
+            for (int i = 0; all_ok && i < ns; ++i) {
+                const int dev = i == 0 ? 0 : stages[(size_t) i - 1]->dev;
+                int ma = 0, mi = 0;
+                cudaDeviceGetAttribute(&ma, cudaDevAttrComputeCapabilityMajor, dev);
+                cudaDeviceGetAttribute(&mi, cudaDevAttrComputeCapabilityMinor, dev);
+                cudaGetLastError();
+                if (cc0 < 0) cc0 = ma * 10 + mi;
+                else if (cc0 != ma * 10 + mi) same_arch = false;
+                const double t = strata::prefill::compute_probe_ms(dev);
+                if (!(t > 0.0)) all_ok = false;
+                per[(size_t) i] = t / layer_ms[(size_t) i];   // ms per GEMM per unit of the rated per-layer cost
+            }
+            if (all_ok && same_arch) {
+                const double best = *std::min_element(per.begin(), per.end());
+                for (int i = 0; i < ns; ++i) {
+                    const int dev = i == 0 ? 0 : stages[(size_t) i - 1]->dev;
+                    const double x = per[(size_t) i] / best;
+                    if (x >= 1.15) layer_ms[(size_t) i] *= x;
+                    std::fprintf(stderr, "strata generate: layer split auto: CUDA%d compute probe %.2f ms per GEMM -> "
+                                         "x%.2f of the fastest per rated clock%s\n", dev, per[(size_t) i] * layer_ms[(size_t) i] /
+                                         (x >= 1.15 ? x : 1.0), x,
+                                 x >= 1.15 ? " (held below its rated clock: a power or clock limit?) - its layers cost more"
+                                           : "");
+                }
+            }
+        }
         // The per-stage link, measured here (the stage-setup probes are skipped when --pcie-frac is given, and the
         // search needs the reading either way).
         std::vector<double> link_gbps((size_t) ns, -1.0);
