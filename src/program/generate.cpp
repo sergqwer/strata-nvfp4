@@ -5405,9 +5405,9 @@ int main(int argc, char** argv) {
                              "(the second verifier%s)\n", o.pipeline_windows, (long long) (pipe_only >> 20),
                      o.pipeline_windows >= 2 ? ", the GDN snapshots" : "");
     // batch-vram: --batch slots capture a graph pair per layout of active slots (15-30 MiB each); a 24 GB 4090 with
-    // parallel 4 was left ~130 MiB and failed a capture.  64 MiB a slot stays free for them beside the reserve (not with
+    // parallel 4 was left ~130 MiB and failed a capture.  128 MiB a slot stays free for them beside the reserve (not with
     // a reserve given on the command line: that one is the user's).
-    const int64_t batch_graphs = o.batch > 0 && !o.vram_reserve_given ? (int64_t) o.batch * (64ll << 20) : 0;
+    const int64_t batch_graphs = o.batch > 0 && !o.vram_reserve_given ? (int64_t) o.batch * (128ll << 20) : 0;
     if (batch_graphs > 0)
         std::fprintf(stderr, "strata generate: --batch %d: %lld MiB of CUDA0 kept out of the expert cache (the slots' "
                              "window graphs)\n", o.batch, (long long) (batch_graphs >> 20));
