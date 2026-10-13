@@ -745,6 +745,38 @@ class PageFile(unittest.TestCase):
         self.assertNotIn("page file is too small", out)
 
 
+class Wsl(unittest.TestCase):
+    """#7: under WSL2 the driver page-locks only about 1 GB of RAM - a framed warning in --check and the install,
+    repeated at the end; a warning, never a stop."""
+
+    def test_the_message(self):
+        with mock.patch.object(setup, "is_wsl", lambda: False):
+            self.assertIsNone(setup.wsl_warning())
+        with mock.patch.object(setup, "is_wsl", lambda: True):
+            long, short = setup.wsl_warning()
+        for words in ("WSL2 is not suitable for this fork", "page-locks only about 1 GB", "known limitation",
+                      "PCIe reads of missed experts", "KV streaming", "layer split", "runs slower",
+                      "two-GPU layer split does not start", "issues/7", "START-HERE.bat", "native Linux"):
+            self.assertIn(words, " ".join(long.split()))
+        self.assertIn("WSL2 is not suitable for this fork", short)
+
+    def test_check_and_install_say_it_framed_and_again_at_the_end(self):
+        found = [card(0, "NVIDIA GeForce RTX 5090", 31.8, "120")]
+        wsl = [mock.patch.object(setup, "is_wsl", lambda: True)]
+        code, out, _, _ = run(127.2, found, ["--check"], extra=wsl)
+        self.assertEqual(code, 0, out[-3000:])                               # a warning, never a stop
+        self.assertIn("[!]  WARNING: WSL2 is not suitable for this fork. Under WSL2", out)
+        self.assertIn("WARNING: WSL2 is not suitable for this fork (the driver", out[out.index("This PC can run Strata"):])
+        for argv in (["--family", "qwen-nvfp4-gptq", "--no-start"], ["--family", "qwen-nvfp4-gptq", "--dry-run"]):
+            with self.subTest(argv):
+                code, out, _, _ = run(127.2, found, argv, extra=wsl)
+                self.assertEqual(code, 0, out[-3000:])
+                self.assertEqual(out.count("WSL2 is not suitable for this fork. Under WSL2"), 1)
+                self.assertIn("WARNING: WSL2 is not suitable for this fork (the driver", out[-1500:])
+        code, out, _, _ = run(127.2, found, ["--check"])
+        self.assertNotIn("WSL2", out)
+
+
 class Withdrawn(unittest.TestCase):
     """0.1.41-nvfp4.3: huihui-nvfp4 is not offered any more (it loops in long thinking); an install of it keeps working,
     every run says so once and names the replacement (qwen-nvfp4-gptq --uncensored on), and nothing of it is

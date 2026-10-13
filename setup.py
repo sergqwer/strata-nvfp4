@@ -506,6 +506,7 @@ def ram_gb():
 
 
 PAGE_FILE_SHORT = None        # this fork: page_file_warning()'s summary line once the PC was checked (--check, the install)
+WSL_SHORT = None              # this fork: wsl_warning()'s summary line, likewise
 PAGE_FILE_WARN_MB = 60000     # this fork: the engine's kPageFileWarnMb (memory.hpp): below it in all, both warn
 _MM_KEY = r"SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management"
 
@@ -672,6 +673,28 @@ def page_file_warning():
              f"INCREASE it to {PAGE_FILE_FIXED_MB} MB, a fixed size, or the model can run significantly slower or not "
              "start (see above)")
     return long, short
+
+
+def wsl_warning():
+    """This fork: (the framed warning, its one-line summary) under WSL2, else None.  A warning, never a stop (#7)."""
+    if not is_wsl():
+        return None
+    long = ("WARNING: WSL2 is not suitable for this fork. Under WSL2 the NVIDIA driver page-locks only about 1 GB of "
+            "RAM (NVIDIA's CUDA on WSL known limitation: pinned system memory is limited), so the experts' RAM copy, "
+            "the GPU's PCIe reads of missed experts, KV streaming and a layer split's hand-offs cannot be pinned: the "
+            "model runs slower and a two-GPU layer split does not start "
+            "(https://github.com/sergqwer/strata-nvfp4/issues/7). Run the Windows release natively (START-HERE.bat "
+            "in Windows itself) or native Linux.")
+    short = ("WARNING: WSL2 is not suitable for this fork (the driver page-locks only about 1 GB of RAM: slower, no "
+             "two-GPU layer split, issue #7): run START-HERE.bat in Windows itself or native Linux (see above)")
+    return long, short
+
+
+def repeat_warnings():
+    """This fork: step 1's framed warnings, one line each, repeated in a summary."""
+    for short in (PAGE_FILE_SHORT, WSL_SHORT):
+        if short:
+            say(f"  [!]  {short}")
 
 
 def alert(msg):
@@ -5909,8 +5932,7 @@ def nvfp4_install(a, family: str, gpu: dict, multi: list, cuda_tk: int, ram: flo
                 line = []
             line.append(x)
         say("           " + " ".join(line))
-        if PAGE_FILE_SHORT:
-            say(f"  [!]  {PAGE_FILE_SHORT}")
+        repeat_warnings()
         return 0
     if free_gb(models_dir) < need:
         fail(f"not enough free disk space in {models_dir}: need ~{need:.0f} GB", "use --models-dir on a bigger drive")
@@ -6003,8 +6025,7 @@ def nvfp4_install(a, family: str, gpu: dict, multi: list, cuda_tk: int, ram: flo
     say(f"  Next time:        just run {'START-HERE.bat' if WIN else './setup.sh'} (or {script.name}) - it starts right away")
     if uncensored:                                     # (the withdrawn fine-tunes' "it does not refuse" line: gone)
         say("  Censorship is off by default (--uncensored on): what the model writes is on whoever runs it.")
-    if PAGE_FILE_SHORT:                                # step 1's framed warning, repeated
-        say(f"  [!]  {PAGE_FILE_SHORT}")
+    repeat_warnings()                                # step 1's framed warnings, repeated
     if a.no_start:
         return 0
     return start(cfg_path, port)
@@ -6409,6 +6430,11 @@ def main() -> int:
     PAGE_FILE_SHORT = pfw[1] if pfw else None
     if pfw and not (pf is not None and pf < 4):        # below 4 GB upstream's line above says it
         alert(pfw[0])
+    global WSL_SHORT
+    wslw = wsl_warning()                               # this fork (#7): framed here, repeated in the summary
+    WSL_SHORT = wslw[1] if wslw else None
+    if wslw:
+        alert(wslw[0])
     ok(f"CPU: {cpu} ({'AVX-512' if avx512 else 'AVX2' if avx2 else 'no AVX2'})")
     link = None if hip else pcie_link(int(gpu.get("index", 0)))
     if link is not None:
@@ -6459,12 +6485,10 @@ def main() -> int:
             # reports: --model NAME --yes still installs one anyway.
             say(f"\nThis PC cannot run Strata yet: no model size fits {ram:.0f} GB of RAM (the smallest needs about "
                 f"{need} GB). --model NAME --yes installs one anyway, slowly.")
-            if PAGE_FILE_SHORT:
-                say(f"  [!]  {PAGE_FILE_SHORT}")
+            repeat_warnings()
             return 1
         say("\nThis PC can run Strata. Run it again without --check to install.")
-        if PAGE_FILE_SHORT:
-            say(f"  [!]  {PAGE_FILE_SHORT}")
+        repeat_warnings()
         return 0
 
     # ---- 2. the questions
@@ -7146,8 +7170,7 @@ def main() -> int:
     if tuned is False:                                 # #447: a failed tuning is repeated here, not only above
         say("  Tuning:           FAILED (the reason is above): the default settings stay - "
             f"{'START-HERE.bat' if WIN else './setup.sh'} --calibrate tries again")
-    if PAGE_FILE_SHORT:                                # step 1's framed warning, repeated
-        say(f"  [!]  {PAGE_FILE_SHORT}")
+    repeat_warnings()                                # step 1's framed warnings, repeated
     if a.no_start:
         return 0
     # offered only when someone answers (--yes asks nothing), default no; the benchmark starts its own server and stops it
