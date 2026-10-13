@@ -435,11 +435,30 @@ int main() {
         tier.put(image(800, 35));   // a spilled copy with the same keys: the older one goes when it is written
         tier.wait_idle();
         check(!tier.has(b) && tier.size() == 2 && tier.stats().superseded == 2, "sup: the writer supersedes too");
+        // the same conversation carried on whose own chain has rotated the old deepest checkpoint out still
+        // supersedes it (its live tokens start with that checkpoint)
+        {
+            uint64_t x = 0, y = 0;
+            check(tier.write_now(image(500, 60, 20000), nullptr, {}, x, e), "sup: X (checkpoints 250, 125)");
+            SavedConversation later = image(900, 61, 20000);   // live 900 from the same tokens
+            later.checkpoints.clear();
+            later.checkpoints.push_back(checkpoint(800, 62, 20000));
+            later.checkpoints.push_back(checkpoint(700, 63, 20000));
+            check(tier.write_now(later, nullptr, {}, y, e) && !tier.has(x) && tier.has(y),
+                  "sup: a rotated-out deepest checkpoint inside the newer live state: superseded");
+            SavedConversation sib = image(500, 64, 20000);       // a sibling: the same first 125 tokens, then its own
+            for (size_t i = 125; i < sib.live.ids.size(); ++i) sib.live.ids[i] = 90000 + int32_t(i);
+            sib.checkpoints.clear();
+            sib.checkpoints.push_back(checkpoint(125, 65, 20000));
+            uint64_t z = 0;
+            check(tier.write_now(sib, nullptr, {}, z, e) && tier.has(y) && tier.has(z),
+                  "sup: a sibling that shares only the root keeps the other conversation");
+        }
         // a different branch of the conversation that does not hold the deepest checkpoint stays beside it
         SavedConversation branch = image(300, 37);
         branch.checkpoints.resize(1);
         branch.checkpoints[0] = checkpoint(150, 38);
-        check(tier.write_now(branch, nullptr, {}, d, e) && tier.size() == 3, "sup: another branch is kept");
+        check(tier.write_now(branch, nullptr, {}, d, e) && tier.size() == 5, "sup: another branch is kept");
     }
 
     {   // set_busy: the writer starts no job while the engine runs a request; wait_idle gets it written anyway
