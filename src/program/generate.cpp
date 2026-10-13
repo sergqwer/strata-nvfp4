@@ -11678,10 +11678,12 @@ int main(int argc, char** argv) {
             // equal chunks of at least STRATA_SPLIT_PF_MIN tokens (default 2048), so its stages overlap on different
             // chunks instead of running one after the other on one big chunk (split_rules::pipeline_chunk).  Unset or
             // one GPU: the chunk as before.
-            static const int64_t pf_pipe_k = [] {
+            // extras/mgpu-fixes: ON by default on a layer split (unset = 2 chunks per stage); 0 or 1 = off.
+            static const int64_t pf_pipe_env = [] {
                 const char* v = std::getenv("STRATA_SPLIT_PF_CHUNKS");
-                return v != nullptr ? (int64_t) std::max(0, std::atoi(v)) : (int64_t) 0;
+                return v != nullptr ? (int64_t) std::max(0, std::atoi(v)) : (int64_t) -1;
             }();
+            const int64_t pf_pipe_k = pf_pipe_env >= 0 ? pf_pipe_env : (int64_t) (2 * pf_parts.size());
             static const int64_t pf_pipe_min = [] {
                 const char* v = std::getenv("STRATA_SPLIT_PF_MIN");
                 return v != nullptr ? (int64_t) std::max(256, std::atoi(v)) : (int64_t) 2048;
@@ -11699,9 +11701,9 @@ int main(int argc, char** argv) {
                                                                                              pf_pipe_k, pf_pipe_min)
                                                : o.prefill_chunk;
                 if (pipe_chunk != o.prefill_chunk)
-                    std::fprintf(stderr, "strata serve: STRATA_SPLIT_PF_CHUNKS=%lld: %lld prompt tokens in chunks of %lld "
-                                         "(not %lld), the stages overlap\n", (long long) pf_pipe_k, (long long) tokens,
-                                 (long long) pipe_chunk, (long long) o.prefill_chunk);
+                    std::fprintf(stderr, "strata serve: layer split: %lld prompt tokens in chunks of %lld (not %lld) so "
+                                         "the stages overlap (STRATA_SPLIT_PF_CHUNKS=%lld)\n", (long long) tokens,
+                                 (long long) pipe_chunk, (long long) o.prefill_chunk, (long long) pf_pipe_k);
                 const int64_t want_full = equal_chunk(tokens, pipe_chunk);
                 // #340: a short enough request reads in the stages' own S-token chunks (nothing lent)
                 const int64_t want = split_small > 0 && tokens <= split_small_max ? std::min(want_full, split_small)
