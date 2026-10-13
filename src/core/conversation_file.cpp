@@ -552,6 +552,9 @@ public:
     // last block padded to the alignment for direct I/O, then the file cut back to its exact size and flushed
     bool finish(bool durable) {
         if (!f_.is_open()) return false;
+        if (!fault_ && cancel && *cancel && (*cancel)()) {
+            fault_ = true; cancelled_ = true; fault_kind_ = SessionError::io; fault_msg_ = "cancelled";
+        }
         if (fault_) { f_.close(); return false; }
         const size_t padded = f_.direct() ? (used_ + kAlign - 1) / kAlign * kAlign : used_;
         std::memset(buf_.get() + used_, 0, padded - used_);
@@ -568,10 +571,16 @@ public:
     SessionPhase phase;
     uint64_t expected = 0;
     int write_fault = 0, flush_fault = 0;   // tests: errno values injected at the first block write / the file flush
+    const std::function<bool()>* cancel = nullptr;   // SessionWriteOptions::cancel, asked before each block
+    bool cancelled() const { return cancelled_; }
 private:
     void fail_with(int e) { fault_ = true; fault_kind_ = errno_kind(e); fault_msg_ = std::strerror(e); }
     bool drain() {
         if (write_fault) { fail_with(write_fault); return false; }
+        if (cancel && *cancel && (*cancel)()) {
+            fault_ = true; cancelled_ = true; fault_kind_ = SessionError::io; fault_msg_ = "cancelled";
+            return false;
+        }
         if (!f_.write_all(buf_.get(), used_)) return false;
         used_ = 0;
         if (progress) (*progress)(total_, expected);
@@ -579,7 +588,7 @@ private:
     }
     Aligned buf_;
     RawFile& f_;
-    bool fault_ = false;
+    bool fault_ = false, cancelled_ = false;
     SessionError fault_kind_ = SessionError::io;
     std::string fault_msg_;
     size_t used_ = 0;
@@ -1068,6 +1077,7 @@ bool write_impl(const std::string& path, const SavedConversation& image, const s
     const std::function<int(const char*)>* fault = opt.fault ? &opt.fault : nullptr;
     f.write_fault = injected(fault, "write");
     f.flush_fault = injected(fault, "file_flush");
+    if (opt.cancel) f.cancel = &opt.cancel;
     uint8_t h[kHeader];
     header_bytes(h, id, payload);
     bool ok = f.write(h, kHeader);

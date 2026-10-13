@@ -11,6 +11,7 @@
 #include <future>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -334,6 +335,24 @@ int main() {
             ConversationDiskTier tier(persistent(3));
             check(tier.open(e) && tier.size() == 0 && tier_files(dir) == 0, "persist: a damaged index is refused");
         }
+        {   // strata-nvfp4: the index's hash - one byte changed, the size kept (the image byte count), is refused too
+            ConversationDiskTier tier(persistent(5));
+            check(tier.open(e) && tier.put(image(300, 25)), "persist: put for a flipped byte");
+        }
+        for (const auto& f : fs::directory_iterator(dir))
+            if (f.path().extension() == ".idx") {
+                std::fstream x(f.path(), std::ios::in | std::ios::out | std::ios::binary);
+                char ch = 0;
+                x.seekg(36);
+                x.read(&ch, 1);
+                ch = char(ch ^ 0x20);
+                x.seekp(36);
+                x.write(&ch, 1);
+            }
+        {
+            ConversationDiskTier tier(persistent(5));
+            check(tier.open(e) && tier.size() == 0 && tier_files(dir) == 0, "persist: a flipped index byte is refused");
+        }
         {
             ConversationDiskTier tier(persistent(4));
             check(tier.open(e) && tier.put(image(400, 23)) && tier.put(image(400, 24, 6000)),
@@ -355,6 +374,110 @@ int main() {
                   "persist: a's image under b's index is refused, never restored as b");
             check(tier.best(prompt_of(450), {}, false).tokens == 400, "persist: a is still there");
         }
+    }
+
+    // ---- strata-nvfp4 (extras/dialog-park) ----
+    {   // take(keep): the entry and its files stay on the disk, as the most recently used
+        ConversationDiskTier tier(opts(dir, 40ull << 20, 1800));   // two ~17 MiB images, not three
+        check(tier.open(e) && tier.put(image(400, 30)) && tier.put(image(400, 31, 6000)), "keep: put a, b");
+        tier.wait_idle();
+        check(tier.size() == 2, "keep: a and b on the disk");
+        const auto a = tier.best(prompt_of(450), {}, false);
+        SavedConversation back;
+        check(tier.take(a.id, a.tokens, back, e, {}, true) && same(back, image(400, 30)), "keep: a read back exactly");
+        check(tier.size() == 2 && tier_files(dir) == 2 && tier.stats().kept == 1 && tier.has(a.id),
+              "keep: a stays, with its file");
+        check(tier.best(prompt_of(450), {}, false).tokens == 400, "keep: a still matches");
+        check(tier.put(image(400, 39, 8000)), "keep: put c");
+        tier.wait_idle();
+        check(tier.has(a.id) && tier.best(prompt_of(450, 6000), {}, false).tokens == 0 &&
+              tier.best(prompt_of(450, 8000), {}, false).tokens == 400,
+              "keep: the budget took b (least recently used), not a (just read)");
+    }
+    check(tier_files(dir) == 0, "keep: the files go when the tier ends");
+
+    {   // write_now: on the caller's thread, at once; the same keys are not written twice; a cancel leaves nothing
+        ConversationDiskTier tier(opts(dir, GiB, 1800));
+        check(tier.open(e), "now: open");
+        uint64_t id = 0, id2 = 0;
+        bool cancelled = false;
+        check(tier.write_now(image(400, 32), nullptr, {}, id, e, &cancelled) && id != 0 && !cancelled, "now: written");
+        check(tier.size() == 1 && tier_files(dir) == 1 && tier.has(id) && !tier.pending(), "now: on the disk at once");
+        check(logged("saved 400 tokens while idle"), "now: logged");
+        check(tier.write_now(image(400, 32), nullptr, {}, id2, e) && id2 == id && tier.size() == 1 &&
+              tier.stats().synced == 1, "now: an entry with the same keys is not written again");
+        int asked = 0;
+        check(!tier.write_now(image(400, 33, 7000), nullptr, [&] { return ++asked > 1; }, id2, e, &cancelled) &&
+              cancelled && e == "cancelled", "now: given up at its second block");
+        check(tier.size() == 1 && tier_files(dir) == 1 && tier.stats().sync_cancelled == 1,
+              "now: a cancelled write leaves no file and no entry");
+        const auto m = tier.best(prompt_of(450), {}, false);
+        SavedConversation back;
+        check(m.id == id && tier.take(m.id, m.tokens, back, e) && same(back, image(400, 32)), "now: read back exactly");
+        uint64_t sid = 0;
+        check(tier.write_now(split_image(300, 41), nullptr, {}, sid, e) && tier_files(dir) == 2,
+              "now: a layer split's image, one file per stage");
+        const auto ms = tier.best(prompt_of(350), {}, false);
+        check(ms.id == sid && tier.take(ms.id, ms.tokens, back, e) && same(back, split_image(300, 41)),
+              "now: the split image read back exactly");
+    }
+
+    {   // supersede: a newer copy of the same conversation removes the older one, after it is written
+        ConversationDiskTier tier(opts(dir, GiB, 1800));
+        check(tier.open(e), "sup: open");
+        uint64_t a = 0, b = 0, c = 0, d = 0;
+        check(tier.write_now(image(400, 34), nullptr, {}, a, e), "sup: a turn (checkpoints 200, 100)");
+        check(tier.write_now(image(400, 36, 9000), nullptr, {}, c, e), "sup: another conversation");
+        check(tier.write_now(image(800, 35), nullptr, {}, b, e), "sup: the same conversation later (400, 200)");
+        check(!tier.has(a) && tier.has(b) && tier.has(c) && tier.size() == 2 && tier_files(dir) == 2 &&
+              tier.stats().superseded == 1, "sup: the older copy went, the other conversation stayed");
+        check(tier.best(prompt_of(450), {}, false).tokens == 400, "sup: the newer copy serves the older prompt");
+        tier.put(image(800, 35));   // a spilled copy with the same keys: the older one goes when it is written
+        tier.wait_idle();
+        check(!tier.has(b) && tier.size() == 2 && tier.stats().superseded == 2, "sup: the writer supersedes too");
+        // a different branch of the conversation that does not hold the deepest checkpoint stays beside it
+        SavedConversation branch = image(300, 37);
+        branch.checkpoints.resize(1);
+        branch.checkpoints[0] = checkpoint(150, 38);
+        check(tier.write_now(branch, nullptr, {}, d, e) && tier.size() == 3, "sup: another branch is kept");
+    }
+
+    {   // set_busy: the writer starts no job while the engine runs a request; wait_idle gets it written anyway
+        ConversationDiskTier tier(opts(dir, GiB, 1800));
+        check(tier.open(e), "busy: open");
+        tier.set_busy(true);
+        check(tier.put(image(400, 42)), "busy: queued");
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        check(tier.pending() && tier.size() == 0, "busy: not written while busy");
+        tier.set_busy(false);
+        for (int i = 0; i < 250 && tier.size() == 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        check(tier.size() == 1, "busy: written once idle");
+        tier.set_busy(true);
+        check(tier.put(image(400, 43, 7000)), "busy: queued again");
+        tier.wait_idle();
+        check(tier.size() == 2 && !tier.pending(), "busy: wait_idle has it written although busy");
+        tier.set_busy(false);
+    }
+
+    {   // the RAM cache's disk_id: an eviction of an image already on the disk writes nothing
+        ConversationDiskTier tier(opts(dir, GiB, 1800));
+        check(tier.open(e), "mark: open");
+        ConversationCache cache(GiB, 1);
+        size_t put_calls = 0;
+        cache.set_on_evict([&](SavedConversation&& s) {
+            if (s.disk_id != 0 && tier.has(s.disk_id)) return;
+            ++put_calls;
+            tier.put(std::move(s));
+        });
+        check(cache.put(image(400, 44)), "mark: park a");
+        uint64_t id = 0;
+        check(tier.write_now(cache.at(0), nullptr, {}, id, e), "mark: a written while idle");
+        cache.set_disk_id(cache.serial_at(0), id);
+        check(cache.at(0).disk_id == id, "mark: a marked");
+        check(cache.put(image(400, 45, 8000)), "mark: park b: a leaves RAM");
+        tier.wait_idle();
+        check(put_calls == 0 && tier.size() == 1 && tier.stats().queued == 0, "mark: a was not written again");
+        check(tier.best(prompt_of(450), {}, false).tokens == 400, "mark: a still on the disk");
     }
 
     fs::remove_all(dir);

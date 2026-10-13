@@ -151,6 +151,10 @@ struct SessionWriteOptions {
     SessionPhase phase;
     // tests: return an errno value to make a step fail ("write", "file_flush", "rename", "dir_flush"), 0 to go on
     std::function<int(const char* step)> fault;
+    // asked before every block the writer hands to the OS (at most 16 MiB apart): true gives the write up, the
+    // temporary file is removed and nothing is published (error "cancelled").  The disk tier's idle writes use it to
+    // make way for a request (conversation_disk.hpp).
+    std::function<bool()> cancel;
 };
 
 // Writes a temporary file beside `path` (a unique hidden name, created exclusively: never an existing file or link;
