@@ -374,6 +374,39 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### Several dialogs at once (2026-10-13, branch extras/parallel-dialogs)
+
+- **Dialogs that take turns re-read each other.** Without `--conversation-cache-mib` (the tray never passed it; the
+  default is 0) the engine holds one conversation, and its checkpoints are points of the live session's chain: another
+  conversation overwrites their K/V, so only the shared system prompt's root checkpoint survives a switch. Measured
+  switch cost (two dialogs on a 3K shared system prompt, through the server): 1.1-1.2 s at 8K, 3.2-3.5 s at 32K,
+  10.7-11.1 s at 100K; with `--conversation-cache-mib 16384 --conversation-cache-slots 8` 0.18-0.30 s, 0.21-0.38 s and
+  0.35-0.62 s, for 0.5-0.6 / 0.8-1.1 / 2.1-2.3 GB of RAM per parked conversation (park 50-250 ms, restore 20-110 ms).
+- **Claude Code's pattern needs #1164.** A main session and subagents on one system prompt with a short side call on
+  another one in between: upstream's cache took a parked subagent's conversation for the shared root and overwrote it,
+  so the subagent's next turn read 29K again (3.35 s); with the borrow 0.23 s.
+- **Requests at the same time are queued, and that works.** No errors, crashes or mixed-up answers in any run (exact
+  settings: each dialog's text equal to its solo run; default settings: each answer names its own document's codename).
+  What made `"parallel"` useless here was VRAM: four 262K slots took 14.6 GiB, the expert cache 4 GiB instead of 22.
+- **Changes** (none touches a single dialog without `--batch` or the cache):
+  - `--batch-max-context N` sizes the batch slots; a request longer than a slot runs alone on the solo path;
+  - with `--batch` the main session keeps the elastic K/V, and a request alone keeps PcieAuto and
+    `STRATA_ADAPT_FETCH=2` (off before: -12.6% decode for one dialog beside 64K slots);
+  - a batch window carries one control-vector setting (a dialog with `"uncensored": true` decoded with the other one's
+    setting while that one's prompt was read: its text left its solo run at char 37);
+  - from upstream PRs not merged yet: #1503 (s.anastasiou), #1163 and #1164 (BlueKingMuch), #1959
+    `--prompt-cache-spread` (xrip); from forks: `STRATA_PARK_REWIND_MAX` (Xiaomi2008 8e4ccbe9).
+- **Checks**: upstream's `batch_test.py` (4 slots at 32K and 2 at 262K), `batch_interleave_test.py` (8 cases) and
+  `parking_test.py` give tokens identical to the solo runs; through the server 2-4 dialogs at once, a client that
+  leaves, agents taking turns with and without the cache, a request longer than a slot: equal to the one-at-a-time
+  runs; `STRATA_ADAPT_FETCH_CHECKRES=1` under concurrent requests: no residency mismatch; CPU tests
+  `conversation_cache_test` (4771 checks) and `conv_cache_test` pass, the server's 753 tests too (12 skipped).
+- **One dialog's decode** (a ~650-token answer, fresh server per arm, rounds interleaved, median): the tray's config
+  175.8 tok/s, with the conversation cache 174.9 (-0.5%), `"parallel": 2` + 64K slots 158.6 (-9.8%), `"parallel": 4`
+  + 32K slots 161.3 (-8.2%); before PcieAuto and the fetch were kept with `--batch` -12.6% / -12.7%. The rest is the
+  slots' VRAM (7762 cache slots instead of 8530). So the cache is the recommended setting for one user with an agent
+  client, and `"parallel"` the choice when requests really overlap (docs/BATCHING.md, "This fork").
+
 ### Upstream 0.1.43.1 (2026-10-13, release 0.1.43.1-nvfp4.1)
 
 - **The port.** rel/0.1.42's first-parent chain since v0.1.42 holds 121 commits; 120 are carried (the 121st is the
