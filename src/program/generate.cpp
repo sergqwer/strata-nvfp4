@@ -7846,11 +7846,11 @@ int main(int argc, char** argv) {
         // neither fires, plain one-token-per-round decoding - slower, never wrong: the verify window still
         // confirms every emitted token against the real model regardless of where the draft came from.
         const bool use_mtp = !o.mtp.empty();
-        // --rope-scaling dynamic moves the cached keys of ONE session: its K/V in VRAM, no slots, no split (for now)
+        // --rope-scaling dynamic moves the cached keys of ONE session: int8/fp16 K/V (in VRAM or streamed), no slots,
+        // no split (for now)
         if (rope_dyn.on) {
             const char* rt = std::getenv("STRATA_ROPE_TABLE");
-            const char* why = o.kv_resident > 0 ? "--kv-resident (a streamed K/V)"
-                            : (o.kv != "int8" && o.kv != "fp16") ? "--kv q4_0 / k8v4"
+            const char* why = (o.kv != "int8" && o.kv != "fp16") ? "--kv q4_0 / k8v4"
                             : o.batch > 0 ? "--batch"
                             : (multi_gpu || !stages.empty()) ? "a layer split"
                             : (rt != nullptr && rt[0] == '0') ? "STRATA_ROPE_TABLE=0" : nullptr;
@@ -8845,6 +8845,8 @@ int main(int argc, char** argv) {
                     err = e;
                     return false;
                 }
+                if (use_mtp && draft_cells > 0 && cudaStreamSynchronize(main_stream) == cudaSuccess)
+                    mtp.kv_restore(draft_cells);   // a ring (--kv-resident): its window from the turned host copy
                 const double ratio = strata::kernels::rope_rates(64, b).mscale / strata::kernels::rope_rates(64, a).mscale;
                 if (ratio != 1.0)
                     for (ConvCheckpoint& c : checks)
