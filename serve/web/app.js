@@ -778,17 +778,18 @@ async function loadConfig() {
   cfgKeys = c.keys || [];
   $("cfg-file").textContent = c.file || "";
   $("cfg-form").innerHTML = cfgKeys.map((k, i) => {
-    const id = `cfg-${i}`, v = k.value;
+    const id = `cfg-${i}`, v = k.value, dis = k.available === false ? " disabled" : "", def = esc(k.default || "default");
     let input;
-    if (k.kind === "bool" || k.kind === "enum") {
-      const opts = k.kind === "bool" ? [["true", "on"], ["false", "off"]] : k.choices.map((x) => [x, x]);
+    if (k.kind === "bool" || k.kind === "enum" || k.kind === "choice") {   // choice: [value, label] pairs
+      const opts = k.kind === "bool" ? [["true", "on"], ["false", "off"]]
+        : k.choices.map((x) => Array.isArray(x) ? [String(x[0]), String(x[1])] : [x, x]);
       const cur = v == null ? "" : String(v);
-      input = `<select class="st-input" id="${id}"${k.available === false ? " disabled" : ""}><option value=""${cur === "" ? " selected" : ""}>default</option>` +
+      input = `<select class="st-input" id="${id}"${dis}><option value=""${cur === "" ? " selected" : ""}>${def}</option>` +
         opts.map(([val, text]) => `<option value="${esc(val)}"${cur === val ? " selected" : ""}>${esc(text)}</option>`).join("") + `</select>`;
     } else {
       const text = v == null ? "" : Array.isArray(v) ? v.join(", ") : String(v);
       input = `<input class="st-input" id="${id}" ${k.kind === "number" ? 'type="number" step="any" min="0"' : 'type="text"'} ` +
-        `value="${esc(text)}" placeholder="default" autocomplete="off">`;
+        `value="${esc(text)}" placeholder="${def}" autocomplete="off"${dis}>`;
     }
     return (k.section ? `<h3 class="cfg-section">${esc(k.section)}</h3>` : "") +
       `<label for="${id}" title="${esc(k.help)}">${esc(k.help)}<code>${esc(k.key)}</code></label>${input}`;
@@ -800,6 +801,7 @@ function configValue(k, el) {
   if (s === "") return null;
   if (k.kind === "bool") return s === "true";
   if (k.kind === "number") return Number(s);
+  if (k.kind === "choice") { const c = k.choices.find((x) => String(x[0]) === s); return c ? c[0] : s; }
   return s;                                         // enum, or names (the server splits them at commas)
 }
 $("cfg-save").addEventListener("click", async () => {
