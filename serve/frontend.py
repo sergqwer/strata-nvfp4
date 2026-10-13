@@ -940,6 +940,52 @@ def forced_call(tool_choice, tools: list[dict] | None) -> str | None:
 PARAM_START = "<parameter="
 
 
+def value_open(body: str) -> bool:
+    """A call body in the template's form (`<function=NAME>` and its parameters) ends inside a parameter's value: an
+    opened `<parameter=NAME>` whose `</parameter>` has not come (param_end's walk, as call_end's)."""
+    s = body.lstrip()
+    pos = len(body) - len(s)
+    if not s.startswith(FUNC_START):
+        return False
+    gt = body.find(">", pos)
+    if gt < 0:
+        return False
+    pos = gt + 1
+    while True:
+        rest = body[pos:]
+        s = rest.lstrip()
+        pos += len(rest) - len(s)
+        if not s.startswith(PARAM_START):
+            return False
+        gt = body.find(">", pos)
+        if gt < 0:
+            return False
+        end = param_end(body[gt + 1:])
+        if end == -1:
+            return True
+        if end < 0:                                  # a closer whose follower has not come: the value is written
+            return False
+        pos = gt + 1 + end + len(PARAM_END)
+
+
+# EOS literal: a typographic opening quotation mark always opens a quote; `"` and `'` open one at the start of a line or
+# after a space, a bracket, `=`, `:` or `,` (a closing one, or an apostrophe, follows a word)
+OPENING_QUOTES = "\u201c\u2018\u00ab\u201e\u300c\u300e"
+EXAMPLE_TURN = "in a turn of the chat format written out as an example"
+
+
+def opens_quote(line: str) -> bool:
+    """The text of the current line ends with a quotation mark that opens a quote."""
+    if not line:
+        return False
+    c = line[-1]
+    if c in OPENING_QUOTES:
+        return True
+    if c in "\"'":
+        return len(line) == 1 or line[-2] in " \t([{=:,"
+    return False
+
+
 def function_end(text: str) -> int:
     """Where a `<function=NAME>...</function>` at the start of `text` ends (just past `</function>`), walking its
     parameters with param_end like call_end does; -1: not complete (or not in the call format)."""
@@ -1429,6 +1475,45 @@ class OutputParser:
     def _in_code(self) -> bool:
         """The text so far leaves the next character inside a code fence, inline code or an indented code block."""
         return bool(self.fence) or (self.ticks + self.line.count("`")) % 2 == 1 or self._in_indented_block()
+
+    def _place(self) -> tuple[bool, str]:
+        """(inside a code block, the current line) for the text so far - what went out and what is held."""
+        snap = (self.fence, self.line, self.ticks)
+        self._track(self.buf)
+        line = self.line
+        fenced = bool(self.fence) and line.lstrip()[:3] not in ("```", "~~~")   # a fence's own line is not inside it
+        self.fence, self.line, self.ticks = snap
+        return fenced, line
+
+    def example_place(self) -> bool:
+        """EOS literal: a turn of the chat format written here is an example of it - in the thinking (no turn starts
+        there) or in a code block."""
+        if self.state == "reasoning":
+            return not self.pending
+        return self.state == "content" and self._place()[0]
+
+    def literal_context(self, example: bool = False) -> str | None:
+        """EOS literal: where the text so far leaves the next character, when no turn ends there - inside a tool call's
+        parameter value, right after the backtick that opens inline code or after an opening quotation mark, right
+        after a space or tab (the chat template trims every message, so the model never saw an end of turn after
+        whitespace), or (`example`: an <|im_start|> the model wrote at an example_place is open) inside that example.
+        An end-of-turn token written there is the model writing that token's text.  -> what the place is (for the
+        log), or None."""
+        if self.state in ("call", "rcall"):
+            body = self.buf[len(CALL_START):] if self.state == "rcall" else self.buf
+            return "in a tool call's argument" if value_open(body) else None
+        if self.state not in ("content", "reasoning") or self.pending:
+            return None
+        fenced, line = self._place()
+        if example and (fenced or self.state == "reasoning"):
+            return EXAMPLE_TURN
+        if line.lstrip()[:3] not in ("```", "~~~") and line.endswith("`") and line.count("`") % 2 == 1:
+            return "after the backtick that opens inline code"
+        if opens_quote(line):
+            return "after an opening quotation mark"
+        if line.endswith((" ", "\t")):
+            return "after a space"
+        return None
 
     def _quoted_think_end(self, i: int) -> bool | None:
         """#537: the `</think>` at self.buf[i] is the model quoting the tag while it thinks, not the end of the
