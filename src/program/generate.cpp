@@ -5201,6 +5201,28 @@ int main(int argc, char** argv) {
         }
         srcp = &src;
     } else {
+        // extras/mgpu-fixes (PCIE_ASYM D7): a capped pin (several GPUs under WDDM: 8 GiB; STRATA_ARENA_PIN_GIB) used to
+        // take the layers from 0 up - on a 2-GPU NVFP4 split ~6 layers of CUDA0 and none of the later stages, whose
+        // PCIe share then acts nowhere and whose prompt streams all go through the host staging copies.  The stages
+        // now take the cap's layers in turn (each from its first layer up).  STRATA_ARENA_PIN_SPREAD=0: from layer 0.
+        if (multi_gpu && !arena_async && !split_at.empty()) {
+            static const bool spread_ok = [] {
+                const char* v = std::getenv("STRATA_ARENA_PIN_SPREAD");
+                return v == nullptr || v[0] != '0';
+            }();
+            if (spread_ok) {
+                std::vector<int64_t> lo, hi;
+                for (size_t st = 0; st <= split_at.size(); ++st) {
+                    lo.push_back(st == 0 ? 0 : split_at[st - 1]);
+                    hi.push_back(st < split_at.size() ? split_at[st] : g.n_layers);
+                }
+                std::vector<int> order;
+                for (int64_t k = 0; (int64_t) order.size() < g.n_layers && k < g.n_layers; ++k)
+                    for (size_t st = 0; st < lo.size(); ++st)
+                        if (lo[st] + k < hi[st]) order.push_back((int) (lo[st] + k));
+                strata::core::set_arena_pin_order(order);
+            }
+        }
         if (arena_async) {   // #285: opened on its own thread since the dense weights started loading
             arena_thread.join();
             if (!arena_ok) {
