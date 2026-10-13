@@ -9935,6 +9935,7 @@ int main(int argc, char** argv) {
         double share = total ? (double) pinned / (double) total : 1.0;
         if (const char* t = std::getenv("STRATA_TEST_PINNED_SHARE")) share = std::atof(t);   // tests: the Windows-like ring rule
         strata::prefill::Prefill::set_pinned_share(share);
+        strata::prefill::Prefill::set_resident_stage(srcp == &arena_src);   // extras/wddm-pin: unpinned = resident RAM
     }
     // bytes -> slots for CUDA0's cache: exact when it knows its per-slot offsets (a native pack's blobs differ
     // per layer), otherwise max_blob each.
