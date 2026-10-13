@@ -31,7 +31,8 @@ struct RopeDynamic {
 };
 
 /// Cells [0, cells) of a QSA state from `from` to `to`: K (int8 or fp16, with or without H) and, with `index`, the
-/// indexer's pooled rows, its spare row and `dead`.  Mode-0 states only (the K/V in VRAM).  Asynchronous on `stream`.
+/// indexer's pooled rows, its spare row and `dead`.  A streamed layer (--kv-resident) turns its host copy and drops
+/// its VRAM slots; a ring (the drafter's) turns its host copy and the caller refills it.  Asynchronous on `stream`.
 bool rope_rerotate_state(const QsaState& st, int64_t cells, bool index, const strata::kernels::RopeScaling& from,
                          const strata::kernels::RopeScaling& to, void* stream, std::string& error);
 

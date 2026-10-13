@@ -1,6 +1,7 @@
 // src/core/rope_dynamic.cpp - see include/strata/core/rope_dynamic.hpp.
 #include "strata/core/rope_dynamic.hpp"
 
+#include "strata/kernels/kv_stream.hpp"
 #include "strata/kernels/mrope.hpp"
 #include "strata/kernels/qsa.hpp"
 #include "strata/kernels/rope_dynamic.hpp"
@@ -36,20 +37,26 @@ bool rope_rerotate_state(const QsaState& st, int64_t cells, bool index, const st
                          const strata::kernels::RopeScaling& to, void* stream, std::string& error) {
     using namespace strata::kernels;
     if (cells <= 0) return true;
-    if (st.kv_mode != 0) { error = "dynamic rope: a streamed or ring K/V (--kv-resident) is not supported"; return false; }
+    if (st.kv_mode != 0 && !st.host.present()) { error = "dynamic rope: a streamed K/V without its host copy"; return false; }
     if (st.kv_q4 || st.kv_hybrid) { error = "dynamic rope: --kv q4_0 / k8v4 is not supported"; return false; }
     if (cells > st.max_cells) { error = "dynamic rope: more cells than the state holds"; return false; }
     const QsaShapes s = qsa_real_shapes();
     const RopeRates a = rope_rates((int) s.n_rot, from), b = rope_rates((int) s.n_rot, to);
     RopeKPool k;
-    if (st.kv_int8) { k.k_q = st.k_q; k.k_scale = st.k_scale; }
-    else k.k_pool = st.k_pool;
-    k.page_table = st.page_table;
+    if (st.kv_mode != 0) {   // streamed or a ring: the host copy is the K/V (identity layout); the slots are refetched
+        if (st.kv_int8) { k.k_q = st.host.k_q; k.k_scale = st.host.k_scale; }
+        else k.k_pool = st.host.k_pool;
+    } else {
+        if (st.kv_int8) { k.k_q = st.k_q; k.k_scale = st.k_scale; }
+        else k.k_pool = st.k_pool;
+        k.page_table = st.page_table;
+    }
     k.n_kv_heads = (int) s.n_head_kv;
     k.page_size = (int) s.page_size;
     k.head_dim = (int) s.head_dim;
     k.hadamard = st.kv_rot;
     rope_rerotate_k(k, cells, a, b, stream);
+    if (st.kv_mode == 1) kv_stream_reset(st.map, stream);   // every slot fetched again from the rotated host copy
     if (index && st.idx_pooled != nullptr)
         rope_rerotate_pooled(st.idx_pooled, st.idx_dead, cells / s.idx_block, (int) s.idx_block, (int) s.idx_dim, a, b,
                              stream);

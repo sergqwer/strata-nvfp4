@@ -24,7 +24,7 @@ struct RopeKPool {
     uint16_t* k_pool = nullptr;   ///< fp16 values (null when int8)
     int8_t* k_q = nullptr;        ///< int8 codes
     uint16_t* k_scale = nullptr;  ///< fp16 scale per 64 values
-    const int32_t* page_table = nullptr;
+    const int32_t* page_table = nullptr;   ///< null: the identity (a streamed layer's host copy)
     int n_kv_heads = 0, page_size = 0, head_dim = 0;
     bool hadamard = false;        ///< stored through kv_q4.hpp's 256-point H (kv_rot): the whole row is re-coded
 };
