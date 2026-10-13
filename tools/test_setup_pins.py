@@ -224,8 +224,11 @@ class Engine(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         (self.root / "engine").mkdir()
+        # the asset the fork publishes (the Windows engine): on Linux PREBUILT_ASSET names the Linux one, which the
+        # fork does not publish, so get_prebuilt stops before the release these tests are about
         self.patches = [mock.patch.object(setup, "ROOT", self.root),
-                        mock.patch.object(setup, "release_version", lambda: "0.1.40.3-nvfp4.1")]
+                        mock.patch.object(setup, "release_version", lambda: "0.1.40.3-nvfp4.1"),
+                        mock.patch.object(setup, "PREBUILT_ASSET", setup.FORK_ASSETS[0])]
         for p in self.patches:
             p.start()
 
