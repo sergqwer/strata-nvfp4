@@ -79,6 +79,9 @@ public:
     /// The share of the streamed experts' bytes DMA-able straight from pinned RAM (1 = all).  Sizes the streamed
     /// ring (a big one only pays when the copy engine, not the host copies, is the limit); set before bytes_needed.
     static void set_pinned_share(double share);
+    /// extras/wddm-pin: the unpinned experts lie in resident RAM (the expert arena), so staging them is a plain memcpy:
+    /// the ring keeps its pinned size and the stager gets more threads and buffers (STRATA_STAGE_RESIDENT=0/1 forces).
+    static void set_resident_stage(bool on);
     static double pinned_share();
     /// The chunk size from which a chunk streams every expert the GPU does not hold (1024; STRATA_PREFILL_STREAM_MIN).
     static int64_t stream_all_min_tokens();

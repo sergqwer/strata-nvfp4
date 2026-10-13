@@ -25,12 +25,37 @@ enum class PageBacking { LargePages, NormalPages, PinnedByCuda };
 
 /// #243: STRATA_ARENA_PIN_GIB, the cap on the expert arena's CUDA registration in GiB.  -1 when unset (the engine
 /// decides, as in 0.1.30), 0 = no cap (the whole arena, or as many slices as the driver takes), N > 0 = at most N GiB,
-/// -2 for "auto" (Windows: the sliced pin stays below the GPU's shared-memory budget).
+/// -2 for "auto" (Windows: the sliced pin stays below the GPU's shared-memory budget), -3 for "none" (extras/wddm-pin:
+/// nothing pinned - every streamed expert through the prompt path's staging ring; the A/B arm of an unpinned arena).
 int arena_pin_cap_gib();
 /// extras/mgpu-fixes (PCIE_ASYM D7): the order in which a CAPPED sliced registration takes the arena's slices (one per
 /// layer of a native pack).  Empty (the default): from slice 0 up, as before.  A layer split sets its stages' layers
 /// in turn, so the cap is shared between the stages instead of all landing on the first one.
 void set_arena_pin_order(const std::vector<int>& slices);
+/// extras/wddm-pin: per-stage registration.  `slice_dev[i]` is the CUDA device that reads slice i (a layer split: the
+/// stage that runs layer i); each slice is then registered in THAT device's context only (cudaHostRegisterMapped, not
+/// Portable), so under WDDM each adapter accounts only its own stage's share of the arena in its shared (non-local)
+/// segment.  `per_dev_cap[d]` (bytes, 0 = none) caps what device d pins; its slices go from its first layer up and stop
+/// at the cap or at the driver's first refusal (the rest stays resident through the working-set lock).  Empty = off.
+void set_arena_slice_devices(const std::vector<int>& slice_dev, const std::vector<uint64_t>& per_dev_cap,
+                             const std::vector<int>& slice_stage = {},
+                             const std::vector<std::string>& per_dev_why = {},
+                             const std::vector<char>& per_dev_live = {});
+bool arena_slice_devices_set();
+/// STRATA_ARENA_PIN_PER_STAGE: 1 forces the per-stage registration on a layer split (any OS, also --split-device 0),
+/// 0 keeps the portable one; -1 unset (the engine decides: on under WDDM on a multi-GPU layer split).
+int arena_pin_per_stage_env();
+
+/// #243 / extras/wddm-pin: the WDDM shared (non-local) segment of CUDA device `dev`'s adapter - its budget and this
+/// process's use of it (DXGI QueryVideoMemoryInfo, the adapter found by cudaDeviceProp::luid).  False off Windows.
+bool shared_pin_budget(int dev, uint64_t& budget, uint64_t& usage, std::string& why);
+/// What stays free of that budget (STRATA_PIN_MARGIN_GIB, default 4 GiB).
+uint64_t shared_pin_margin();
+/// What a registration for device `dev` may pin on Windows: its adapter's budget - usage - the margin (without the DXGI
+/// numbers RAM/2 - 8 GiB).  False where there is no such budget (not Windows); `why` says where the number came from.
+bool shared_pin_limit_for(int dev, uint64_t& limit, std::string& why);
+/// The same for the current device (PIN's fix/lowram-slice-pin name).
+bool shared_pin_limit(uint64_t& limit, std::string& why);
 
 struct PinnedArena {
     void* base = nullptr;
@@ -71,6 +96,13 @@ struct PinnedArena {
     std::vector<char> slice_pinned;
     std::vector<int> slice_index;
     std::vector<std::pair<uint64_t, uint64_t>> locked_ranges;   ///< scattered: the working-set locks (offset, bytes)
+    /// extras/wddm-pin (set_arena_slice_devices): registered per stage.  Also `scattered`; per registered slice k (as
+    /// slice_starts / slice_index) its owner device and its device alias in that device's context.
+    bool per_stage = false;
+    std::vector<int> slice_owner;            ///< per slice (all of bounds): the owner device
+    std::vector<int> reg_dev;                ///< per registered slice k: the device whose context holds it
+    std::vector<void*> reg_alias;            ///< per registered slice k: its device pointer there (null: none)
+    std::string stage_note;                  ///< per device: "CUDAd layers a-b: pinned X of Y GiB (n of m slices)..."
     void* mapping_base = nullptr;     ///< actual mapping start; differs from base when a shared-file header exists
     uint64_t mapping_bytes = 0;       ///< bytes to release from mapping_base
     ~PinnedArena();
