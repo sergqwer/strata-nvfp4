@@ -11324,7 +11324,16 @@ int main(int argc, char** argv) {
                 conv_disk.expire();
                 conv_disk.rescan();   // --conversation-disk-shared: what the other replicas parked since the last look
                 const auto on_disk = conv_disk.best(ids, req_imgs, want_cvec);
-                if (on_disk.tokens > std::max({resume, slot_tokens, parked.tokens})) {
+                // STRATA_DISK_PREFER=N (tests): for the next N restores the disk tier also wins a tie with the RAM
+                // cache, so one engine restores a conversation from the disk and later the same state from RAM, and
+                // the two answers compare exactly (dialog-park/tools/parity2.py)
+                static int64_t disk_prefer = [] {
+                    const char* e = std::getenv("STRATA_DISK_PREFER");
+                    return e ? (int64_t) std::atoll(e) : (int64_t) 0;
+                }();
+                const bool tie_to_disk = disk_prefer > 0 && on_disk.tokens == parked.tokens;
+                if (on_disk.tokens > std::max(resume, slot_tokens) && (on_disk.tokens > parked.tokens || tie_to_disk)) {
+                    if (tie_to_disk) --disk_prefer;
                     const uint64_t floor = (uint64_t) o.conversation_cache_min_free_mib * 1024 * 1024;
                     size_t evicted = 0;
                     auto admit = [&](uint64_t need, std::string& why) -> bool {
@@ -11555,6 +11564,25 @@ int main(int argc, char** argv) {
                         return 1;
                     }
                     if (cudaDeviceSynchronize() != cudaSuccess) { std::printf("ERR stage sync\n"); return 1; }
+                }
+                // STRATA_SNAPSHOT_VERIFY with an image from the disk: every main K/V layer is read back from the
+                // device and compared with the image too (the draft ring below), and the image's fingerprint is said
+                if (disk_read_ms > 0 && stages.empty() && std::getenv("STRATA_SNAPSHOT_VERIFY") != nullptr) {
+                    uint64_t all = 0;
+                    size_t layers = 0;
+                    for (int64_t j = 0; j < ss.qsa_alloc && (size_t) j < incoming->kv.size(); ++j) {
+                        uint64_t fp = 0;
+                        if (!strata::core::conversation_kv_verify(incoming->kv[(size_t) j], ss.qsa_states[ss.qsa_ord0 + j],
+                                                                  g, int64_t(incoming->live.ids.size()), true, fp, err)) {
+                            std::printf("ERR verifying a K/V layer restored from the disk: %s\n", err.c_str());
+                            return 1;
+                        }
+                        all = all * 1099511628211ull ^ fp;
+                        ++layers;
+                    }
+                    std::fprintf(stderr, "strata serve: SNAPSHOT_VERIFY disk: %zu K/V layers equal to the image on the "
+                                         "device, fingerprint %016llx (%lld tokens)\n", layers, (unsigned long long) all,
+                                 (long long) incoming->live.ids.size());
                 }
                 if (use_mtp && std::getenv("STRATA_SNAPSHOT_VERIFY") != nullptr) {
                     uint64_t draft_hash = 0;
