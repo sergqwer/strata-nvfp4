@@ -2718,7 +2718,44 @@ def gpu_vram_mib(indices: list[int], hip: bool = False) -> dict[int, int] | None
     return out
 
 
-def ordered_gpus(cfg: dict, scores=None, vrams=None) -> list[int]:
+_PCIE_LANE_GBPS = {1: 0.25, 2: 0.5, 3: 0.985, 4: 1.969, 5: 3.938, 6: 7.563}
+
+
+def gpu_link_gbps(indices: list[int]) -> dict[int, float] | None:
+    """extras/mgpu-fixes: each NVIDIA card's PCIe link in GB/s per direction, from nvidia-smi's maximum generation and
+    width for that card in that slot (an x4 slot or an older board reads lower); None when it cannot say for every one
+    of them."""
+    try:
+        r = subprocess.run(["nvidia-smi", "--query-gpu=index,pcie.link.gen.max,pcie.link.width.max",
+                            "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=30)
+        got = {}
+        for line in r.stdout.splitlines():
+            parts = [x.strip() for x in line.split(",")]
+            if len(parts) != 3 or not all(x.isdigit() for x in parts):
+                continue
+            i, gen, width = (int(x) for x in parts)
+            if gen in _PCIE_LANE_GBPS and width > 0:
+                got[i] = _PCIE_LANE_GBPS[gen] * width
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    return got if all(i in got for i in indices) else None
+
+
+def slow_link_last(order: list[int], links: dict | None) -> list[int]:
+    """extras/mgpu-fixes: a card whose link is at most half the fastest one's goes after the others.  The engine then
+    keeps every expert of that LATER stage's layers in its VRAM and reads its prompt hand-offs in small pieces, so its
+    link carries only the hand-offs; as the FIRST card it would stream its prompt path through that link (the first
+    stage cuts the chunks for every stage).  Otherwise the order is kept.  links: {index: GB/s}, None = unknown."""
+    if not links or any(i not in links for i in order):
+        return order
+    hi = max(links[i] for i in order)
+    slow = [i for i in order if 2.0 * links[i] <= hi]
+    if not slow or len(slow) == len(order):
+        return order
+    return [i for i in order if i not in slow] + slow
+
+
+def ordered_gpus(cfg: dict, scores=None, vrams=None, links=None) -> list[int]:
     """#1352: the cards of a layer split in the order the engine stages them.  With "layer_split": "auto" (the
     default) the faster card goes LAST - the last stage runs the head, the draft layer and the verify, and a prompt
     chunk waits on it (the reporter's 4070 Ti SUPER + 5060 Ti: a 6K prompt took 50 s one way round and 15 s the
@@ -2738,9 +2775,17 @@ def ordered_gpus(cfg: dict, scores=None, vrams=None) -> list[int]:
     sc = scores if scores is not None else (hip_speed_scores(gl) if hip else gpu_speed_scores(gl))
     if not sc or any(i not in sc for i in gl):
         return gl
+    # extras/mgpu-fixes: the link, measured unless the scores were injected (a test seam)
+    lk = links if links is not None else (None if scores is not None or hip else gpu_link_gbps(gl))
     if max(sc[i] for i in gl) < 1.05 * min(sc[i] for i in gl):
-        return gl     # #1760: cards within 5% of each other are the same card (two 5070 Ti read 1.2% apart on the clock): keep the order
-    out = sorted(gl, key=lambda i: sc[i])
+        # #1760: cards within 5% of each other are the same card (two 5070 Ti read 1.2% apart on the clock): keep the
+        # order - but a card on a slow link goes last (slow_link_last)
+        out = slow_link_last(gl, lk)
+        if out != gl:
+            print(f"[strata] layer split: card order {','.join(map(str, out))} (the card on the slower PCIe link last; "
+                  f'"gpu_order": "as_given" keeps {",".join(map(str, gl))})', flush=True)
+        return out
+    out = slow_link_last(sorted(gl, key=lambda i: sc[i]), lk)
     if out != gl:
         vram = vrams if vrams is not None else (None if scores is not None else gpu_vram_mib(gl, hip))
         if vram is not None and all(i in vram for i in gl) and vram[out[-1]] < vram[gl[-1]]:
