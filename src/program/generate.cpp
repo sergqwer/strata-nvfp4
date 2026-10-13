@@ -567,6 +567,9 @@ struct Options {
     bool batch_groups_set = false;    ///< --batch-groups was given (a number or auto): no default then
     bool batch_groups_auto = false;   ///< --batch-groups auto (#417 stage 1): one group per stage of a layer split, if it divides --batch
     bool batch_mtp = false;      ///< --batch-mtp / STRATA_BATCH_MTP=1 (opt-in): one MTP proposal per batch slot
+    /// This fork (opt-in): the batch slots' sessions are carved for this many cells instead of --max-context (0 =
+    /// --max-context).  A request whose prompt and max_new do not fit a slot runs on the solo path, alone.
+    int64_t batch_max_context = 0;
     std::string spec_oracle;
     int spec_corrupt = 0;
     /// Benchmarks and A/B checks (eddoursul's fork, F19): the run emits this continuation (token ids) instead of
@@ -644,6 +647,7 @@ struct Options {
     /// --serve: also keep a checkpoint every N freshly read prompt tokens (0 = only at the last turn boundary)
     int64_t prompt_cache_every = 16384;
     bool prompt_cache_tail = false;   // optional extra checkpoint at an existing near-tail chunk boundary
+    bool prompt_cache_spread = false;   ///< --prompt-cache-spread: keep checkpoints spread back from the end, not the latest
     /// --serve: a prompt read from token 0 is also checkpointed at its first turn boundary - the end of the system
     /// prompt, which every chat of the same client shares - when that is at least N tokens (0 = never)
     int64_t prompt_cache_root = 2048;
@@ -801,6 +805,9 @@ void usage() {
                  "                       window (STRATA_BATCH_MTP=1 does the same); works on one GPU and on a layer split (the\n"
                  "                       slot drafters sit on the last stage's GPU; not with --batch-groups); needs VRAM per slot\n"
                  "  --batch-groups G     --batch with a layer split: the slots in G groups pipelined through the GPUs\n"
+                 "  --batch-max-context N  --batch (this fork, opt-in): each slot's session holds N cells instead of\n"
+                 "                       --max-context (a 262144-cell slot takes ~3.6 GiB of the expert cache at int8 K/V);\n"
+                 "                       a request longer than a slot (prompt + max_new) runs alone on the solo path\n"
                  "  --pipeline-windows N --serve with a layer split on two GPUs (on by default for 3+ stages on AMD gfx12;\n"
                  "                       STRATA_PIPELINE_AUTO=0 or N=0 turns it off): one conversation's verify windows\n"
                  "                       with the GPUs overlapped - 1 = the prompt's short reads, 2 = decode as well\n"
@@ -809,6 +816,9 @@ void usage() {
                  "  --prompt-cache-every N  --serve: also checkpoint every N fresh prompt tokens (default 16384, 0 = off)\n"
                  "  --prompt-cache-tail  --serve, single GPU: one extra checkpoint near the prompt's end, at an existing\n"
                  "                       chunk boundary (default off; requires --prompt-cache and --prompt-cache-every > 0)\n"
+                 "  --prompt-cache-spread  --serve: keep the checkpoints spread back from the conversation's end (dense\n"
+                 "                       near it, thinner further back) instead of the most recently used: a client that\n"
+                 "                       rewrites its history N tokens back reads about N again, not the whole conversation\n"
                  "  --turn-token ID      --serve: the token that opens a chat turn (default 248045, <|im_start|>)\n"
                  "  --tail-role-token ID --serve: a turn of this role right before the last turn is left out of\n"
                  "                       the conversation checkpoint (a trailing effort turn; default -1 = off)\n"
@@ -2134,6 +2144,7 @@ int main(int argc, char** argv) {
             else o.batch_groups = std::atoi(bgv);
         }
         else if (a == "--batch-mtp") o.batch_mtp = true;
+        else if (a == "--batch-max-context") o.batch_max_context = std::max(0LL, std::atoll(next("--batch-max-context")));
         else if (a == "--spec-oracle") o.spec_oracle = next("--spec-oracle");
         else if (a == "--spec-corrupt") o.spec_corrupt = std::atoi(next("--spec-corrupt"));
         else if (a == "--spec-follow") o.spec_follow = next("--spec-follow");
@@ -2184,6 +2195,7 @@ int main(int argc, char** argv) {
             else o.conversation_cache_slots = (int) number;
         }
         else if (a == "--prompt-cache-tail") o.prompt_cache_tail = true;
+        else if (a == "--prompt-cache-spread") o.prompt_cache_spread = true;
         else if (a == "--prompt-cache-every") o.prompt_cache_every = std::max(0LL, std::atoll(next("--prompt-cache-every")));
         else if (a == "--prompt-cache-root") o.prompt_cache_root = std::max(0LL, std::atoll(next("--prompt-cache-root")));
         else if (a == "--turn-token") o.turn_token = std::atoll(next("--turn-token"));
@@ -4620,14 +4632,17 @@ int main(int argc, char** argv) {
             bool remote = false;
             for (const int r : o.expert_cache_remote) remote = remote || r > 0;
             const bool asked = ev != nullptr && ev[0] != '\0' ? ev[0] != '0' : o.kv_grow;
+            // (--batch: the main session's K/V is elastic as without it; the batch slots carve theirs whole, with the
+            // elastic switch off while they and their drafters are made - this fork, parallel dialogs.  Before, --batch
+            // turned the elastic K/V off and the main session's 262K K/V took 3.35 GiB of the expert cache for good.)
             const bool on = asked && !multi_gpu && o.kv_resident <= 0 &&
                             !o.expert_profile.empty() && !o.resident_cpu_experts && o.expert_cache != 0 && !remote &&
                             strata::core::vmm_available() &&
-                            // the batch slots carve their own K/V and --vram-elastic's cache is not one VMM range
-                            o.batch == 0 && !o.vram_elastic && o.peer_device < 0;
+                            // --vram-elastic's cache is not one VMM range
+                            !o.vram_elastic && o.peer_device < 0;
             if (asked && !on && (o.kv_grow_given || (ev != nullptr && ev[0] != '\0')))
                 std::fprintf(stderr, "strata generate: --kv-grow is off (one GPU, a profile, the whole K/V in VRAM, "
-                                     "every expert in RAM, no --batch, --vram-elastic or --peer-device)\n");
+                                     "every expert in RAM, no --vram-elastic or --peer-device)\n");
             const char* iv = std::getenv("STRATA_KV_GROW_INIT");
             strata::core::qsa_set_kv_elastic(on, iv != nullptr && std::atoll(iv) > 0 ? std::atoll(iv) : 16384);
             strata::core::ExpertCache::set_vmm(on);
@@ -4738,6 +4753,9 @@ int main(int argc, char** argv) {
         }
     }
     std::vector<std::vector<std::unique_ptr<strata::core::SessionState>>> bslot_ss;
+    // --batch-max-context (this fork, opt-in): the cells each slot's session holds; --max-context without it
+    const int64_t batch_slot_ctx = o.batch_max_context > 0 ? std::min<int64_t>(o.batch_max_context, o.max_context)
+                                                           : o.max_context;
     if (o.batch != 0) {
         const int cap = strata::kernels::kVerifyMaxT;
         const char* off = !o.serve ? "it needs --serve" : o.batch < 2 ? "it needs 2 or more slots"
@@ -4780,17 +4798,21 @@ int main(int argc, char** argv) {
         bslot_ss.resize(1 + stages.size());
         int fit = o.batch;   // the slots every stage could carve
         uint64_t bytes0 = 0;
+        // the elastic K/V is the main session's alone (it grows with the requests it reads): a slot's K/V is carved
+        // whole for the slot's context (--batch-max-context), so the switch is off while the slots are made
+        const bool kv_elastic_main = strata::core::qsa_kv_elastic();
+        if (kv_elastic_main) strata::core::qsa_set_kv_elastic(false, 0);
         for (size_t k = 0; k < bslot_ss.size(); ++k) {
             const int dev = k == 0 ? 0 : stages[k - 1]->dev;
             const int64_t lo = k == 0 ? 0 : stages[k - 1]->lb;
             const int64_t hi = k == 0 ? (multi_gpu ? split_at[0] : -1) : stages[k - 1]->le;
             const strata::core::OnDevice on_k(dev);
-            const uint64_t bytes = strata::core::session_bytes(g, o.max_context, K, lo, hi);
+            const uint64_t bytes = strata::core::session_bytes(g, batch_slot_ctx, K, lo, hi);
             if (k == 0) bytes0 = bytes;
             for (int b = 0; b < fit; ++b) {
                 auto u = std::make_unique<strata::core::SessionState>();
                 void* buf = nullptr;
-                if (cudaMalloc(&buf, bytes) != cudaSuccess || strata::core::session_init(g, o.max_context, K, buf, *u, lo, hi) == 0) {
+                if (cudaMalloc(&buf, bytes) != cudaSuccess || strata::core::session_init(g, batch_slot_ctx, K, buf, *u, lo, hi) == 0) {
                     cudaGetLastError();
                     if (buf != nullptr) cudaFree(buf);
                     size_t fb = 0, tb = 0;
@@ -4807,9 +4829,12 @@ int main(int argc, char** argv) {
             cudaDeviceSynchronize();
             size_t fb = 0, tb = 0;
             cudaMemGetInfo(&fb, &tb);
-            std::fprintf(stderr, "strata generate: --batch: %d slot sessions on CUDA%d (%.2f GiB each); %.2f GiB free\n",
-                         (int) bslot_ss[k].size(), dev, (double) bytes / 1073741824.0, (double) fb / 1073741824.0);
+            std::fprintf(stderr, "strata generate: --batch: %d slot sessions on CUDA%d (%.2f GiB each, %lld cells%s); %.2f GiB "
+                                 "free\n", (int) bslot_ss[k].size(), dev, (double) bytes / 1073741824.0,
+                         (long long) batch_slot_ctx, batch_slot_ctx < o.max_context ? ", --batch-max-context" : "",
+                         (double) fb / 1073741824.0);
         }
+        if (kv_elastic_main) strata::core::qsa_set_kv_elastic(true, 0);
         for (auto& v : bslot_ss) if ((int) v.size() > fit) v.resize((size_t) fit);   // the same count on every stage
         if (fit < 2) {
             std::fprintf(stderr, "strata generate: WARNING: --batch is off: not two slot sessions fit (a smaller "
@@ -4871,6 +4896,9 @@ int main(int argc, char** argv) {
             // LAST stage's slot-b session (bslot_ss.back(): stage 0's on one GPU): it borrows that session's context
             // length and RoPE table, which are on that device.  Its PLE history is the first stage's slot session: PLE
             // runs on the first stage, as for the solo drafter (`mtp.set_ple_session(&ss)` above).
+            const bool kv_elastic_main = strata::core::qsa_kv_elastic();   // (the slots' drafters: whole, as the slots)
+            if (kv_elastic_main) strata::core::qsa_set_kv_elastic(false, 0);
+            struct ElasticBack { bool on; ~ElasticBack() { if (on) strata::core::qsa_set_kv_elastic(true, 0); } } elastic_back{kv_elastic_main};
             for (int b = 0; b < o.batch; ++b) {
                 auto d = std::make_unique<strata::core::MtpDrafter>();
                 if (!d->load(o.mtp, draft_geometry, *bslot_ss.back()[(size_t) b], o.spec, err, o.mtp_window, &mtp)) {
@@ -8235,7 +8263,12 @@ int main(int argc, char** argv) {
                 ~MergeBack() { if (on && !strata::core::conversation_checkpoints_merge(std::move(cs), checks)) checks.clear(); }
             } merge_back{cs, checks, n_st > 0};
             const strata::core::ConversationView view{live, live_imgs, n_st > 0 ? cs.stage0 : checks, cvec_cached};
-            auto reuse = conversations.take_reuse();
+            const int64_t retained_n = conversations.retained_tokens();
+            auto reuse = conversations.take_reuse_for(live);   // never another conversation's K/V
+            if (retained_n > 0 && reuse.unchanged_tokens < retained_n)
+                std::fprintf(stderr, "strata serve: conversation cache: retained K/V reused for %lld of its %lld tokens "
+                                     "(the rest is not this conversation's)\n", (long long) reuse.unchanged_tokens,
+                             (long long) retained_n);
             std::vector<strata::core::ConversationKvReuse> stage_reuse = std::move(reuse.stages);
             stage_reuse.resize(n_st);
             reuse.stages.clear();
@@ -8476,8 +8509,13 @@ int main(int argc, char** argv) {
                         for (size_t i = 0; i < checks.size(); ++i) pin_flags[i] = checks[i].pinned;
                         break;
                     }
-                const size_t victim = strata::program::conv_cache::eviction_victim(
-                    stamps.data(), stamps.size(), o.prompt_cache, tail_flags.get(), pin_flags.get());
+                std::vector<int64_t> lens;
+                for (const ConvCheckpoint& k : checks) lens.push_back((int64_t) k.ids.size());
+                const size_t victim = o.prompt_cache_spread
+                    ? strata::program::conv_cache::spread_victim(lens.data(), stamps.data(), stamps.size(),
+                                                                 o.prompt_cache, tail_flags.get(), pin_flags.get())
+                    : strata::program::conv_cache::eviction_victim(stamps.data(), stamps.size(), o.prompt_cache,
+                                                                   tail_flags.get(), pin_flags.get());
                 checks.erase(checks.begin() + (std::ptrdiff_t) victim);
             }
             return true;
@@ -8646,7 +8684,10 @@ int main(int argc, char** argv) {
         if (o.adapt_every > 0 && o.adapt_swaps > 0 && !all_experts_resident)
             drive.d.usage.assign((size_t) (g.n_layers * g.n_expert), 0.0f);
         PcieAuto pcie_auto;
-        if (o.pcie_frac_auto && !all_experts_resident && o.batch == 0 && o.peer_device < 0 && (n_stages == 1 || pcie_auto_split_ok())) {
+        // (this fork: also with --batch.  The share is refined in the solo path's windows only - a request alone - and
+        // the batch windows use the share it found, as every request's own; without it a request alone with --batch
+        // kept the start-up 0.25 where it reaches 0.35 here, part of the -17% decode measured on an RTX 5090)
+        if (o.pcie_frac_auto && !all_experts_resident && o.peer_device < 0 && (n_stages == 1 || pcie_auto_split_ok())) {
             const auto& pl = strata::kernels::cpu::expert_layout();
             double sum = 0.0;
             for (int64_t l = 0; l < g.n_layers; ++l) sum += (double) pl.blob_bytes(l);
@@ -8658,7 +8699,10 @@ int main(int argc, char** argv) {
         const char* fetch_off = d_res == nullptr ? "no residency table" : o.spec_split ? "--spec-split"
                               : multi_gpu || !stages.empty() ? "a layer split" : peer.valid() ? "--peer-device"
                               : remote_opt || drive.d.remote_count > 0 ? "helper GPUs" : o.adapt_async ? "--adapt-async"
-                              : o.pipeline_windows > 0 ? "--pipeline-windows" : o.batch > 0 ? "--batch" : nullptr;
+                              : o.pipeline_windows > 0 ? "--pipeline-windows" : nullptr;
+        // (this fork: --batch is no longer a reason.  The batch windows are serial windows of one GPU too - the residency
+        // hook below takes them - and the tier's rounds in them read the same fetch flags as the solo path's; parallel
+        // dialogs, where a request alone with --batch lost it: 90% cache hits against 93% and -17% decode)
         if (adapt_fetch() > 0) {   // STRATA_ADAPT_FETCH (opt-in)
             const char* off = drive.d.usage.empty() ? "the adaptive tier is off" : fetch_off != nullptr ? fetch_off
                             : o.pcie_mode == "dma" || o.pcie_mode == "direct" ? "--pcie-mode dma / direct"
@@ -9700,7 +9744,8 @@ int main(int argc, char** argv) {
                         (long long) o.tail_role_token, xcache.segmented() ? 1 : 0,
                         o.batch > 0 ? (" batch_slots=" + std::to_string(o.batch) +
                                        " slot_cache=" + std::to_string(o.prompt_cache > 0 ? 1 : 0) +
-                                       " batch_groups=" + std::to_string(o.batch_groups)).c_str() : "");
+                                       " batch_groups=" + std::to_string(o.batch_groups) +
+                                       " batch_ctx=" + std::to_string((long long) batch_slot_ctx)).c_str() : "");
         }
         // issue #29: a request whose heartbeat (tokens, prompt chunks, verify windows) stops for this long is stuck on
         // a flag nobody will raise - end the engine with where it was, so the server starts it again instead of the
@@ -9997,6 +10042,8 @@ int main(int argc, char** argv) {
         // conversation an idle slot holds reads on from there.  Every stage, the same calls.
         // `at`: one of the slot's checkpoints - only the K/V up to it is copied and its state restored instead
         auto copy_from_slot = [&](int b, const ConvCheckpoint* at, std::string& e) -> bool {
+            // the main session's K/V is replaced by the slot's: K/V retained from a restore described the old one
+            conversations.take_reuse();
             const int64_t upto = at != nullptr ? (int64_t) at->ids.size() : (int64_t) bs[(size_t) b].ids.size();
             if (at != nullptr && at->stage_parts.size() != stages.size()) { e = "a checkpoint without its stage parts"; return false; }
             for (size_t k = 0; k < bslot_ss.size(); ++k) {
@@ -10048,11 +10095,25 @@ int main(int argc, char** argv) {
             int64_t pos[strata::kernels::kVerifyMaxT] = {};
             int first[strata::kernels::kVerifyMaxT] = {}, active[strata::kernels::kVerifyMaxT] = {};
             static size_t next_slot = 0;
+            // This fork: the control vector (--control-vector-scaled, the per-request "uncensored" projection) is one
+            // device flag for the whole window, so a window carries the slots of one setting only.  With both settings
+            // among the active slots the windows alternate between them; a request read between windows gets its own
+            // setting back before its next chunk (cvec_restore below).  Without a control vector nothing changes.
+            const bool cvec_on = strata::kernels::cvec().loaded();
+            bool win_cvec = true;
+            if (cvec_on) {
+                static bool last_cvec = false;
+                bool has[2] = {false, false};
+                for (const BSlot& sl : bs) if (sl.active) has[sl.cvec ? 1 : 0] = true;
+                win_cvec = has[0] && has[1] ? !last_cvec : has[1];
+                last_cvec = win_cvec;
+                if (strata::kernels::cvec_enabled() != win_cvec) strata::kernels::cvec_set_enabled(win_cvec);
+            }
             // Each MTP slot uses two rows; rotate slots when more than four are active.
             int A = 0;
             for (size_t offset = 0; offset < bs.size() && S + (batch_mtp ? 2 : 1) <= strata::kernels::kVerifyMaxT; ++offset) {
                 const int b = (int) ((next_slot + offset) % bs.size());
-                if (bs[(size_t) b].active) {
+                if (bs[(size_t) b].active && (!cvec_on || bs[(size_t) b].cvec == win_cvec)) {
                     first[A] = S;
                     active[A++] = b;
                     rows[S] = b;
@@ -10905,6 +10966,14 @@ int main(int argc, char** argv) {
                             (long long) max_new, (long long) o.max_context);
                 continue;
             }
+            // --batch-max-context: a slot holds batch_slot_ctx cells; the server sends a longer request to the solo
+            // path (INFO batch_ctx), this refusal is the engine's own guard (nothing has been read or changed yet)
+            if (admit_slot >= 0 && n + admit_max_new + 8 > batch_slot_ctx) {
+                std::printf("ERR BGEN-LONG: prompt (%lld tokens) + max_new (%lld) does not fit a batch slot (%lld cells, "
+                            "--batch-max-context)\n", (long long) n, (long long) admit_max_new, (long long) batch_slot_ctx);
+                std::fflush(stdout);
+                continue;
+            }
             bool bad = false;
             for (int64_t t : ids) bad = bad || t < 0 || t >= n_vocab;
             if (bad) { std::printf("ERR a token id is outside the vocabulary\n"); continue; }
@@ -11013,8 +11082,16 @@ int main(int argc, char** argv) {
                 }
             const auto parked = conversations.best(ids, req_imgs, want_cvec);
             std::optional<strata::core::SavedConversation> incoming;
-            if (parked.tokens > std::max(resume, slot_tokens)) incoming.emplace(conversations.take(parked.index));
-            if (incoming) slot_source = -1;
+            // A checkpoint inside ANOTHER parked conversation (a sibling subagent's system prompt and tools, say) is
+            // borrowed: its K/V up to there and the checkpoint come over, and that conversation stays parked for its
+            // own next turn (ConversationCache::borrows).  Everything else is taken whole, as before.
+            // (a layer split restores whole stage images only, so it never borrows; a batch slot that holds a longer
+            // start of this prompt wins as before)
+            bool borrow = stages.empty() && parked.tokens > std::max(resume, slot_tokens) &&
+                          conversations.borrows(parked);
+            if (parked.tokens > std::max(resume, slot_tokens) && !borrow)
+                incoming.emplace(conversations.take(parked.index));
+            if (incoming || borrow) slot_source = -1;
             // Reject the entire image before parking/overwriting the outgoing
             // state. Invalid entries can safely fall back to its existing prefix.
             if (incoming && incoming->stage_images.size() != stages.size()) {
@@ -11038,6 +11115,17 @@ int main(int argc, char** argv) {
                 incoming.reset();
                 err.clear();
             }
+            if (borrow) {
+                const strata::core::SavedConversation* donor = conversations.find(parked.serial);
+                if (donor == nullptr ||
+                    !strata::core::conversation_snapshot_validate(*donor, ss, g, use_mtp ? &mtp.kv_state() : nullptr,
+                                                                  err)) {
+                    std::fprintf(stderr, "strata serve: conversation cache: cannot borrow from a parked conversation "
+                                         "(%s)\n", err.empty() ? "gone" : err.c_str());
+                    borrow = false;
+                    err.clear();
+                }
+            }
             // Preserve the outgoing branch before any checkpoint rewind, reset,
             // or incoming restore overwrites the positional state it requires.
             // pin=N: this request resumes exactly at the pinned shared prefix of the conversation the session holds
@@ -11049,7 +11137,51 @@ int main(int argc, char** argv) {
                 resume == req_pin && live_ok)
                 for (const ConvCheckpoint& c : checks)
                     if ((int64_t) c.ids.size() == resume && c.pinned) pin_sibling = true;
-            if ((!from_live || incoming || slot_source >= 0) && !pin_sibling && !park_current(incoming ? incoming->bytes() : 0)) {
+            // STRATA_PARK_REWIND_MAX=N (opt-in): a request that resumes from a checkpoint of the conversation the session
+            // itself holds, leaving N tokens or fewer of it behind, does not park the session first.  That is every next
+            // turn of a chat whose client sends the last reply back without its thinking: the prompt matches the turn's
+            // checkpoint, not the live end, so the whole session was parked (its K/V copied to the host) and the copy
+            // dropped as superseded one request later.  What is left behind is the old reply, cheaper to read again than
+            // the conversation is to copy.  A request that leaves more behind (another conversation on the shared system
+            // prompt) parks as before.  Parking is a cache: the tokens are the same either way.  (Xiaomi2008 8e4ccbe9)
+            bool own_rewind = false;
+            {
+                static const int64_t rewind_max = [] {
+                    const char* e = std::getenv("STRATA_PARK_REWIND_MAX");
+                    return e ? std::max<int64_t>(0, (int64_t) std::atoll(e)) : (int64_t) 0;
+                }();
+                if (rewind_max > 0 && !from_live && !incoming && !borrow && slot_source < 0 && live_ok && resume > 0 &&
+                    req_imgs.empty() && live_imgs.empty() && (int64_t) live.size() >= resume &&
+                    (int64_t) live.size() - resume <= rewind_max) {
+                    own_rewind = true;   // the session holds the checkpoint's tokens: its own conversation
+                    for (int64_t i = 0; i < resume && own_rewind; ++i)
+                        own_rewind = live[(size_t) i] == (int32_t) ids[(size_t) i];
+                }
+            }
+            if (borrow) {
+                conversations.guard(parked.serial);   // parking the outgoing conversation must not evict the donor
+                const bool parked_ok = park_current(0);
+                const bool blocked = conversations.guard_blocked();
+                conversations.unguard();
+                if (!parked_ok) {
+                    std::printf("ERR %s\n", err.c_str());
+                    return 1;
+                }
+                if (blocked) {
+                    // the outgoing conversation fits only in the donor's room: it keeps its place, the donor is
+                    // taken whole as before (it was validated above)
+                    std::fprintf(stderr, "strata serve: conversation cache: no room beside the parked conversation "
+                                         "this request starts with; taking it instead of borrowing\n");
+                    borrow = false;
+                    if (const size_t at = conversations.index_of(parked.serial); at != SIZE_MAX)
+                        incoming.emplace(conversations.take(at));
+                    if (!park_current(incoming ? incoming->bytes() : 0)) {
+                        std::printf("ERR %s\n", err.c_str());
+                        return 1;
+                    }
+                }
+            } else if ((!from_live || incoming || slot_source >= 0) && !pin_sibling && !own_rewind &&
+                       !park_current(incoming ? incoming->bytes() : 0)) {
                 std::printf("ERR %s\n", err.c_str());
                 return 1;
             }
@@ -11094,6 +11226,34 @@ int main(int argc, char** argv) {
             if (incoming && !kvg_ensure((int64_t) incoming->live.ids.size() + 256, kv_quiesce)) {
                 std::printf("ERR the K/V cannot grow to the parked conversation: no VRAM is left\n");
                 return 1;
+            }
+            if (borrow) {
+                const auto t0 = Clock::now();
+                const strata::core::SavedConversation* donor = conversations.find(parked.serial);   // still parked
+                if (donor == nullptr ||
+                    strata::core::conversation_snapshot_restore_prefix(*donor, parked.tokens, ss, g,
+                                                                       use_mtp ? &mtp.kv_state() : nullptr, err) !=
+                        strata::core::ConversationRestore::restored) {
+                    // validated above and guarded while parking: a failure here is fatal, as for a whole restore
+                    std::printf("ERR restoring a borrowed conversation prefix: %s\n",
+                                err.empty() ? "gone" : err.c_str());
+                    return 1;
+                }
+                // the donor's checkpoints on this prompt's path, copied: the donor keeps its own (the one at
+                // parked.tokens is mounted below, as for any checkpoint resume)
+                checks.clear();
+                for (const ConvCheckpoint& c : donor->checkpoints)
+                    if ((int64_t) c.ids.size() <= parked.tokens && starts_with(c.ids, c.imgs)) checks.push_back(c);
+                for (const ConvCheckpoint& c : checks)
+                    if ((int64_t) c.ids.size() == parked.tokens) { live = c.ids; live_imgs = c.imgs; }
+                cvec_cached = donor->cvec;
+                resume = parked.tokens;
+                from_live = false;
+                conversations.count_borrow();
+                std::fprintf(stderr, "strata serve: conversation cache: borrowed %lld tokens from a parked "
+                             "conversation, which stays parked, in %.1f ms; parked=%zu bytes=%zu borrowed=%zu\n",
+                             (long long) resume, std::chrono::duration<double, std::milli>(Clock::now() - t0).count(),
+                             conversations.size(), conversations.bytes(), conversations.borrowed());
             }
             if (incoming) {
                 const auto t0 = Clock::now();
@@ -11146,7 +11306,7 @@ int main(int argc, char** argv) {
                 if (std::getenv("STRATA_SNAPSHOT_FULL_CAPTURE") == nullptr) {
                     std::vector<std::vector<strata::core::ConversationKv>> stage_kv;   // every stage's, for its next park
                     for (auto& si : incoming->stage_images) stage_kv.push_back(std::move(si.kv));
-                    conversations.retain(std::move(incoming->kv), int64_t(live.size()), std::move(stage_kv));
+                    conversations.retain(std::move(incoming->kv), int64_t(live.size()), std::move(stage_kv), live);
                 }
                 incoming.reset(); // Running-state/checkpoint copies are no longer needed.
                 std::fprintf(stderr, "strata serve: conversation cache: restored %lld tokens (%s) in %.1f ms; parked=%zu bytes=%zu\n",
@@ -11630,7 +11790,9 @@ int main(int argc, char** argv) {
                         // read left), text only, and into a slot that is not decoding
                         const bool can = ys < (int) bs.size() && !bs[(size_t) ys].active &&
                                          (admit_slot < 0 || ys == admit_slot) && req_imgs.empty() && o.prompt_cache > 0 &&
-                                         b0 - q > std::max<int64_t>(C, o.short_read);
+                                         b0 - q > std::max<int64_t>(C, o.short_read) &&
+                                         // --batch-max-context: it goes on from the slot later, so all of it must fit there
+                                         n + (admit_slot >= 0 ? (int64_t) admit_max_new : (int64_t) max_new) + 8 <= batch_slot_ctx;
                         std::string ye;
                         const auto ty = Clock::now();
                         std::vector<int32_t> pre(ids.begin(), ids.begin() + q);
@@ -11666,6 +11828,10 @@ int main(int argc, char** argv) {
                         if (!batch_step()) { in_prompt_read = false; batch_fatal = true; e = "a batch window failed"; return false; }
                     } while (batch_on() && std::chrono::duration<double, std::milli>(Clock::now() - td).count() < budget);
                     in_prompt_read = false;
+                    // this fork: the windows may have set the control vector for their slots; the prompt's own setting
+                    // (the one it is being read with) is back before its next chunk
+                    if (strata::kernels::cvec().loaded() && strata::kernels::cvec_enabled() != cvec_cached)
+                        strata::kernels::cvec_set_enabled(cvec_cached);
                     ++il_parts;
                     il_ms += std::chrono::duration<double, std::milli>(Clock::now() - td).count();
                     if (trace) {

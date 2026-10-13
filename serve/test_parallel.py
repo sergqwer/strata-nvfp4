@@ -26,6 +26,8 @@ args = sys.argv[1:]
 slots = int(args[args.index("--batch") + 1]) if "--batch" in args else 0
 fit = int(args[args.index("--fit") + 1]) if "--fit" in args else slots
 fail = "--fail-window" in args
+bctx = int(args[args.index("--batch-ctx") + 1]) if "--batch-ctx" in args else 0   # this fork: --batch-max-context
+bctx_said = "--batch-ctx-unsaid" not in args       # an engine that refuses BGEN-LONG but did not say batch_ctx
 groups = int(args[args.index("--says-groups") + 1]) if "--says-groups" in args else 0   # INFO batch_groups=G (--batch-groups auto)        # #997: the first window over two slots fails
 STEP = 0.02
 CH = 32
@@ -40,7 +42,8 @@ def reader():
     lines.put(None)
 threading.Thread(target=reader, daemon=True).start()
 print("INFO engine=0.1.39" + (f" batch_slots={fit}" if fit >= 2 else "") +
-      (" slot_cache=1" if "--slotcache" in args else "") + (f" batch_groups={groups}" if groups > 1 else ""), flush=True)
+      (" slot_cache=1" if "--slotcache" in args else "") + (f" batch_groups={groups}" if groups > 1 else "") +
+      (f" batch_ctx={bctx}" if bctx and bctx_said else ""), flush=True)
 print("READY 4096 stop", flush=True)
 LONG = list(b"LONGREPLY")
 def continued(ids):        # (the whole reply, how much of it the prompt already ends with: a request continued)
@@ -112,6 +115,11 @@ while True:
             print(f"ERR BGEN: no such free slot (--batch {slots}) or a bad max_new", flush=True)
             if log:
                 log.write(f"REFUSED {slot}\n"); log.flush()
+            continue
+        if slot is not None and bctx and len(ids) + max_new + 8 > bctx:   # this fork: longer than a slot holds
+            print(f"ERR BGEN-LONG: prompt ({len(ids)} tokens) + max_new ({max_new}) does not fit a batch slot", flush=True)
+            if log:
+                log.write(f"REFUSED-LONG {slot}\n"); log.flush()
             continue
         if log:
             log.write(f"{f[0]} {slot} {len(ids)} {max(len(active), 0)}\n"); log.flush()
@@ -480,6 +488,48 @@ class ParallelService(unittest.TestCase):
         go(second)
         a.join(30)
         return res
+
+    def _long_one_alone(self, more):
+        """this fork, --batch-max-context: a request longer than a slot runs alone on the solo path while short ones
+        use the slots: every request is answered, the long one never in a slot."""
+        self.start(2, more=more)
+        long_q = "long " * 120                               # ~600 tokens: more than a 400-cell slot
+        texts = ["first question LONGREPLY", long_q, "a third one, short"]
+        out, errors = {}, []
+
+        def go(t):
+            try:
+                out[t] = self.chat(t)
+            except Exception as e:   # noqa: BLE001 - reported below
+                errors.append(e)
+        threads = [threading.Thread(target=go, args=(t,)) for t in texts]
+        for th in threads:
+            th.start()
+            time.sleep(0.15)
+        for th in threads:
+            th.join(30)
+        self.assertEqual(errors, [])
+        for t in texts:
+            self.assertTrue(out[t]["choices"][0]["message"]["content"].startswith("ok, "), out[t])
+        log = self.log.read_text().splitlines()
+        lens = {int(x.split()[2]) for x in log if x.startswith(("GEN", "BGEN"))}
+        long_len = max(lens)
+        self.assertGreater(long_len, 400)
+        self.assertFalse([x for x in log if x.startswith("BGEN") and int(x.split()[2]) == long_len], log)
+        self.assertTrue([x for x in log if x.startswith("GEN") and int(x.split()[2]) == long_len], log)
+        time.sleep(0.3)
+        self.assertFalse(any(self.engine.slot_busy))
+        self.assertEqual(self.engine.long_held, 0)
+        return log
+
+    def test_a_request_longer_than_a_slot_runs_alone(self):
+        log = self._long_one_alone(["--batch-ctx", "400"])
+        self.assertFalse([x for x in log if x.startswith("REFUSED-LONG")], log)   # the server knew (INFO batch_ctx)
+        self.assertEqual(self.engine.batch_ctx, 400)
+
+    def test_a_bgen_the_engine_refuses_as_too_long_runs_alone(self):
+        log = self._long_one_alone(["--batch-ctx", "400", "--batch-ctx-unsaid"])
+        self.assertEqual(self.engine.batch_ctx, 0)
 
     def test_a_long_prompt_gives_way_to_a_short_one(self):
         """#656: a long solo prompt read gives way at a chunk boundary; the short request is answered first, then the

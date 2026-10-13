@@ -987,6 +987,20 @@ follows the reused prefix (or the root) is read in one run, and its session is n
 It still starts from a checkpoint it matches, and still saves the system-prompt root when that reaches
 `--prompt-cache-root`. Without the field (or with `true`) nothing changes.
 
+**Checkpoints spread back from the end (opt-in, `--prompt-cache-spread`).** Least recent use keeps the newest points:
+every turn adds a checkpoint at its start, so after a few short turns the 6 sit within the last 1-2K tokens. An agent
+client that rewrites its history a few thousand tokens back (it trims an old tool output, drops a step) then matches
+none of them and resumes from the system prompt - the whole conversation is read again. With the flag the checkpoint
+that leaves is the one whose removal leaves the smallest gap for its distance from the newest, so the kept points thin
+out geometrically: after 200 turns of 1,000 tokens they sit 0, 1K, 3K, 8K, 43K and 200K tokens before the end, and an
+edit d tokens back reads about d again (6K back: 8K instead of 200K; 42K back: 43K). The same number of checkpoints, no
+more RAM; the system-prompt root, a pinned prefix and the newest point are never dropped, and the resume is the usual
+exact-prefix match. Measured on 2x CMP 50HX (layer split, IQ3_XXS) with the pi coding agent: before, a 210,528-token
+prompt that was the same as the session for 204,349 tokens resumed at 9,525 and read 201,003 again (100 s). With the
+flag, an 82,593-token conversation grown turn by turn with a turn ~6 steps back rewritten resumed at 73,610 tokens
+(10.2 s against 40.0 s read in full), and with the expert placement fixed (`--adapt-swaps 0`, fixed `--pcie-frac`) the
+greedy answer was the same text as the full read. Without the flag nothing changes.
+
 **One long document, many questions: a pinned shared prefix (opt-in, 0.1.40.2, [RESEARCH_RUNS.md](RESEARCH_RUNS.md)).**
 A request can say where the document ends: `"strata_prefix": {"messages": 1}` (the first message is the document),
 `{"message": 0, "chars": 210000}` (the first 210,000 characters of message 0, for a client that sends the document and
@@ -1025,12 +1039,21 @@ Snapshots contain running state, checkpoints, used K/V pages, and draft-layer K/
 They add host RAM, not another model or VRAM allocation. The byte budget also counts
 an incoming snapshot during a switch. After a restore, unchanged K/V pages can be
 retained for the next parking operation; growth appends storage without copying
-the existing pages. Rewinds refresh the affected pages, and running state and
+the existing pages, with room for the next turns of at most an eighth of each
+buffer (and at most 16 MiB), which the budget counts like the rest of the snapshot.
+Rewinds refresh the affected pages, and running state and
 checkpoints are captured again. Retained active K/V counts against the same byte
 budget and is discarded before evicting parked entries under memory pressure.
-If reserving space for growth would evict another conversation, parking uses a
-full capture instead.
-Oldest parked entries are evicted first.
+Oldest parked entries are evicted first. A new conversation that starts with a
+checkpoint inside a parked one (subagents that share a system prompt and tool
+list, a compacted history) restores that prefix and leaves the parked
+conversation where it is, so its next turn still resumes in full; the engine
+log says "borrowed". A match on a parked conversation's live state or its newest
+checkpoint is that conversation going on and moves it into the session as
+before; so does a match that reaches a pinned shared prefix (`pin=N`), which
+keeps one conversation holding the pin. When the outgoing conversation fits only
+in the parked one's room, it keeps its place and the parked one is moved in
+whole, as before.
 Oversized snapshots or host allocation failures fall back to ordinary prompt processing.
 `--conversation-cache-min-tokens N` (default 0 = park every conversation) parks only conversations of at least N
 tokens. A parked conversation costs one of the slots whatever its length, and parking is a switch-time decision, so a
@@ -1040,6 +1063,12 @@ requests' length keeps the long conversation parked. The check runs before `make
 nothing and stores nothing; the log line is `conversation cache: skip parking (N tokens, below the M minimum;
 parked=P)`. 0 is the pre-flag behaviour and the flag leaves the answers untouched - it only decides which
 conversations keep a slot.
+`STRATA_PARK_REWIND_MAX=N` (opt-in, off unless set; Xiaomi2008 8e4ccbe9): a request that resumes from a checkpoint of
+the conversation the session itself holds, leaving N tokens or fewer of it behind, does not park the session first.
+Without it every next turn of a chat whose client sends the last reply back without its thinking parks the whole live
+conversation (the prompt matches the turn's checkpoint, not the live end) and drops that copy as superseded one request
+later. The tokens are the same: parking is a cache. A request that leaves more than N tokens behind (another
+conversation on the shared system prompt) parks as before; a borrow (above) never counts as one.
 `--conversation-cache-min-free-mib N` (default 2560) additionally requires that
 RAM headroom remain available: the engine checks before allocation (against the
 snapshot's estimated size, less the K/V it already retains) and again after capture.
