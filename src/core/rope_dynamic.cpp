@@ -30,6 +30,7 @@ strata::kernels::RopeScaling RopeDynamic::config(double f) const {
     strata::kernels::RopeScaling s = base;
     s.type = strata::kernels::RopeScalingType::YaRN;
     s.factor = f;
+    if (!mscale && s.ext_factor != 0) s.attn_factor = base.attn_factor / (1.0 + 0.1 * std::log(f));   // mscale() = attn
     return s;
 }
 
