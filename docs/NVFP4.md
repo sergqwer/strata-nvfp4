@@ -374,6 +374,59 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### Upstream 0.1.44.1 (2026-10-14, release 0.1.44.1-nvfp4.1)
+
+0.1.44-nvfp4.1 was prepared and not published; this release is it on upstream's hotfix, with three more of this
+fork's branches.
+
+- **Upstream's hotfix, merged** (`git merge v0.1.44.1`, 11 commits): the NVFP4 CPU rows build their tables without
+  static initialisers (#2324: the compiler used AVX/FMA in a constructor of `nvfp4_avx2.cpp` / `nvfp4_avx512.cpp`, so a
+  CPU without them died with an illegal instruction before `main`), and `tools/check_isa_guard.py` now flags such
+  initialisers; the server names how a crashed engine start ended (signal / NTSTATUS, the CPU's AVX flags after an
+  illegal instruction) instead of retrying it as a GPU runtime start; `q36_engine.cu` builds with CUDA 12.1; Metal
+  fixes (#2323); the Responses API honours the config's `reasoning_effort`; setup run again keeps the installed size.
+  These NVFP4 CPU files are upstream's copy in this fork since 0.1.44 (no change of ours), so the fix runs as shipped.
+- **Conflicts** (setup and its tests only): upstream's re-run rule for the three `env` entries 0.1.44 made setup's own
+  (`STRATA_ROUTE_TAIL_SKIP`, `STRATA_MMQ_KQ`, `STRATA_HC_Q8`: setup's in an Unsloth config, the user's elsewhere) beside
+  this fork's `uncensored` / `sampling` keys and its sampling carry-over. This fork's NVFP4, Q8_0 and mix packs and
+  Qwen3.6 never get those entries from setup, so there they stay the user's. The engine minimum is upstream's 0.1.44.1
+  and this release's 0.1.44.1-nvfp4.1 above it.
+- **"Run again keeps the installed size", for every family here.** Upstream's rule covers the GGUF size menu (Qwen,
+  Swift, Coder, Unsloth with this fork's UD-Q3_K_XL); the NVFP4 families have one size each and a re-run already kept
+  the installed family. Qwen3.6 had neither: its own size menu recommends the largest size the RAM allows, so Enter
+  moved an installed UD-Q4_K_XL to Q8_0 on a 64 GB PC (a third of the speed on a 32 GB card), and the re-run's family
+  default skipped it for qwen-nvfp4-gptq. Both keep the installed choice now; a named `--model` still wins, and a size
+  bigger than the RAM stays a note, not a question.
+- **This fork's branches since 0.1.44:**
+  - extras/cache-pressure: kept dialogs give RAM back when it runs short (the section below).
+  - fix/lowram-slice-pin-044: the low-RAM mode page-locks its RAM copy in slices (each within the adapter's budget)
+    instead of one allocation, which Windows usually refuses at this size. Q8_0 on 128 GB, 0.1.44's copy vs the slices: decode
+    48.8 -> 55.0 tokens/s, a 32K prompt 9.9 -> 8.1 s, the start 8 s sooner, for ~0.7 GiB less available RAM; the
+    teacher-forced KL against the old copy is at the placement-noise level, and the 128 GB arena path is byte-identical.
+    With it, under WDDM the low-RAM mode keeps 1500 MiB of VRAM free by default (`--vram-reserve-mib` overrides), for
+    other programs' VRAM: on an idle desktop that costs 161 slots and ~3% decode (53.3 / 8.5 s).
+  - extras/rope-dynamic: `--rope-scaling dynamic` (setup and Model settings write it past 262,144 on one NVIDIA GPU
+    with one dialog at a time, extras/rope-dynamic-ui; static yarn elsewhere): no scaling while a dialog fits 262,144 positions (byte-
+    identical to none), past them yarn with factor = length / 262,144 rounded up to 0.125, at most --max-context /
+    262,144; the cached keys are rotated when the factor changes (8-15 ms, plus a 30-48 ms table rebuild). Past 262K
+    it gains what static yarn gains (-0.011 nats on the far bands, ~1% perplexity; the needles 13/13 either way), and
+    unlike static yarn it leaves every shorter dialog as it was (static yarn: KL 0.056 there).
+- **Checks** (RTX 5090 + Ryzen 9 9950X3D, 128 GB; release build 3dc869fb at 5e545298: portable, 75/86/89/120, CUDA 13.3):
+  - the kit's identity (`--exact --cache 3000`, qwen-nvfp4-gptq): a 2K and a 32K prompt give the same first-token
+    logits and greedy tokens (12 / 20) as 0.1.44-nvfp4.1's engine 996c4a76, with every flag off at 262,144 and with
+    `--rope-scaling dynamic` at 524,288;
+  - Qwen3.6-35B-A3B UD-Q4_K_XL: the same 128 tokens (plain and with MTP 2) and the first 4 steps' logits, bit for bit,
+    as upstream's own v0.1.44.1 release exe (and as 0.1.44); 218 tokens/s greedy, 365 with MTP 2;
+  - decode 190.5 tokens/s against 0.1.44-nvfp4.1's 186.0 (medians of 5 interleaved pairs, 1,000 tokens; per pair
+    1.009): the same speed;
+  - check_isa_guard on a portable build: no wide-ISA code an AVX2-only CPU can reach (0 of 76 functions);
+  - 121 of 124 engine tests (the other 3 need model files), the server's 920, the tools' 970 (setup's 696);
+  - the tray's GPTQ config starts in 12 s through the server and answers.
+- **The 1500 MiB reserve with a loaded desktop** (G2b's VRAM holder at 1 GiB, Q8_0 low-RAM, 3 pairs): 47.1 / 45.7
+  tokens/s and a 32K prompt in 8.5 s at 1500, 47.3 / 46.3 / 8.3 s at 700. Only the pair with the most foreign VRAM
+  (~2.1 GiB) favours 1500 (+7%, where 700 fell to 41.8); with ~1.5 GiB 700 is 2.5-5% faster. No run fell into the slow
+  state G2b measured on 0.1.43.1 (37-44); the reserve stays as insurance for a busier desktop.
+
 ### Kept dialogs give RAM back when it runs short (2026-10-14, branch extras/cache-pressure)
 
 - **Before:** a dialog was parked only with `--conversation-cache-min-free-mib` (default 2560) free after it, but once
@@ -489,10 +542,12 @@ Tried and dropped:
   `--conversation-disk-dir <a folder on the fast NVMe> --conversation-disk-mib 131072 --conversation-disk-persist
   --conversation-disk-sync-s 60` and `STRATA_PARK_REWIND_MAX=8192` (safe now). One dialog's decode is unchanged (the
   disk is not touched during a request).
-  Since 0.1.44-nvfp4.1 the recommendation is smaller: kept dialogs and the disk tier stay off by default, and for one
+  Since 0.1.44.1-nvfp4.1 the recommendation is smaller: kept dialogs and the disk tier stay off by default, and for one
   user `--conversation-cache-mib 8192` with the default 4 dialogs is enough; the disk tier is for many agents.
 
 ### Upstream 0.1.44 (2026-10-14, release 0.1.44-nvfp4.1)
+
+Prepared as 0.1.44-nvfp4.1 and not published: it ships in 0.1.44.1-nvfp4.1 (above).
 
 - **Upstream took this fork's NVFP4 base.** Upstream 0.1.44's "NVFP4 packs" are sergiywith's port of this fork's NVFP4
   work: six of the fork's commits have the same patch as upstream's (603e4753 = e51b4379 the NVFP4 experts, e60e7655
