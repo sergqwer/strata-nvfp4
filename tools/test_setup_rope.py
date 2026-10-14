@@ -1,13 +1,18 @@
 """Tests for setup.py's automatic rope configuration (§4 + §6): the factor derives from the FINAL context
 actually served - RAM reductions first, then final / trained 262144 clamped at 1 - explicit
 --rope-scaling/--rope-scale choices win verbatim, an explicit none is refused past the trained range, and
-nothing turns on by itself inside it.  Pure functions - no GPU, no downloads, no prompts.
+nothing turns on by itself inside it.  Past it the method is dynamic where the engine runs it (one GPU, one
+dialog at a time, 8-bit K/V), else yarn.  No GPU, no downloads, no prompts.
 
     python -m unittest tools.test_setup_rope
 """
 from __future__ import annotations
 
+import contextlib
+import io
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -51,20 +56,40 @@ class ResolveRope(unittest.TestCase):
                         self.assertEqual(setup.resolve_rope(ctx, method, scale), (method, scale))
 
     # ---- the automatic flow the docs promise (an omitted flag, --yes or the interactive default)
-    def test_omitted_384k_gets_yarn_and_1_5(self):
-        self.assertEqual(setup.resolve_rope(393216, None, None), ("yarn", 1.5))
+    def test_omitted_384k_gets_dynamic_and_1_5(self):
+        self.assertEqual(setup.resolve_rope(393216, None, None), ("dynamic", 1.5))
 
-    def test_omitted_512k_gets_yarn_and_2(self):
-        self.assertEqual(setup.resolve_rope(524288, None, None), ("yarn", 2.0))
+    def test_omitted_512k_gets_dynamic_and_2(self):
+        self.assertEqual(setup.resolve_rope(524288, None, None), ("dynamic", 2.0))
 
     def test_deterministic_for_yes(self):
         # --yes never prompts, so the resolution must be a pure function of its inputs
         for _ in range(3):
-            self.assertEqual(setup.resolve_rope(524288, None, None), ("yarn", 2.0))
+            self.assertEqual(setup.resolve_rope(524288, None, None), ("dynamic", 2.0))
 
     def test_omitted_method_with_an_explicit_factor(self):
         # --rope-scale alone still expresses the intent to extend: the method defaults, the factor is kept
-        self.assertEqual(setup.resolve_rope(393216, None, 1.8), ("yarn", 1.8))
+        self.assertEqual(setup.resolve_rope(393216, None, 1.8), ("dynamic", 1.8))
+
+    # ---- dynamic where the engine runs it, yarn where it would refuse it
+    def test_yarn_where_dynamic_cannot_run(self):
+        for why in (setup.rope_dynamic_blocker(2), setup.rope_dynamic_blocker(1, 2),
+                    setup.rope_dynamic_blocker(1, 1, "q4_0")):
+            self.assertTrue(why)
+            self.assertEqual(setup.resolve_rope(524288, None, None, blocker=why), ("yarn", 2.0))
+        self.assertIsNone(setup.rope_dynamic_blocker(1, 1, "int8"))
+        self.assertIsNone(setup.rope_dynamic_blocker(1, None, "fp16", {"source": "local", "version": "0.1.44"}))
+        self.assertIn("engine", setup.rope_dynamic_blocker(1, None, "int8", {"version": "0.1.44"}))   # upstream's
+        old = {"fork": "x", "version": "0.1.43.1-nvfp4.1"}                    # this fork's, before dynamic
+        self.assertIn("engine", setup.rope_dynamic_blocker(1, None, "int8", old))
+
+    def test_an_explicit_dynamic_where_it_cannot_run_is_refused(self):
+        with self.assertRaises(ValueError) as cm:
+            setup.resolve_rope(524288, "dynamic", None, blocker=setup.rope_dynamic_blocker(1, 2))
+        self.assertIn("one dialog at a time", str(cm.exception))
+        self.assertIn("yarn", str(cm.exception))
+        self.assertEqual(setup.resolve_rope(524288, "dynamic", None), ("dynamic", 2.0))
+        self.assertEqual(setup.resolve_rope(131072, "dynamic", None), (None, None))   # within 262144: the stock model
 
     # ---- explicit selections are respected, verbatim
     def test_explicit_method_gets_the_derived_factor(self):
@@ -130,6 +155,76 @@ class ResolveRope(unittest.TestCase):
         # the old fallback applied to both methods, so the fix must too
         self.assertEqual(setup.resolve_rope(131072, "linear", None), ("linear", 1.0))
         self.assertEqual(setup.resolve_rope(393216, "linear", None), ("linear", 1.5))
+
+
+class DynamicInstall(unittest.TestCase):
+    """setup end to end (tools/test_setup_golden.py's mocked PC): 512K writes dynamic on one GPU, yarn on two or with
+    parallel dialogs; an explicit dynamic there is refused; the config says whose choice it was and keeps it in step."""
+
+    def install(self, argv, profile="64GB-1x32GB", **kw):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from test_setup_golden import PROFILES, install
+        ram, found = PROFILES[profile]
+        return install(ram, found, ["--family", "qwen", "--model", "Q2_0", "--no-start", "--context", "524288", *argv],
+                       **kw)
+
+    @staticmethod
+    def rope(cfg):
+        a = cfg["args"]
+        return a[a.index("--rope-scaling") + 1], a[a.index("--rope-scale") + 1], cfg.get("rope_auto")
+
+    def test_one_gpu_gets_dynamic(self):
+        code, out, cfg, _ = self.install([])
+        self.assertEqual(code, 0, out[-2000:])
+        self.assertEqual(self.rope(cfg), ("dynamic", "2", True))
+        self.assertIn("rope scaling: dynamic", out)
+
+    def test_interactive_default_is_dynamic(self):
+        code, out, cfg, asked = self.install([], answers="")
+        self.assertEqual(code, 0, out[-2000:])
+        self.assertTrue(any("RoPE extension method" in q and "[dynamic]" in q for q in asked), asked)
+        self.assertEqual(self.rope(cfg), ("dynamic", "2", True))
+        code, out, cfg, _ = self.install([], answers={"RoPE": "yarn"})
+        self.assertEqual(self.rope(cfg), ("yarn", "2", False))           # a pick of the user's: kept as it is
+
+    def test_yarn_on_two_gpus_and_with_parallel_dialogs(self):
+        for argv, profile, says in ((["--gpus", "0,1"], "32GB-2x24GB", "one GPU"),
+                                    (["--parallel", "2"], "64GB-1x32GB", "one dialog at a time")):
+            with self.subTest(argv=argv):
+                code, out, cfg, _ = self.install(argv, profile)
+                self.assertEqual(code, 0, out[-2000:])
+                self.assertEqual(self.rope(cfg), ("yarn", "2", True))
+                self.assertIn(says, out)
+                with contextlib.redirect_stderr(io.StringIO()) as err:
+                    code, out, cfg, _ = self.install(argv + ["--rope-scaling", "dynamic"], profile)
+                self.assertEqual(code, 1)                                 # fail(): nothing written
+                self.assertIn("--rope-scaling dynamic needs", out + err.getvalue())
+
+    def test_kept_in_step_with_the_config(self):
+        cfg = {"exe": "x", "args": ["--max-context", "524288", "--rope-scaling", "dynamic", "--rope-scale", "2",
+                                    "--kv", "int8"], "rope_auto": True}
+        self.assertIsNone(setup.fit_auto_rope(cfg))
+        cfg["parallel"] = 2                                                # "parallel" kept from an earlier config
+        self.assertIn("one dialog at a time", setup.fit_auto_rope(cfg))
+        self.assertEqual(cfg["args"][3], "yarn")
+        cfg.pop("parallel")
+        self.assertIn("dynamic", setup.fit_auto_rope(cfg))                 # and back
+        cfg["gpu"], cfg["rope_auto"] = [0, 1], False                       # the user's own dynamic: refused
+        with self.assertRaises(ValueError):
+            setup.fit_auto_rope(cfg)
+        cfg["args"][3] = "yarn"
+        self.assertIsNone(setup.fit_auto_rope(cfg))                        # the user's yarn: left alone
+
+    def test_read_back(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "strata-q2_0.json"
+            for auto, method, want in ((False, "dynamic", "dynamic"), (False, "linear", "linear"),
+                                       (True, "dynamic", None), (None, "yarn", None)):   # None: an older setup's
+                c = {"args": ["--max-context", "524288", "--rope-scaling", method, "--rope-scale", "2"]}
+                if auto is not None:
+                    c["rope_auto"] = auto
+                p.write_text(json.dumps(c))
+                self.assertEqual(setup.choices_from_config(p)["rope_scaling"], want, c)
 
 
 if __name__ == "__main__":
