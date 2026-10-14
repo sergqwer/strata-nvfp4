@@ -305,6 +305,19 @@ class Context(unittest.TestCase):
                     runconfig.apply(base, changes)
                 self.assertIn(f"rope_scaling: dynamic needs {says}", str(e.exception))
 
+    def test_amd_gets_yarn_unless_dynamic_is_picked(self):
+        hip = {**self.BASE, "backend": "hip"}                             # not measured on AMD: yarn, said why
+        new, _ = runconfig.apply(hip, {"max_context": 524288})
+        self.assertEqual((self.rope(new), new["rope_auto"]), (("524288", "yarn", "2"), True))
+        got = {k["key"]: k for k in runconfig.view(new, "x.json")["keys"]}["rope_scaling"]
+        self.assertIn("now: yarn, factor 2; dynamic is measured on NVIDIA only so far", got["help"])
+        mine, _ = runconfig.apply(new, {"rope_scaling": "dynamic"})      # picked: kept, no refusal
+        self.assertEqual(self.rope(mine), ("524288", "dynamic", "2"))
+        rope = lambda a: a[a.index("--rope-scaling") + 1]   # noqa: E731
+        self.assertEqual(rope(engine_args(mine)), "dynamic")
+        with contextlib.redirect_stdout(io.StringIO()):                   # an automatic dynamic on a HIP build
+            self.assertEqual(rope(engine_args({**new, "args": list(mine["args"])})), "yarn")
+
     def test_the_engine_gets_yarn_where_dynamic_cannot_run(self):
         new, _ = runconfig.apply(self.BASE, {"max_context": 524288})
         rope = lambda a: a[a.index("--rope-scaling") + 1]   # noqa: E731

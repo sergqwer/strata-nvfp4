@@ -92,6 +92,23 @@ class ResolveRope(unittest.TestCase):
         self.assertEqual(setup.resolve_rope(524288, "dynamic", None), ("dynamic", 2.0))
         self.assertEqual(setup.resolve_rope(131072, "dynamic", None), (None, None))   # within 262144: the stock model
 
+    def test_amd_gets_yarn_unless_dynamic_is_asked_for(self):
+        hip = setup.ROPE_DYNAMIC_HIP                                       # not measured there: no refusal
+        self.assertEqual(setup.resolve_rope(524288, None, None, untested=hip), ("yarn", 2.0))
+        self.assertEqual(setup.resolve_rope(524288, "dynamic", None, untested=hip), ("dynamic", 2.0))
+        cfg = {"exe": "x", "backend": "hip", "rope_auto": True,
+               "args": ["--max-context", "524288", "--rope-scaling", "dynamic", "--rope-scale", "2"]}
+        self.assertIn("NVIDIA only", setup.fit_auto_rope(cfg))
+        self.assertEqual(cfg["args"][3], "yarn")
+        cfg["args"][3], cfg["rope_auto"] = "dynamic", False                # the user's own dynamic on AMD: kept
+        self.assertIsNone(setup.fit_auto_rope(cfg))
+
+    def test_the_parallel_tip_says_it_switches_rope(self):
+        q2 = setup.MODELS["Q2_0"]["arena_gb"]
+        self.assertIn("switches RoPE from dynamic to yarn", setup.parallel_note(None, 32, q2, 524288, "int8", True,
+                                                                                 True)[0])
+        self.assertNotIn("RoPE", setup.parallel_note(None, 32, q2, 524288, "int8", True)[0])
+
     # ---- explicit selections are respected, verbatim
     def test_explicit_method_gets_the_derived_factor(self):
         self.assertEqual(setup.resolve_rope(524288, "linear", None), ("linear", 2.0))
