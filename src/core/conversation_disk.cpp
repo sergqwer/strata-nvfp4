@@ -401,10 +401,11 @@ size_t ConversationDiskTier::expire() {
     return n;
 }
 
-bool ConversationDiskTier::put(SavedConversation&& image) {
+bool ConversationDiskTier::put(SavedConversation&& image, bool flush) {
     if (!open_) return false;
     Job job;
     job.image = std::move(image);
+    job.flush = flush;
     job.entry.live = key_of(job.image.live);
     for (const auto& c : job.image.checkpoints) job.entry.checkpoints.push_back(key_of(c));
     job.entry.cvec = job.image.cvec;
@@ -468,11 +469,13 @@ void ConversationDiskTier::writer() {
 
 bool ConversationDiskTier::write_files(Entry& e, const SavedConversation& img,
                                        const std::vector<SessionKvSource>* sources,
-                                       const std::function<bool()>& cancel, std::string& error) {
+                                       const std::function<bool()>& cancel, std::string& error, bool flush) {
     const SessionFileIdentity id = file_identity();
     SessionWriteOptions wo;
     wo.min_free_bytes = options_.min_free_bytes;
-    wo.durable = false;   // a cache: a file a power loss damages fails its hash check and is read again from the prompt
+    // a cache: a file a power loss damages fails its hash check and is read again from the prompt.  Flushed only for
+    // RAM pressure: its bytes must leave the modified file cache before the next RAM reading
+    wo.durable = flush;
     wo.cancel = cancel;
     e.bytes = 0;
     auto write_one = [&](const SavedConversation& part, const std::vector<SessionKvSource>* src, size_t k) -> bool {
@@ -593,7 +596,7 @@ void ConversationDiskTier::write(Job& job) {
     const auto t0 = std::chrono::steady_clock::now();
     Entry e = std::move(job.entry);
     std::string error;
-    const bool ok = write_files(e, job.image, nullptr, {}, error);
+    const bool ok = write_files(e, job.image, nullptr, {}, error, job.flush);
     job.image = SavedConversation{};   // the RAM goes back now, written or not
     const double ms = ms_since(t0);
     if (!ok) {
