@@ -589,7 +589,7 @@ Prepared as 0.1.44-nvfp4.1 and not published: it ships in 0.1.44.1-nvfp4.1 (abov
     prompt in tokens/s: 2 cards 149.9 / 4,056 / 1,239 before, 144.8-150.4 / 6,936 / 1,742 after (one card 93.8 /
     5,472 / 1,250; the decode A/B 150.4, 149.8 against the release's 147.2, 153.3 is noise); 4 cards 154.9 / 3,880 /
     3,149 before, 154.1-158.3 / 9,703-9,997 / 2,903-3,303 after; a pair whose second card has a ~2 GB/s link and 16
-    GB: 66.8 / 1,592 / 434 before, 62.7 / 3,625 / 1,066 after (its first card alone 61.1 / 3,882 / 1,055). Tokens the
+    GB: 66.8 / 1,592 / 434 before, 70.1 / 3,867 / 1,204 after (its first card alone 61.1 / 3,882 / 1,055). Tokens the
     same as one card; the 2-card 32K KL against one card 0.0012 (the release's 0.0021); one card byte-identical;
   - extras/wddm-pin: the per-stage non-portable registration gives the portable one's bits and speed on 2 and 4
     cards (Linux); 2 cards with 8 GiB pinned each, 32K / 2K 2,547 / 835 before, 4,053 / 1,216 after (fully pinned
