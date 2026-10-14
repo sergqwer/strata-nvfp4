@@ -64,9 +64,10 @@ files by hand.
     (on the 5090: three dialogs, 3.3 GB, released in 0.1 s).
   - **The low-RAM mode pins its RAM copy in slices** (Q8_0 on 128 GB: decode 53 tokens/s instead of 49, a 32K prompt
     in 8.5 s instead of 9.9) and keeps 1500 MiB of VRAM free under Windows for the desktop.
-  - **`--rope-scaling dynamic`** (opt-in): no scaling while a dialog fits the trained 262,144 positions (the same bits
-    as none), yarn past them with the factor the length needs; past 262K as good as static yarn, which changes every
-    short dialog too.
+  - **`--rope-scaling dynamic` for contexts past 256K:** no scaling while a dialog fits the trained 262,144 positions
+    (the same bits as none), yarn past them with the factor the length needs; past 262K as good as static yarn, which
+    changes every short dialog too. Setup and Model settings write it on one NVIDIA GPU with one dialog at a time,
+    static yarn elsewhere.
   - **Every Qwen3.6-35B-A3B size can be installed on any PC:** a size bigger than the RAM gets a note, not a question.
 - **On upstream 0.1.44 (prepared as 0.1.44-nvfp4.1, published within 0.1.44.1-nvfp4.1), which ships this fork's NVFP4
   engine path.** Upstream's "NVFP4 packs" are a
