@@ -80,8 +80,9 @@ class ResolveRope(unittest.TestCase):
         self.assertIsNone(setup.rope_dynamic_blocker(1, 1, "int8"))
         self.assertIsNone(setup.rope_dynamic_blocker(1, None, "fp16", {"source": "local", "version": "0.1.44"}))
         self.assertIn("engine", setup.rope_dynamic_blocker(1, None, "int8", {"version": "0.1.44"}))   # upstream's
-        old = {"fork": "x", "version": "0.1.43.1-nvfp4.1"}                    # this fork's, before dynamic
+        old = {"fork": "x", "version": "0.1.44-nvfp4.1"}                      # this fork's, before dynamic
         self.assertIn("engine", setup.rope_dynamic_blocker(1, None, "int8", old))
+        self.assertIsNone(setup.rope_dynamic_blocker(1, None, "int8", {**old, "version": "0.1.44.1-nvfp4.1"}))
 
     def test_an_explicit_dynamic_where_it_cannot_run_is_refused(self):
         with self.assertRaises(ValueError) as cm:
