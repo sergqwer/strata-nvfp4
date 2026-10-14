@@ -18,6 +18,7 @@ struct RopeDynamic {
     double step = 0.125;                 ///< factors are multiples of this
     double max_factor = 2.0;
     bool reread = false;                 ///< STRATA_ROPE_DYNAMIC_REREAD=1: a change reads the prompt again
+    bool mscale = true;                  ///< --rope-dynamic-mscale 0: no yarn magnitude (attention temperature)
     double live = 1.0;                   ///< the factor the session's K/V and checkpoints were written with
     double table = 1.0;                  ///< the factor the rope table holds now
     int64_t switches = 0, rotated_cells = 0;
