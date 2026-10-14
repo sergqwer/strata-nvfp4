@@ -176,11 +176,14 @@ class InstallOwnPath(unittest.TestCase):
         rc, out = self.install(ram=46.0)
         self.assertTrue(self.cfg["args"][self.cfg["args"].index("--native") + 1].endswith("UD-Q6_K_XL.gguf"))
 
-    def test_a_bigger_size_than_the_ram_is_asked_not_refused(self):
-        with mock.patch.object(setup, "confirm_risk", lambda *a, **k: None):
+    def test_a_bigger_size_than_the_ram_is_installed_with_a_note(self):
+        def no_question(*a, **k):
+            raise AssertionError("a size bigger than the RAM must not ask")
+        with mock.patch.object(setup, "confirm_risk", no_question):
             rc, out = self.install(ram=32.0, model="Q8_0")
         self.assertEqual(rc, 0, out)
         self.assertIn("installing Q8_0 with 32 GB of RAM, as you chose", out)
+        self.assertIn("needs about 52 GB", out)
 
     def test_an_engine_without_the_family_is_refused_before_the_download(self):
         self.families = {"qwen4exp"}

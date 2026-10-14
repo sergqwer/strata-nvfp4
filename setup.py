@@ -8598,12 +8598,9 @@ def install_own_path(a, family, gpu, hip, amd, cuda_tk, multi, port, ram, adopte
         say(f"  Recommended for {ram:.0f} GB of RAM: {rec} (the largest that fits; any size can be chosen)")
     model = a.model or names[int(ask("Which size?", [str(i) for i in range(1, len(names) + 1)],
                                      str(names.index(rec) + 1), a.yes)) - 1]
-    if ram < fam["models"][model]["ram_gb"]:
-        confirm_risk(f"{model} needs about {fam['models'][model]['ram_gb']} GB of RAM; this PC has {ram:.0f} GB: the "
-                     "OS may page and it may not start", bool(a.model), a.yes,
-                     f"{model} needs about {fam['models'][model]['ram_gb']} GB of RAM",
-                     f"choose a smaller size, or --model {model} --yes to install it anyway", "  Install it anyway?")
-        warn(f"installing {model} with {ram:.0f} GB of RAM, as you chose")
+    if ram < fam["models"][model]["ram_gb"]:            # every size stays available on any PC: a note, no question
+        warn(f"installing {model} with {ram:.0f} GB of RAM, as you chose: it needs about "
+             f"{fam['models'][model]['ram_gb']} GB, so the OS may page and it may not start")
     ok(f"size: {model}")
     tag = fam["tag"] + model
     rec_ctx = own_path_context(fam, gpu.get("vram_gb", 0.0))
