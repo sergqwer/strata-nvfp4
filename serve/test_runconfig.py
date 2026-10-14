@@ -218,8 +218,9 @@ class Parallel(unittest.TestCase):
 
 
 class Context(unittest.TestCase):
-    """--max-context as setup's sizes, never empty; past the trained 262144 the RoPE extension setup writes (yarn unless
-    linear is picked, the factor context / 262144), taken out again within it; none past it refused, as by setup."""
+    """--max-context as setup's sizes, never empty; past the trained 262144 the RoPE extension setup writes (empty:
+    dynamic on one GPU and one dialog at a time, else yarn; the factor context / 262144), taken out again within it;
+    none past it refused, as by setup."""
     BASE = {**CFG, "args": CFG["args"] + ["--max-context", "262144"]}
 
     def rope(self, cfg):
@@ -228,15 +229,18 @@ class Context(unittest.TestCase):
 
     def test_past_the_trained_context_and_back(self):
         new, changed = runconfig.apply(self.BASE, {"max_context": 524288})
-        self.assertEqual((changed, self.rope(new)), (["max_context", "rope_scaling"], ("524288", "yarn", "2")))
+        self.assertEqual((changed, self.rope(new)), (["max_context", "rope_scaling"], ("524288", "dynamic", "2")))
+        self.assertIs(new["rope_auto"], True)
         new, changed = runconfig.apply(new, {"max_context": 393216})
-        self.assertEqual((changed, self.rope(new)), (["max_context"], ("393216", "yarn", "1.5")))
+        self.assertEqual((changed, self.rope(new)), (["max_context"], ("393216", "dynamic", "1.5")))
         new, changed = runconfig.apply(new, {"rope_scaling": "linear"})
-        self.assertEqual((changed, self.rope(new)), (["rope_scaling"], ("393216", "linear", "1.5")))
-        new, changed = runconfig.apply(new, {"rope_scaling": None})     # the default past 262144: yarn again
-        self.assertEqual((changed, self.rope(new)), (["rope_scaling"], ("393216", "yarn", "1.5")))
+        self.assertEqual((changed, self.rope(new), new["rope_auto"]), (["rope_scaling"], ("393216", "linear", "1.5"),
+                                                                       False))
+        new, changed = runconfig.apply(new, {"rope_scaling": None})     # the default past 262144: dynamic again
+        self.assertEqual((changed, self.rope(new)), (["rope_scaling"], ("393216", "dynamic", "1.5")))
         new, changed = runconfig.apply(new, {"max_context": 131072})
         self.assertEqual((changed, self.rope(new)), (["max_context", "rope_scaling"], ("131072", None, None)))
+        self.assertNotIn("rope_auto", new)
         self.assertEqual(new["args"][:len(CFG["args"])], CFG["args"])    # the other args stay
         both, changed = runconfig.apply(self.BASE, {"max_context": 524288, "rope_scaling": "linear"})
         self.assertEqual((changed, self.rope(both)), (["max_context", "rope_scaling"], ("524288", "linear", "2")))
@@ -249,8 +253,9 @@ class Context(unittest.TestCase):
         self.assertEqual([n for n, _ in ctx["choices"]], runconfig.CONTEXTS)
         self.assertIn("trained", dict(ctx["choices"])[262144])
         self.assertIn("RoPE", dict(ctx["choices"])[524288])
-        self.assertEqual((rope["kind"], rope["value"], rope["choices"]), ("enum", "yarn", ["yarn", "linear"]))
-        self.assertIn("now: yarn, factor 2", rope["help"])
+        self.assertEqual((rope["kind"], rope["value"], rope["choices"], rope["default"]),
+                         ("enum", None, ["dynamic", "yarn", "linear"], "default: dynamic past 262,144"))
+        self.assertIn("now: dynamic, factor 2", rope["help"])
         odd = {k["key"]: k for k in runconfig.view({**CFG, "args": ["--max-context", "100000"]}, "x")["keys"]}
         self.assertIn(100000, [n for n, _ in odd["max_context"]["choices"]])   # the file's own size is listed
 
@@ -264,8 +269,51 @@ class Context(unittest.TestCase):
         hand = {**CFG, "args": ["--max-context", "262144", "--rope-scaling", "none"]}
         with self.assertRaises(ValueError) as e:                          # none past 262144, as setup refuses it
             runconfig.apply(hand, {"max_context": 524288})
-        self.assertIn("pick yarn or linear", str(e.exception))
+        self.assertIn("pick dynamic, yarn or linear", str(e.exception))
         self.assertEqual(runconfig.apply(hand, {"fit_max_tokens": True})[0]["args"], hand["args"])   # left alone
+
+    def test_dynamic_follows_the_gpus_and_the_dialogs_at_once(self):
+        new, _ = runconfig.apply(self.BASE, {"max_context": 524288})
+        two, changed = runconfig.apply(new, {"parallel": 2})            # an automatic dynamic: yarn, and back
+        self.assertEqual((changed, self.rope(two), two["rope_auto"]), (["parallel", "rope_scaling"],
+                                                                       ("524288", "yarn", "2"), True))
+        got = {k["key"]: k for k in runconfig.view(two, "x.json")["keys"]}["rope_scaling"]
+        self.assertEqual((got["value"], got["default"]), (None, "default: yarn past 262,144"))
+        self.assertIn("now: yarn, factor 2; dynamic needs one dialog at a time", got["help"])
+        for back in (1, None):
+            one, changed = runconfig.apply(two, {"parallel": back})
+            self.assertEqual((changed, self.rope(one)), (["parallel", "rope_scaling"], ("524288", "dynamic", "2")))
+        split, _ = runconfig.apply({**self.BASE, "gpu": [0, 1]}, {"max_context": 524288})
+        self.assertEqual(self.rope(split), ("524288", "yarn", "2"))      # a layer split over two GPUs
+        own, _ = runconfig.apply(new, {"rope_scaling": "yarn"})          # the user's yarn stays yarn
+        self.assertEqual(self.rope(runconfig.apply(own, {"parallel": 1})[0]), ("524288", "yarn", "2"))
+        self.assertEqual(runconfig.dynamic_blocker({**CFG, "args": ["--kv", "q4_0"]}), "needs 8-bit or fp16 K/V "
+                                                                                       "(--kv q4_0)")
+
+    def test_a_picked_dynamic_that_cannot_run_is_refused(self):
+        dyn, changed = runconfig.apply(self.BASE, {"max_context": 524288, "rope_scaling": "dynamic"})
+        self.assertEqual((changed, self.rope(dyn), dyn["rope_auto"]), (["max_context", "rope_scaling"],
+                                                                       ("524288", "dynamic", "2"), False))
+        for base, changes, says in ((dyn, {"parallel": 2}, "one dialog at a time"),
+                                    ({**dyn, "gpu": [0, 1]}, {"max_context": 393216}, "one GPU"),
+                                    ({**dyn, "parallel": 3}, {"rope_scaling": "yarn"}, None)):
+            with self.subTest(changes=changes):
+                if says is None:                                          # yarn is fine there
+                    self.assertEqual(self.rope(runconfig.apply(base, changes)[0]), ("524288", "yarn", "2"))
+                    continue
+                with self.assertRaises(ValueError) as e:
+                    runconfig.apply(base, changes)
+                self.assertIn(f"rope_scaling: dynamic needs {says}", str(e.exception))
+
+    def test_the_engine_gets_yarn_where_dynamic_cannot_run(self):
+        new, _ = runconfig.apply(self.BASE, {"max_context": 524288})
+        rope = lambda a: a[a.index("--rope-scaling") + 1]   # noqa: E731
+        self.assertEqual(rope(engine_args(new)), "dynamic")
+        for hand in ({"gpu": [0, 1]}, {"parallel": 2}):                   # set by hand or at start, not on the page
+            with self.subTest(hand=hand), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(rope(engine_args({**new, **hand})), "yarn")
+        mine = {**new, "rope_auto": False, "parallel": 2}                 # the user's own: the engine says why
+        self.assertEqual(rope(engine_args(mine)), "dynamic")
 
     def test_the_page_keeps_a_required_choice(self):
         js = (ROOT / "serve" / "web" / "app.js").read_text(encoding="utf-8")
