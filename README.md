@@ -2,7 +2,7 @@
 
 **Qwen3.8-Flash-Next (125B hybrid MoE) with NVFP4 experts on one RTX 20, 30, 40 or 50 card (12 GB of VRAM or more)
 and 64 GB of RAM or more, text and pictures.** A fork of [Niko1221/Strata](https://github.com/Niko1221/Strata), on
-upstream 0.1.44. Setup installs, ready-made from Hugging Face, the original Qwen in NVFP4 (our GPTQ, or NVIDIA's
+upstream 0.1.44.1. Setup installs, ready-made from Hugging Face, the original Qwen in NVFP4 (our GPTQ, or NVIDIA's
 checkpoint converted), censored as Qwen ships it; on ours an opt-in switch turns the censorship off. Upstream's GGUF
 models are still offered.
 
@@ -51,7 +51,25 @@ files by hand.
 
 ## What's new
 
-- **On upstream 0.1.44 (0.1.44-nvfp4.1), which ships this fork's NVFP4 engine path.** Upstream's "NVFP4 packs" are a
+- **On upstream 0.1.44.1 (0.1.44.1-nvfp4.1).** Upstream's hotfix: CPUs without AVX2 start again (#2324: the NVFP4 CPU
+  rows' tables were built before `main` with AVX instructions, an illegal instruction on such a CPU, now none), a
+  crashed engine start is named instead of retried as a GPU runtime start, the Responses API (Codex) honours the
+  config's `reasoning_effort`, and setup run again over an installed model keeps its size instead of moving it to the
+  new recommendation (here also for Qwen3.6, whose re-run kept neither its size nor its family). One GPU and one
+  dialog give the same bits as 0.1.44 at the same speed
+  ([the port and its checks](docs/NVFP4.md#upstream-01441-2026-10-14-release-01441-nvfp41)). New in this fork since
+  0.1.44:
+  - **Kept dialogs give RAM back when it runs short:** below `--conversation-cache-min-free-mib` the parked dialogs
+    leave RAM oldest first (to the disk tier when one is set), checked before every request and every 2 s while idle
+    (on the 5090: three dialogs, 3.3 GB, released in 0.1 s).
+  - **The low-RAM mode pins its RAM copy in slices** (Q8_0 on 128 GB: decode 53 tokens/s instead of 49, a 32K prompt
+    in 8.5 s instead of 9.9) and keeps 1500 MiB of VRAM free under Windows for the desktop.
+  - **`--rope-scaling dynamic`** (opt-in): no scaling while a dialog fits the trained 262,144 positions (the same bits
+    as none), yarn past them with the factor the length needs; past 262K as good as static yarn, which changes every
+    short dialog too.
+  - **Every Qwen3.6-35B-A3B size can be installed on any PC:** a size bigger than the RAM gets a note, not a question.
+- **On upstream 0.1.44 (prepared as 0.1.44-nvfp4.1, published within 0.1.44.1-nvfp4.1), which ships this fork's NVFP4
+  engine path.** Upstream's "NVFP4 packs" are a
   port of this fork's work: its NVFP4 experts, MMQ tails, mixed formats and CPU rows are upstream's code now, and this
   fork runs upstream's copy. Upstream's `--family nvfp4 --model NVFP4 | NVFP4-NVIDIA` install this fork's
   `qwen-nvfp4-gptq` / `qwen-nvidia-nvfp4` here, one install path
@@ -73,7 +91,7 @@ files by hand.
   - **Two GPUs:** the auto split keeps room on its fullest card (#1440); a slow link costs more only from a 4x gap
     (#2007); the VRAM check covers every card (#2192).
   - Opt-in: `--adapt-async 1` in the arena (#1904), `STRATA_PIN_BY_NEED=1` on Windows (#1905), `--prefill-head-alias`.
-- **Also in 0.1.44-nvfp4.1:**
+- **Also new since 0.1.42-nvfp4.2** (prepared as 0.1.44-nvfp4.1):
   - **Several GPUs (layer split, #7):** a prompt is read in chunks per stage so the stages work at the same time, a
     card on a slow link holds every expert of its layers, the CPU prompt share works on a split. On rented RTX 4090s
     a 32K prompt reads at 6,936 tokens/s on 2 cards (4,056 before; one card 5,472) and 9,703-9,997 on 4 (3,880
@@ -92,7 +110,7 @@ files by hand.
     controls are back inside the card.
   - The Windows zip ships `strata_kq.dll` (upstream's K-quant prompt kernels, for UD-Q5_K_XL / UD-Q6_K_XL and
     Qwen3.6).
-- **On upstream 0.1.43.1 (prepared as 0.1.43.1-nvfp4.1, published within 0.1.44-nvfp4.1).** Upstream's changes
+- **On upstream 0.1.43.1 (prepared as 0.1.43.1-nvfp4.1, published within 0.1.44.1-nvfp4.1).** Upstream's changes
   that matter here ([the port and its checks](docs/NVFP4.md#upstream-01431-2026-10-13-release-01431-nvfp41)):
   - **Non-finite logits are caught** (#879, #1892): when a decode window's logits turn NaN, the server sends none of
     its tokens, drops the damaged caches and reads the prompt again from token 0, instead of answering "!". On by
@@ -507,7 +525,7 @@ The switches kept only for A/B runs (each gives the same bits or a measured alte
 
 A long Claude Code conversation once turned into "!" mid-reply (token 0, what the sampler gives when no logit is
 finite), and the cause is not found yet
-([docs](docs/NVFP4.md#-after-a-long-conversation-2026-10-05-release-0139-nvfp42)). Since 0.1.44-nvfp4.1
+([docs](docs/NVFP4.md#-after-a-long-conversation-2026-10-05-release-0139-nvfp42)). Since 0.1.44.1-nvfp4.1
 upstream's guard (#879) catches non-finite logits first: the window's tokens are not sent, the caches are dropped, the
 prompt is read again and the engine log has a `non-finite logits (#879)` line. The server still starts a fresh engine
 at the next request after a reply of "!". To find out what was damaged, give the engine `STRATA_BANG_AUDIT=1` and

@@ -374,6 +374,58 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### Upstream 0.1.44.1 (2026-10-14, release 0.1.44.1-nvfp4.1)
+
+0.1.44-nvfp4.1 was prepared and not published; this release is it on upstream's hotfix, with three more of this
+fork's branches.
+
+- **Upstream's hotfix, merged** (`git merge v0.1.44.1`, 11 commits): the NVFP4 CPU rows build their tables without
+  static initialisers (#2324: the compiler used AVX/FMA in a constructor of `nvfp4_avx2.cpp` / `nvfp4_avx512.cpp`, so a
+  CPU without them died with an illegal instruction before `main`), and `tools/check_isa_guard.py` now flags such
+  initialisers; the server names how a crashed engine start ended (signal / NTSTATUS, the CPU's AVX flags after an
+  illegal instruction) instead of retrying it as a GPU runtime start; `q36_engine.cu` builds with CUDA 12.1; Metal
+  fixes (#2323); the Responses API honours the config's `reasoning_effort`; setup run again keeps the installed size.
+  These NVFP4 CPU files are upstream's copy in this fork since 0.1.44 (no change of ours), so the fix runs as shipped.
+- **Conflicts** (setup and its tests only): upstream's re-run rule for the three `env` entries 0.1.44 made setup's own
+  (`STRATA_ROUTE_TAIL_SKIP`, `STRATA_MMQ_KQ`, `STRATA_HC_Q8`: setup's in an Unsloth config, the user's elsewhere) beside
+  this fork's `uncensored` / `sampling` keys and its sampling carry-over. This fork's NVFP4, Q8_0 and mix packs and
+  Qwen3.6 never get those entries from setup, so there they stay the user's. The engine minimum is upstream's 0.1.44.1
+  and this release's 0.1.44.1-nvfp4.1 above it.
+- **"Run again keeps the installed size", for every family here.** Upstream's rule covers the GGUF size menu (Qwen,
+  Swift, Coder, Unsloth with this fork's UD-Q3_K_XL); the NVFP4 families have one size each and a re-run already kept
+  the installed family. Qwen3.6 had neither: its own size menu recommends the largest size the RAM allows, so Enter
+  moved an installed UD-Q4_K_XL to Q8_0 on a 64 GB PC (a third of the speed on a 32 GB card), and the re-run's family
+  default skipped it for qwen-nvfp4-gptq. Both keep the installed choice now; a named `--model` still wins, and a size
+  bigger than the RAM stays a note, not a question.
+- **This fork's branches since 0.1.44:**
+  - extras/cache-pressure: kept dialogs give RAM back when it runs short (the section below).
+  - fix/lowram-slice-pin-044: the low-RAM mode page-locks its RAM copy in slices (each within the adapter's budget)
+    instead of one allocation, which Windows usually refuses at this size. Q8_0 on 128 GB, 0.1.44's copy vs the slices: decode
+    48.8 -> 55.0 tokens/s, a 32K prompt 9.9 -> 8.1 s, the start 8 s sooner, for ~0.7 GiB less available RAM; the
+    teacher-forced KL against the old copy is at the placement-noise level, and the 128 GB arena path is byte-identical.
+    With it, under WDDM the low-RAM mode keeps 1500 MiB of VRAM free by default (`--vram-reserve-mib` overrides), for
+    other programs' VRAM: on an idle desktop that costs 161 slots and ~3% decode (53.3 / 8.5 s).
+  - extras/rope-dynamic: `--rope-scaling dynamic` (opt-in): no scaling while a dialog fits 262,144 positions (byte-
+    identical to none), past them yarn with factor = length / 262,144 rounded up to 0.125, at most --max-context /
+    262,144; the cached keys are rotated when the factor changes (8-15 ms, plus a 30-48 ms table rebuild). Past 262K
+    it gains what static yarn gains (-0.011 nats on the far bands, ~1% perplexity; the needles 13/13 either way), and
+    unlike static yarn it leaves every shorter dialog as it was (static yarn: KL 0.056 there).
+- **Checks** (RTX 5090 + Ryzen 9 9950X3D, 128 GB; release build 3dc869fb at 5e545298: portable, 75/86/89/120, CUDA 13.3):
+  - the kit's identity (`--exact --cache 3000`, qwen-nvfp4-gptq): a 2K and a 32K prompt give the same first-token
+    logits and greedy tokens (12 / 20) as 0.1.44-nvfp4.1's engine 996c4a76, with every flag off at 262,144 and with
+    `--rope-scaling dynamic` at 524,288;
+  - Qwen3.6-35B-A3B UD-Q4_K_XL: the same 128 tokens (plain and with MTP 2) and the first 4 steps' logits, bit for bit,
+    as upstream's own v0.1.44.1 release exe (and as 0.1.44); 218 tokens/s greedy, 365 with MTP 2;
+  - decode 190.5 tokens/s against 0.1.44-nvfp4.1's 186.0 (medians of 5 interleaved pairs, 1,000 tokens; per pair
+    1.009): the same speed;
+  - check_isa_guard on a portable build: no wide-ISA code an AVX2-only CPU can reach (0 of 76 functions);
+  - 121 of 124 engine tests (the other 3 need model files), the server's 920, the tools' 970 (setup's 696);
+  - the tray's GPTQ config starts in 12 s through the server and answers.
+- **The 1500 MiB reserve with a loaded desktop** (G2b's VRAM holder at 1 GiB, Q8_0 low-RAM, 3 pairs): 47.1 / 45.7
+  tokens/s and a 32K prompt in 8.5 s at 1500, 47.3 / 46.3 / 8.3 s at 700. Only the pair with the most foreign VRAM
+  (~2.1 GiB) favours 1500 (+7%, where 700 fell to 41.8); with ~1.5 GiB 700 is 2.5-5% faster. No run fell into the slow
+  state G2b measured on 0.1.43.1 (37-44); the reserve stays as insurance for a busier desktop.
+
 ### Kept dialogs give RAM back when it runs short (2026-10-14, branch extras/cache-pressure)
 
 - **Before:** a dialog was parked only with `--conversation-cache-min-free-mib` (default 2560) free after it, but once
@@ -489,6 +541,101 @@ Tried and dropped:
   `--conversation-disk-dir <a folder on the fast NVMe> --conversation-disk-mib 131072 --conversation-disk-persist
   --conversation-disk-sync-s 60` and `STRATA_PARK_REWIND_MAX=8192` (safe now). One dialog's decode is unchanged (the
   disk is not touched during a request).
+  Since 0.1.44.1-nvfp4.1 the recommendation is smaller: kept dialogs and the disk tier stay off by default, and for one
+  user `--conversation-cache-mib 8192` with the default 4 dialogs is enough; the disk tier is for many agents.
+
+### Upstream 0.1.44 (2026-10-14, release 0.1.44-nvfp4.1)
+
+Prepared as 0.1.44-nvfp4.1 and not published: it ships in 0.1.44.1-nvfp4.1 (above).
+
+- **Upstream took this fork's NVFP4 base.** Upstream 0.1.44's "NVFP4 packs" are sergiywith's port of this fork's NVFP4
+  work: six of the fork's commits have the same patch as upstream's (603e4753 = e51b4379 the NVFP4 experts, e60e7655
+  = 37216b6e the MMQ tails, e262d4fd = f235e394 mixed formats, 289df10b = 77c6991d the CPU share's NVFP4 rows,
+  5e36360a = b766cde6 the AVX2 rows, 7ad11ee3 = f72f203d the CPU rows' scales), and fac29f22 (the tail skip off with
+  NVFP4 experts) is upstream's 55e2072c. They were not carried: upstream's copies run, with upstream's later NVFP4
+  decode kernels (546d7675, 6e6d4faf: "bitwise the same") and its cache-slot fix (e48c803e). Three more fork commits
+  came out empty (the ISA guard, the NUL byte, #1840's quoted `</tool_response>`, which upstream's #2026 follow-up
+  covers more widely). 142 of the 153 commits since 0.1.43.1 are carried.
+- **One code path per feature** (the full table: Strata-data/port-044/RECONCILE.md):
+  - the tail skip: upstream's NVFP4 test OR the fork's (any native pack without GGUF offsets: Q8_0, the mix); one line;
+  - setup: this fork's NVFP4 families stay the only NVFP4 install path; upstream's `nvfp4` family (its MODELS
+    entries, its second NVFP4_REPOS table, `ready_*` and every `ready` branch of main) is removed, and `--family
+    nvfp4 [--model NVFP4 | NVFP4-NVIDIA]` or `--model NVFP4` install `qwen-nvfp4-gptq` / `qwen-nvidia-nvfp4` (upstream
+    pins the same two uploads). Upstream's card note (RTX 50 native FP4; older cards run it at 8-bit and UD-IQ4_XS is
+    faster there) is now on this fork's NVFP4 menu lines;
+  - Unsloth's all-in-RAM rule is upstream's now (it took this fork's `unsloth_budget` and 16 GiB verbatim); this
+    fork's UD-Q3_K_XL is listed after UD-IQ4_XS beside upstream's UD-Q5/Q6_K_XL and Q8_0;
+  - the quoted tool tags: upstream's #2026 follow-up; this fork adds the wrapped tool result with a picture between
+    its pair;
+  - upstream's `mmq_nvfp4_parity` GCC fix (-mf16c) replaces the fork's portable conversion there;
+  - docs/NVFP4.md stays this fork's record; upstream's NVFP4.md is kept as docs/NVFP4.upstream.md.
+- **Upstream's new opt-ins beside the fork's features:** `STRATA_PIN_BY_NEED=1` (#1905, Windows, one GPU) chooses its
+  pinned set before the arena opens, so the arena then loads where upstream loads it (not on the fork's thread);
+  extras/wddm-pin's per-stage pin and DXGI cap act on a split only, so the two never meet. `--adapt-async 1` in the
+  arena (#1904) turns `STRATA_ADAPT_FETCH` off, as before. #2170's give-way keeps the fork's `--batch-max-context`
+  rule. #2007's relative link scale now decides extras/mgpu-fixes' slow-link residency (a slow stage from a 4x gap;
+  `STRATA_SPLIT_LINK_ABS=1` keeps the old 20 GB/s rule).
+- **The extras on top:** extras/mgpu-fixes, extras/wddm-pin, extras/batch-vram, extras/dialog-park and
+  extras/gui-settings, each its own merge. One build fix: upstream's pin-by-need constructor called #243's
+  `sliced_pin_limit`, which wddm-pin renamed `shared_pin_limit`.
+- **Audit fixes** (two read-only reviews of where upstream 0.1.44 and the fork meet): the PCIe share's pick takes only
+  pinned misses (pin by need pins a layer in part); `--prefill-head-alias` turns the elastic K/V off (its start failed
+  on a full card); a session file names the K/V rotation the session runs (the fork rotates by default; upstream's
+  reading of `STRATA_KV_ROT` gave both modes one identity); #2090's earlier loan start stays above a grown elastic K/V;
+  the non-CUDA VMM stubs take the device argument. The default single-GPU path is the same bits.
+- **What the extras measured** (their own runs before this port; the code is the same on 0.1.44):
+  - extras/mgpu-fixes on a rented 4x RTX 4090 server (PCIe 4, a Zen 2 host with DDR4), decode / 32K prompt / 2K
+    prompt in tokens/s: 2 cards 149.9 / 4,056 / 1,239 before, 144.8-150.4 / 6,936 / 1,742 after (one card 93.8 /
+    5,472 / 1,250; the decode A/B 150.4, 149.8 against the release's 147.2, 153.3 is noise); 4 cards 154.9 / 3,880 /
+    3,149 before, 154.1-158.3 / 9,703-9,997 / 2,903-3,303 after; a pair whose second card has a ~2 GB/s link and 16
+    GB: 66.8 / 1,592 / 434 before, 62.7 / 3,625 / 1,066 after (its first card alone 61.1 / 3,882 / 1,055). Tokens the
+    same as one card; the 2-card 32K KL against one card 0.0012 (the release's 0.0021); one card byte-identical;
+  - extras/wddm-pin: the per-stage non-portable registration gives the portable one's bits and speed on 2 and 4
+    cards (Linux); 2 cards with 8 GiB pinned each, 32K / 2K 2,547 / 835 before, 4,053 / 1,216 after (fully pinned
+    6,894 / 1,756); the unpinned path (a full copy ring, 8 copy threads): one 4090 with nothing pinned 3,153 / 554
+    before, 4,363 / 824 after; this RTX 5090 with nothing pinned a 32K prompt at 6,065-6,434 before, 7,402-7,965
+    after (87-88% of the pinned speed), with 8 GiB pinned 6,365-6,673 before, 7,717-8,225 after. Windows with
+    several GPUs (the WDDM accounting itself) has not run it: #7's test kit asks for that;
+  - extras/batch-vram, `parallel` 4 at 262K, tokens/s in all for 1 / 2 / 4 / 8 dialogs at once: one 4090 36.5 /
+    36.8 / the engine ended / 30.9 before, 72.0 / 73.4 / 94.0 / 96.2 after (the slots' K/V 14.61 GiB before, 2.80
+    after); a 16 GB card did not start before, 53.2 / 55.7 / 64.1 / 64.9 after; 2 cards 68.4 / 83.1 / 105.2 / 108.4
+    before, 86.1 / 108.0 / 137.1 / 146.3 after (7.45 GiB per stage before, 2.11 after); this RTX 5090 127.4 / 141.4 /
+    179.4 / 184.6 (with `parallel` 1: 138.4 / 150.5 / 154.5 / 155.2). One dialog alone is fastest with `parallel` 1,
+    which stays the default;
+  - extras/dialog-park and extras/gui-settings: their sections above. Kept dialogs stay opt-in: for one user
+    `--conversation-cache-mib 8192` (the default 4 dialogs) is enough, and the disk tier needs its folder.
+- **Qwen3.6-35B-A3B on this fork** (upstream 0.1.44's new family, `--family qwen36`; setup's pinned UD-Q4_K_XL, its
+  SHA-256 checked, setup's config: `--max-context 131072 --prefill auto --mtp 2` on this RTX 5090): the same code path
+  as upstream's, and the same bits - against upstream's own v0.1.44 Windows release exe, a 2,100-token prompt gives the
+  same 128 greedy tokens, with and without MTP, and the first 4 steps' full logits bit for bit. Every routed expert in
+  VRAM (18.75 GiB, 2.62 GiB dense), ready in 8 s. Prompt 7,928 tokens/s at 2K and 6,492-6,529 at 32K (upstream's exe
+  7,800 / 6,506-6,529); decode 218 tokens/s without drafts, 358 with `--mtp 2` (82% of the drafts accepted; upstream's
+  218 / 353). Through the server with setup's config: a greedy answer at 411 tokens/s, a thinking answer at 422 (91% of
+  the drafts accepted), a 33,008-token prompt in 5.3 s (6,222 tokens/s). UD-Q6_K_XL does not fit the card whole:
+  upstream's hybrid mode keeps 153 of 256 experts per layer in VRAM (16.75 GiB), all 28 GiB of them pinned in RAM, and
+  computes the rest on 16 CPU threads; again the same bits as upstream's exe; 4,322 tokens/s at 2K, decode 83 / 138 with
+  `--mtp 2` (80%); through the server 131-151 tokens/s, a 33K prompt in 8.9 s, 61 GiB less available RAM. Setup
+  recommends the largest size the RAM allows (Q8_0 from 64 GB, by RAM only), so on a 32 GB card it picks a hybrid size
+  about a third as fast as UD-Q4_K_XL (Q8_0 itself not run here).
+- **Checked** (RTX 5090 + Ryzen 9 9950X3D, 128 GB, `qwen-nvfp4-gptq`; the release build 996c4a76 of b85fc8a1, the
+  release commit after it changes no engine file; references: 0.1.43.1-nvfp4.1's engine 81049f34):
+  - 2K and 32K (`--pcie-frac 0.25`, the CPU share 0.5): the same 32 tokens; the logits bit for bit at 5,999 slots,
+    the count 81049f34 placed for `--expert-cache 6000` (upstream's e48c803e gives a sized cache all 6,000 slots now;
+    at 6,000 the 2K logits move by KL 0.000084 with the same top token and the same tokens, 32K stays identical); the
+    final build gives the base port's logits (ea17e0ed, before the extras and the audit fixes) bit for bit at 6,000;
+  - through the server, the tail skip left unset, the 12 KL texts' rows and logpos files are byte for byte those of
+    81049f34 (7,999 slots = its 8,000); the start line says the skip is off for this fork's packs;
+  - the tray's gptq config starts (every expert in RAM on large pages, the PLE probe 820K rows/s) and answers; with
+    8 GiB x 4 kept dialogs and a persistent disk folder it starts with "conversation disk: on" (a run shorter than the
+    60 s idle save leaves the folder empty);
+  - with every fork default off the logits equal upstream 0.1.44's on IQ2_XS (32K, 12,000 slots; the base port's
+    build);
+  - tests: 121 of 124 engine tests pass (the 3 others need model files this PC does not have); the server's 904 OK
+    (17 skipped); setup's and the tools' 930, all but `test_iq_pack` (no `yaml` in that venv; its 24 pass in one
+    that has it).
+- **Decode speed**, 5 interleaved pairs (`bench_prompt.txt`, 1,000 tokens, `--stop-eos`, cache auto): 0.1.43.1-nvfp4.1's
+  engine 186.5 tokens/s (median; mean 187.4 +- 2.9), this one 186.8 (187.4 +- 3.9), the ratio per pair 1.010
+  (median); the same misses per layer (2.13 / 2.16) and cache hits (92.8%).
 
 ### Upstream 0.1.43.1 (2026-10-13, release 0.1.43.1-nvfp4.1)
 
