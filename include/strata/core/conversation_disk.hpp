@@ -79,8 +79,9 @@ public:
 
     /// Queues `image` for the writer; its RAM is freed when its write ends, stored or not.  Every checkpoint is written
     /// with it (they hold no K/V), so a prompt that leaves the conversation early still resumes from one.  False when
-    /// the tier is off or over budget.
-    bool put(SavedConversation&& image);
+    /// the tier is off or over budget.  `flush` (RAM pressure): the file is flushed before its RAM is counted as back -
+    /// unflushed, Windows keeps the written bytes as modified file cache, which the available figure leaves out.
+    bool put(SavedConversation&& image, bool flush = false);
 
     struct Match {
         uint64_t id = 0;        ///< the entry (stable while the writer runs; 0 = none)
@@ -168,12 +169,13 @@ private:
     struct Job {
         Entry entry;
         SavedConversation image;
+        bool flush = false;                      ///< put(flush): written durably
     };
     void writer();
     void write(Job& job);                                    // without the lock
     // the files of `img` (one per stage) under entry `e`'s id; `sources`: stage 0's K/V streamed; without the lock
     bool write_files(Entry& e, const SavedConversation& img, const std::vector<SessionKvSource>* sources,
-                     const std::function<bool()>& cancel, std::string& error);
+                     const std::function<bool()>& cancel, std::string& error, bool flush = false);
     // a written entry joins the list: the budget and the entries it supersedes go after it (m_ held); log part back
     std::string publish_locked(Entry&& e, size_t& made_room, size_t& dropped);
     void remove_locked(size_t index, bool delete_files);     // m_ held
