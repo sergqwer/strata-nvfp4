@@ -384,6 +384,7 @@ struct Options {
     /// yarn with a factor by its length past it; the cached keys are rotated over (core/rope_dynamic.hpp)
     bool rope_dynamic = false;
     double rope_dynamic_step = 0.125;   ///< --rope-dynamic-step F: factors are multiples of F
+    int rope_dynamic_mscale = 1;        ///< --rope-dynamic-mscale 0: yarn's angles without its magnitude correction
     bool native_rope = false;         // pinned text-only CUDA rotary arithmetic
     bool native_ple_postops = false;  // pinned PLE postprojection arithmetic
     bool native_router = false;       // pinned fused 512-expert top-10 router
@@ -798,6 +799,8 @@ void usage() {
                  "  --rope-scale F       the extension factor for linear/yarn (default: the model file's\n"
                  "                       factor, else 1 = off); dynamic: the largest factor\n"
                  "  --rope-dynamic-step F  dynamic: factors are multiples of F (default 0.125)\n"
+                 "  --rope-dynamic-mscale 0|1  dynamic: 0 leaves out yarn's magnitude (attention temperature)\n"
+                 "                       correction, 1 keeps it (default)\n"
                  "  --rope-freq-base N   the raw ggml knobs: the frequency base (0 = the model's 1e7) and\n"
                  "  --rope-freq-scale F  the angle shrink (0 = 1/--rope-scale)\n"
                  "  --yarn-orig-ctx N    the trained context the correction targets (0 = 262144)\n"
@@ -2026,6 +2029,7 @@ int main(int argc, char** argv) {
         else if (a == "--rope-scaling") o.rope_scaling = next("--rope-scaling");
         else if (a == "--rope-scale") o.rope_scale = std::atof(next("--rope-scale"));
         else if (a == "--rope-dynamic-step") o.rope_dynamic_step = std::atof(next("--rope-dynamic-step"));
+        else if (a == "--rope-dynamic-mscale") o.rope_dynamic_mscale = std::atoi(next("--rope-dynamic-mscale"));
         else if (a == "--rope-freq-base") o.rope_freq_base = std::atof(next("--rope-freq-base"));
         else if (a == "--rope-freq-scale") o.rope_freq_scale = std::atof(next("--rope-freq-scale"));
         else if (a == "--yarn-orig-ctx") o.yarn_orig_ctx = std::atof(next("--yarn-orig-ctx"));
@@ -2888,6 +2892,7 @@ int main(int argc, char** argv) {
         if (o.rope_dynamic) {
             o.rope_scaling = "yarn";
             if (const char* e = std::getenv("STRATA_ROPE_DYNAMIC_STEP")) o.rope_dynamic_step = std::atof(e);
+            if (const char* e = std::getenv("STRATA_ROPE_DYNAMIC_MSCALE")) o.rope_dynamic_mscale = std::atoi(e);
             if (!std::isfinite(o.rope_dynamic_step) || o.rope_dynamic_step < 0.01 || o.rope_dynamic_step > 64) {
                 std::fprintf(stderr, "strata generate: --rope-dynamic-step must be in [0.01, 64]\n");
                 return 2;
@@ -3222,6 +3227,7 @@ int main(int argc, char** argv) {
             rope_dyn.base = rope_cfg;
             rope_dyn.orig = rope_cfg.orig_ctx;
             rope_dyn.step = o.rope_dynamic_step;
+            rope_dyn.mscale = o.rope_dynamic_mscale != 0;
             const double need = std::ceil((double) o.max_context / rope_dyn.orig / rope_dyn.step - 1e-9) * rope_dyn.step;
             rope_dyn.max_factor = o.rope_scale > 0 ? o.rope_scale : std::max(1.0, need);
             if (const char* e = std::getenv("STRATA_ROPE_DYNAMIC_REREAD")) rope_dyn.reread = e[0] == '1';
@@ -3239,6 +3245,8 @@ int main(int argc, char** argv) {
                                  "%g)%s\n", rope_dyn.orig, rope_dyn.orig, rope_dyn.step, rope_dyn.max_factor,
                          rope_dyn.base.beta_fast, rope_dyn.base.beta_slow, rope_dyn.base.ext_factor,
                          rope_dyn.base.attn_factor, rope_dyn.reread ? "; a change reads the prompt again" : "");
+            if (!rope_dyn.mscale)
+                std::fprintf(stderr, "strata generate: rope scaling dynamic: without yarn's magnitude correction\n");
         }
         strata::kernels::rope_scaling_set(rope_cfg);
         if (const char* e = std::getenv("STRATA_ROPE_FAR"); e != nullptr && e[0] != '\0' && e[0] != '0') {
@@ -8947,6 +8955,7 @@ int main(int argc, char** argv) {
                     {"no_fast_attn", o.no_fast_attn}, {"no_fused_gdn", o.no_fused_gdn},
                     {"no_fast_select", o.no_fast_select}, {"vision", o.vision}};
                 if (rope_dyn.on) c.switches.push_back({"rope_dynamic", 1});
+                if (rope_dyn.on && !rope_dyn.mscale) c.switches.push_back({"rope_dynamic_no_mscale", 1});
                 config_fp = strata::core::session_config_fingerprint(c);
             }
             id.model = *model_fp;
