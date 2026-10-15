@@ -51,6 +51,13 @@ files by hand.
 
 ## What's new
 
+- **0.1.44.1-nvfp4.2: Claude Code's system prompt is rewritten for the local model.** The server recognises Claude
+  Code's prompt by its billing header and drops what only Claude can use: its identity, Anthropic's security
+  policy, the list of Claude model ids, the pronoun rule. The memory how-to is cut to its path. In their place comes a
+  short note for a local agent: call only the listed tools, by their exact names, never as plain text. The harness,
+  context management, plan mode, output styles and every other section pass as sent. The rewrite gives the same text
+  on every turn, so the conversation cache keeps hitting. Claude Code 2.1.296's prompt goes from 1,361 to 676 tokens.
+  `"claude_code_prompt": "as_sent"` in the config keeps it as it comes. The engine is unchanged.
 - **On upstream 0.1.44.1 (0.1.44.1-nvfp4.1).** Upstream's hotfix: CPUs without AVX2 start again (#2324: the NVFP4 CPU
   rows' tables were built before `main` with AVX instructions, an illegal instruction on such a CPU, now none), a
   crashed engine start is named instead of retried as a GPU runtime start, the Responses API (Codex) honours the

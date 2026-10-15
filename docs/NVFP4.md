@@ -374,6 +374,27 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### Claude Code's system prompt for the local model (2026-10-15, release 0.1.44.1-nvfp4.2)
+- `serve/frontend.py` `local_claude_code_system`, config `"claude_code_prompt"`: `"local"` (the default) or `"as_sent"`.
+  It acts on a system text that starts with `x-anthropic-billing-header:` and whose first line is Claude Code's
+  identity ("You are Claude Code..." or "You are a Claude agent..."). Anything else is left alone.
+- Dropped: the billing header (so no stamp needs pinning), the identity line, the "You are an agent working with
+  the user..." line, the security-policy paragraph, the pronoun paragraph, the Environment bullets on Claude model
+  ids, Claude Code's apps and Fast mode (an Environment header left empty goes too). The working directory and the
+  platform stay.
+- Shortened: Memory keeps its directory and one paragraph on the file format and MEMORY.md (was ~1.3K characters
+  with an example block).
+- Added in front: a local-agent intro. It says to call only the listed tools, by their exact names, with arguments
+  matching their schemas, never to write a tool call as plain text, and to read a result before acting on it.
+  These target what the local model got wrong before: invented tool names and tool-call XML in the reply text.
+- Passed as sent: Harness, code style, confirming irreversible actions, Session-specific guidance, Context
+  management, and any section the rewrite does not know (plan mode, output styles, hooks).
+- Measured on Claude Code 2.1.296's SDK prompt: 5,821 -> 2,995 characters, 1,361 -> 676 tokens. A live `cllm` brief
+  went from 17,375 to 16,657 input tokens. An 8-turn agent task finished correctly, every file:line it cited right.
+- The output is the same for the same input, so the conversation cache's prefix stays.
+- Tests: serve/test_claude_code_prompt.py has 6. ClaudeCodeBillingStamp now runs `as_sent`, where the stamp is
+  still pinned. The serve suite gives 930 OK.
+
 ### Upstream 0.1.44.1 (2026-10-14, release 0.1.44.1-nvfp4.1)
 
 0.1.44-nvfp4.1 was prepared and not published; this release is it on upstream's hotfix, with three more of this
