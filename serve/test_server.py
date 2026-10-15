@@ -6447,6 +6447,12 @@ class ClaudeCodeBillingStamp(unittest.TestCase):
 
     HEADER = "x-anthropic-billing-header: cc_version=2.1.170.{v}; cc_entrypoint=sdk-cli; cch={c};"
 
+    def setUp(self):
+        # the stamp is pinned when the prompt is passed as sent; "local" (the default) drops the header altogether
+        import serve.frontend as fe
+        self._mode, fe.CLAUDE_CODE_PROMPT = fe.CLAUDE_CODE_PROMPT, "as_sent"
+        self.addCleanup(setattr, fe, "CLAUDE_CODE_PROMPT", self._mode)
+
     def system_of(self, system):
         from serve.frontend import anthropic_to_messages
         return anthropic_to_messages({"system": system, "messages": [{"role": "user", "content": "u"}]})[0][0]["content"]
