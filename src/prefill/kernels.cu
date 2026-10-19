@@ -2702,7 +2702,7 @@ __global__ void __launch_bounds__(256, 2) gr_upmix_cuda_kernel(const uint16_t* _
                                                               const float* __restrict__ w, float* __restrict__ mixed,
                                                               uint16_t* __restrict__ mixed16,
                                                               uint16_t* __restrict__ mixed_h,
-                                                              int64_t T) {
+                                                              uint16_t* __restrict__ mixed16_lo, int64_t T) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
     __shared__ __align__(16) uint16_t sA[2][UC_BM][UC_LD];
     __shared__ __align__(16) uint16_t sB[2][HC * UC_BD][UC_LD];
@@ -2788,9 +2788,13 @@ __global__ void __launch_bounds__(256, 2) gr_upmix_cuda_kernel(const uint16_t* _
                 sm[0] /= (float) HC;
                 sm[1] /= (float) HC;
                 *reinterpret_cast<float2*>(mixed + t * N + d) = make_float2(sm[0], sm[1]);
-                if (mixed16)
-                    *reinterpret_cast<uint32_t*>(mixed16 + t * N + d) =
-                        (uint32_t) act16(sm[0]) | ((uint32_t) act16(sm[1]) << 16);
+                if (mixed16) {
+                    const uint16_t h0 = act16(sm[0]), h1 = act16(sm[1]);
+                    *reinterpret_cast<uint32_t*>(mixed16 + t * N + d) = (uint32_t) h0 | ((uint32_t) h1 << 16);
+                    if (mixed16_lo)   // the fork: the BF16 remainder's low image (STRATA_PREFILL_BF16X2, its default)
+                        *reinterpret_cast<uint32_t*>(mixed16_lo + t * N + d) =
+                            (uint32_t) bf_lo(sm[0], h0) | ((uint32_t) bf_lo(sm[1], h1) << 16);
+                }
                 if (mixed_h)
                     *reinterpret_cast<uint32_t*>(mixed_h + t * N + d) = (uint32_t) hf(sm[0]) | ((uint32_t) hf(sm[1]) << 16);
             }
@@ -2882,8 +2886,9 @@ void gr_mix_r(const float* R, const float* rs, const float* w_norm, const float*
     check("gr_mix_r");
 }
 bool gr_upmix(const uint16_t* lo16, const uint16_t* w_up, const float* R, const float* rs, const float* w_norm,
-              float* mixed, uint16_t* mixed16, uint16_t* mixed_h, int64_t T, void* stream) {
+              float* mixed, uint16_t* mixed16, uint16_t* mixed_h, int64_t T, void* stream, uint16_t* mixed16_lo) {
 #if defined(__HIPCC__)
+    if (mixed16_lo != nullptr) return false;   // the gfx11 kernel writes no BF16 low image
     static const bool gfx11 = [] {
         int dev = 0;
         cudaDeviceProp p;
@@ -2907,7 +2912,7 @@ bool gr_upmix(const uint16_t* lo16, const uint16_t* w_up, const float* R, const 
     }
     if (ok_dev[dev] != 1) return false;
     gr_upmix_cuda_kernel<<<dim3(N / UC_BD, (unsigned) ((T + UC_BM - 1) / UC_BM)), 256, 0, (cudaStream_t) stream>>>(
-        lo16, w_up, R, rs, w_norm, mixed, mixed16, mixed_h, T);
+        lo16, w_up, R, rs, w_norm, mixed, mixed16, mixed_h, mixed16_lo, T);
     check("gr_upmix");
     return true;
 #endif
