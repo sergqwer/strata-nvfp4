@@ -40,6 +40,8 @@ td.log
 /build-strata-cuda12.bat
 /build-cuda12/
 /.strata-mcp/
+# this fork: the server's last update check (strata_control/fork_release.py)
+/.update/
 
 # image encoder (setup.py --vision): build output and the generated build script
 build-vision*/
