@@ -51,6 +51,13 @@ files by hand.
 
 ## What's new
 
+- **0.2.0-beta-nvfp4.2: this fork updates from this fork.** At start the server asks GitHub, at most once a day,
+  which strata-nvfp4 release is the newest. When it is newer than the installed one, the server's window and the web
+  page's header say so, with the command that updates the folder (`update.cmd` in a release folder, `UPDATE.bat` in a
+  clone). Nothing is downloaded or installed by itself; `STRATA_UPDATE_CHECK=0` or `"update_check": false` turns the
+  check off. `strata update` without `--feed` now runs this fork's updater instead of refusing; upstream's signed
+  feed is used only when named. The engine is unchanged
+  ([details](docs/NVFP4.md#strata-update-runs-this-forks-updater-the-start-says-when-a-newer-release-is-out-2026-10-20-release-020-beta-nvfp42)).
 - **On upstream 0.2.0-beta (0.2.0-beta-nvfp4.1).** Upstream's engine, server and setup of 0.1.45 and 0.2.0-beta
   (the engine says 0.1.45.3) under this fork's NVFP4 models; upstream's new app, Terminal and installers are not part
   of this release, which stays the Windows zip. One GPU and one dialog give the same bits as 0.1.44.1-nvfp4.2 at 32K
