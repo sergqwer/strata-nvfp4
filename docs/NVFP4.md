@@ -374,7 +374,7 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
-### `strata update` runs this fork's updater; the start says when a newer release is out (2026-10-20, branch rel/0.2.0)
+### `strata update` runs this fork's updater; the start says when a newer release is out (2026-10-20, release 0.2.0-beta-nvfp4.2)
 
 - **`strata update`** (and `strata components update`) without a named feed runs this fork's own updater for the
   folder `strata.py` is in: `tools/bundle_update.py` (`update.cmd`'s) in a release folder, `UPDATE.bat` /
