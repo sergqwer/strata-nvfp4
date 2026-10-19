@@ -374,6 +374,68 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### Upstream 0.2.0-beta (2026-10-19, release 0.2.0-beta-nvfp4.1)
+
+Upstream 0.2.0-beta is an app (Tauri), a Terminal (`strata`) and the engine. This fork ships none of the app, the
+Terminal or upstream's installers: its release stays the Windows zip and setup.py's engine asset. What it takes is the
+engine, the server and setup of upstream 0.1.45 and 0.2.0-beta (the engine reports 0.1.45.3), with this fork's changes
+on top. The port went the usual way (port-fork.md): the fork's 206 commits since 0.1.44.1 cherry-picked onto the tag,
+generate.cpp, setup.py and their tests carried as one 3-way merge each (upstream changed generate.cpp by 2,600 lines).
+
+- **Taken from upstream, ours dropped** (it does the same thing):
+  - setup's `"sampling"` block (0.1.41-nvfp4.6): upstream's server applies the model card's sampling itself, per
+    thinking state (`MODEL_CARD_SAMPLING`; a config without `"arch"` gets Flash-Next's card, so this fork's packs too).
+    Thinking: 1.0 / 0.95 / 20, the values setup wrote; not thinking: Qwen's instruct set. Setup writes no block now; the
+    block an older install has is kept as the user's, and the bundle's config has none.
+  - the prompt encoder from the last shared prefix (#567, #1852: upstream's f13a870d), the re-parked conversation's
+    eighth (#1163), the borrowed checkpoint of a parked conversation (#1164), `--prompt-cache-spread` (#1959);
+  - the IMMA prompt attention (#1367), the MoE input quantized once and scattered (#1368, q8_1 rows; the fork keeps the
+    scatter for its own w4a4x2 rows), the hyper-connection up projection with its mix (#1370), the tier's evictions
+    reaching the device table (#1517): upstream's code in each, this fork's defaults on top (IMMA on, upmix on with
+    compute capability 12.x, the eviction sync where the tier does not wait or the PCIe share admits);
+  - the Linux stager threads off the host's CPU: upstream's `aux_cpus::place_off_host()` does the move now.
+  #1525's two fusions (swiglu + q8_1, combine + hyper-connection write) are not upstream: this fork keeps them.
+- **Reworked on 0.2.0's code:** the expert arena's own thread takes upstream's new pinned-memory reserve (640 + 160 MiB on
+  Windows, so the buffers after the arena never find WDDM's page-lock budget spent); the in-place expert reads sit beside
+  upstream's pointer-table MMQ (`STRATA_MMQ_DIRECT`, opt-in, a build option), never on the same layer; the combine +
+  write fusion writes upstream's FP16 image where a card uses it and is off on HIP; the upmix kernel writes the BF16
+  remainder's low image again, without which this fork's default upmix would not run; `STRATA_ADAPT_CHECKRES` is
+  upstream's name for the fork's `STRATA_ADAPT_FETCH_CHECKRES` (both read); the park rule has upstream's
+  `--conversation-cache-park-gain` and this fork's `STRATA_PARK_REWIND_MAX`; a batch read that gives way keeps the
+  `--batch-max-context` check inside upstream's new `give_way`.
+- **Setup:** one NVFP4 install path, this fork's families, as since 0.1.44. Upstream's `--family nvfp4 --model NVFP4 |
+  NVFP4-NVIDIA` still name qwen-nvfp4-gptq / qwen-nvidia-nvfp4. Upstream 0.2.0's third NVFP4 size, NVFP4-QAD (NVIDIA's
+  Qwen3.8-Flash-Next-FP4-Local, a 102 GB checkpoint turned into a pack on the PC), is refused with a message: this fork
+  does not install it. New from upstream: the Gyro family (agentionai's 27.6 and 35 GB sizes), downloads over 8
+  connections that resume, every file pinned by size and SHA-256 (this fork's UD-Q3_K_XL too), the RAM + VRAM memory
+  tiers for the GGUF default, the AVX2 note on this fork's NVFP4 menu lines (#2347).
+- **The engine update feed.** Upstream's engines now come through a signed feed (`strata update`, the app's Update
+  engine). A strata-nvfp4 install never switches to them by itself: setup, UPDATE.bat and the release's update.cmd take
+  this fork's engine from its own releases; `strata update` in a clone needs a named feed (`--feed`,
+  `STRATA_UPDATE_FEED`) and otherwise stops with the reason; a run config that names upstream's engine component
+  (`"component:strata-engine"`) is said at start. The release folder ships `strata_control` (the server imports it) and
+  no `strata update`.
+- **Not taken:** upstream's default of pictures on (its GPU encoder from 24 GB of VRAM). This fork's NVFP4 setup still
+  asks, with "no" as the default answer, and puts the encoder on the CPU: on these packs the GPU encoder's ~1.4 GB would
+  come out of the expert cache.
+- **Checks** (RTX 5090 + Ryzen 9 9950X3D, 128 GB; release build 25df8824 at ab75809f: portable, 75/86/89/120, CUDA 13.3):
+  - the kit's identity (`--exact --cache 3000`, qwen-nvfp4-gptq): a 2K and a 32K prompt give the same first-token
+    logits and greedy tokens (12 / 20) as 0.1.44.1-nvfp4.x's engine, with every flag off at 262,144 and with
+    `--rope-scaling dynamic` at 524,288;
+  - the port check's own form (`--expert-cache 6000`, CPU share 0.5, PCIe share 0.25): 32K identical to 0.1.44.1-nvfp4.2,
+    2K the same 32 tokens with KL 0.00055 on the first token's logits. Upstream's prompt path borrows 24 more cache slots
+    for its buffers, so other experts are resident during a 2K prompt and the CPU share computes other ones; with the
+    CPU share off the 2K run is identical;
+  - with every default of this fork off, the engine gives upstream 0.2.0-beta's own build's bits (2K and 32K);
+  - decode 203.3 tokens/s against 0.1.44.1-nvfp4.2's 179.5 (medians of 5 interleaved pairs, 1,000 tokens, the
+    expert cache sized by itself; per pair 1.04-1.27x, median 1.08x, 5 of 5): ms a round 13.4 -> 11.9, the cache's
+    hits the same (92.9 / 92.8%);
+  - the engine tests: 142 of 151 pass; the other 9 are upstream's own (4 do not compile with MSVC, 2 need another
+    llama.cpp fork for the Gyro types, 3 need model files); the server's and the tools' tests fail only where
+    clean upstream fails on this PC (the golden configs' CPU threads, a timing-sensitive download test, the MCP
+    server's start / stop tests);
+  - the tray's GPTQ config starts in 14 s through the server and answers.
+
 ### Claude Code's system prompt for the local model (2026-10-15, release 0.1.44.1-nvfp4.2)
 - `serve/frontend.py` `local_claude_code_system`, config `"claude_code_prompt"`: `"local"` (the default) or `"as_sent"`.
   It acts on a system text that starts with `x-anthropic-billing-header:` and whose first line is Claude Code's
@@ -2119,7 +2181,7 @@ the rest).
 | `STRATA_COMMIT_SYNC=1` | the verify commit waits for its graph again |
 | `STRATA_GEMM_WARM=0` | cuBLASLt's GEMM kernels load on the first prompt again (default: on the prewarm thread at start) |
 | `STRATA_ADAPT_EVICT_SYNC=0` | the tier's evictions reach the device's table only when its copies land (the old behaviour: with the tier not waiting, a stale activation could be computed) |
-| `STRATA_ADAPT_FETCH_CHECKRES=1` | before each decode window, compare the device's residency table with the host's and count windows that computed a CPU expert without its activation |
+| `STRATA_ADAPT_CHECKRES=1` (or `STRATA_ADAPT_FETCH_CHECKRES=1`, its name here before 0.2.0-beta-nvfp4.1) | before each decode window, compare the device's residency table with the host's and count windows that computed a CPU expert without its activation |
 | `STRATA_UNBUFFERED_LOAD=1\|0` | force the expert reads unbuffered / through the file cache (default: unbuffered only when the cache cannot keep the files) |
 | `STRATA_DEFERRED_REGISTER=1`, `STRATA_ARENA_SYNC=1` | register the arena per layer on a thread ahead of its readers (upstream's opt-in) / load the arena after the dense weights |
 | `STRATA_PLE_READERS=N` | the prompt's PLE rows through N reader threads (default 8 on Windows; 0 = one thread reaps every read) |
