@@ -415,10 +415,16 @@ generate.cpp, setup.py and their tests carried as one 3-way merge each (upstream
   `STRATA_UPDATE_FEED`) and otherwise stops with the reason; a run config that names upstream's engine component
   (`"component:strata-engine"`) is said at start. The release folder ships `strata_control` (the server imports it) and
   no `strata update`.
+- **The release build is reproducible again.** Upstream 0.1.45's Gyro overlay (`cmake/strata_ggml_tq_overlay.cmake`)
+  wrote its patched ggml-cuda headers on every configure, and `release/build-release.cmd` configures on every run, so
+  each bundle recompiled 20 prompt units and relinked `strata.exe`: the same code with a new PE timestamp, never the
+  hash of the build that was checked. The overlay now writes a header only when its text changed (and no longer
+  copies the pinned one over it first); a second configure leaves the build with no work to do.
 - **Not taken:** upstream's default of pictures on (its GPU encoder from 24 GB of VRAM). This fork's NVFP4 setup still
   asks, with "no" as the default answer, and puts the encoder on the CPU: on these packs the GPU encoder's ~1.4 GB would
   come out of the expert cache.
-- **Checks** (RTX 5090 + Ryzen 9 9950X3D, 128 GB; release build 25df8824 at ab75809f: portable, 75/86/89/120, CUDA 13.3):
+- **Checks** (RTX 5090 + Ryzen 9 9950X3D, 128 GB; release build 25df8824 at ab75809f: portable, 75/86/89/120, CUDA 13.3;
+  the zip's engine 56042c6e is that code relinked by the overlay above, and gives the same bits in the identity runs):
   - the kit's identity (`--exact --cache 3000`, qwen-nvfp4-gptq): a 2K and a 32K prompt give the same first-token
     logits and greedy tokens (12 / 20) as 0.1.44.1-nvfp4.x's engine, with every flag off at 262,144 and with
     `--rope-scaling dynamic` at 524,288;
@@ -434,7 +440,8 @@ generate.cpp, setup.py and their tests carried as one 3-way merge each (upstream
     llama.cpp fork for the Gyro types, 3 need model files); the server's and the tools' tests fail only where
     clean upstream fails on this PC (the golden configs' CPU threads, a timing-sensitive download test, the MCP
     server's start / stop tests);
-  - the tray's GPTQ config starts in 14 s through the server and answers.
+  - the tray's GPTQ config starts in 14 s through the server and answers; a clean unzip of the release zip starts the
+    way `start-server.cmd` does (a new `.venv-serve` from `requirements-serve.txt`) in 16 s and answers.
 
 ### Claude Code's system prompt for the local model (2026-10-15, release 0.1.44.1-nvfp4.2)
 - `serve/frontend.py` `local_claude_code_system`, config `"claude_code_prompt"`: `"local"` (the default) or `"as_sent"`.
