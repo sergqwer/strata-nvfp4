@@ -374,6 +374,28 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### `strata update` runs this fork's updater; the start says when a newer release is out (2026-10-20, branch rel/0.2.0)
+
+- **`strata update`** (and `strata components update`) without a named feed runs this fork's own updater for the
+  folder `strata.py` is in: `tools/bundle_update.py` (`update.cmd`'s) in a release folder, `UPDATE.bat` /
+  `./update.sh` (git pull, then `setup.py --update`) in a clone. `--check` changes nothing (in a clone: `git fetch`,
+  the commits the remote is ahead, the newest release); `--force` reinstalls a release folder's release; `--wait` and
+  the flags of upstream's feed (`--app`, `--no-engine`, `--backend`, `--components-dir`, ...) are refused with exit 2,
+  naming `--feed`; `--output json` gives status, installed, latest. A named feed (`--feed`, `STRATA_UPDATE_FEED`, one
+  chosen before) runs upstream's signed-feed update as before.
+- **The update notice:** after "ready", a daemon thread of `serve` (a real engine; not a server the Terminal's or the
+  app's runtime owns, `--owner-fd`, which an engine update's test start is) asks
+  `api.github.com/repos/sergqwer/strata-nvfp4/releases/latest` at most once a day (5 s, no token, no install id; the
+  answer, a failure too, kept in `<install>/.update/update-check.json`, else the per-user state folder) and compares it
+  with the installed version: the engine's `BUILD.json` when it is this fork's, else the source's release
+  (`release/make_windows_bundle.py`'s VERSION). The order is setup's `version_tuple`, now shared from
+  `strata_control/fork_release.py`, plus one tie-break: a final release after its pre-release. Newer: one line in the
+  server's window, `[strata] a newer strata-nvfp4 release is published: v<new> (this is <old>) - close the server and
+  run update.cmd in <folder>; notes: <release page>` (a clone: `UPDATE.bat` / `./update.sh` or `strata update`), and
+  `"update"` in `/metrics` and `/v1/status`: a small link in the web page's header (its x hides it for that release)
+  and a line in About. Nothing is downloaded or installed. Off: `STRATA_UPDATE_CHECK=0`, `"update_check": false` in the
+  run config (About > Settings), `--offline`.
+
 ### Upstream 0.2.0-beta (2026-10-19, release 0.2.0-beta-nvfp4.1)
 
 Upstream 0.2.0-beta is an app (Tauri), a Terminal (`strata`) and the engine. This fork ships none of the app, the
@@ -412,7 +434,8 @@ generate.cpp, setup.py and their tests carried as one 3-way merge each (upstream
 - **The engine update feed.** Upstream's engines now come through a signed feed (`strata update`, the app's Update
   engine). A strata-nvfp4 install never switches to them by itself: setup, UPDATE.bat and the release's update.cmd take
   this fork's engine from its own releases; `strata update` in a clone needs a named feed (`--feed`,
-  `STRATA_UPDATE_FEED`) and otherwise stops with the reason; a run config that names upstream's engine component
+  `STRATA_UPDATE_FEED`) and otherwise stops with the reason (since 2026-10-20 it runs this fork's own updater
+  instead, above); a run config that names upstream's engine component
   (`"component:strata-engine"`) is said at start. The release folder ships `strata_control` (the server imports it) and
   no `strata update`.
 - **The release build is reproducible again.** Upstream 0.1.45's Gyro overlay (`cmake/strata_ggml_tq_overlay.cmake`)

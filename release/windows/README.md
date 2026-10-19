@@ -68,6 +68,10 @@ changed stays, and the release's goes beside it as `<name>.new`. The program is 
 first: if a file in use stops it half way, the old program is put back - by the next `update.cmd` if it cannot be
 right away.
 
+The server asks GitHub at start, at most once a day, whether a newer release is out (nothing is downloaded); when one
+is, its window and the chat page's header say so. `set STRATA_UPDATE_CHECK=0`, or `"update_check": false` in
+`config\strata-qwen-nvfp4-gptq.json` (the chat page's About > Settings), turns that off.
+
 ## Measured (RTX 5090, Ryzen 9 9950X3D, 128 GB DDR5-5600, 262K context)
 
 | | |
