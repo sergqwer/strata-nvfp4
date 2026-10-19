@@ -63,31 +63,24 @@ class HuggingFacePins(unittest.TestCase):
         self.assertRegex(setup.HF, SHA)
 
     def test_ready_packs_pinned(self):
-        """NVFP4: every size names a repository of NVFP4_REPOS, pinned by a commit; every file has a size and a
-        SHA-256, and the pack folder, dense GGUF, n-gram table and embedding are each there."""
-        sizes = [m for m, d in setup.MODELS.items() if d.get("repo")]
-        self.assertEqual(sorted(sizes), ["NVFP4", "NVFP4-NVIDIA", "NVFP4-QAD"])
-        for m in sizes:
-            if setup.MODELS[m].get("prepare"):         # NVIDIA's checkpoint: pinned files, prepared on the PC
-                t = setup.NVFP4_REPOS[setup.MODELS[m]["repo"]]
-                self.assertRegex(t["revision"], r"^[0-9a-f]{40}$")
-                for path, (role, size, sha) in t["files"].items():
-                    self.assertEqual(role, "src")
+        """NVFP4 (this fork's families; upstream 0.1.44 pins the same two uploads): every family's sources are
+        repositories of NVFP4_REPOS, pinned by a commit; every file has a size and a SHA-256, and the pack folder,
+        dense GGUF, n-gram table and embedding are each there."""
+        for f, d in setup.NVFP4_FAMILIES.items():
+            for comp, repo in d["sources"].items():
+                t = setup.NVFP4_REPOS[repo]
+                with self.subTest(family=f, component=comp):
+                    self.assertRegex(t["revision"], r"^[0-9a-f]{40}$")
+            files, why = setup.nvfp4_files(f)
+            self.assertIsNone(why, f)
+            self.assertEqual({x[0] for x in files} >= {"pack", "dense", "ple", "embd"}, True, f)
+            for comp, repo, rev, path, size, sha in files:
+                with self.subTest(family=f, path=path):
                     self.assertGreater(size, 0)
                     self.assertRegex(sha, r"^[0-9a-f]{64}$")
-                self.assertEqual(sorted(setup.ready_paths(m, setup.Path("M"))), ["dense", "mtp", "pack", "ple"])
-                continue
-            t = setup.NVFP4_REPOS[setup.MODELS[m]["repo"]]
-            self.assertRegex(t["revision"], r"^[0-9a-f]{40}$")
-            for path, (role, size, sha) in t["files"].items():
-                with self.subTest(model=m, path=path):
-                    self.assertIn(role, ("pack", "dense", "ple", "embd"))
-                    self.assertGreater(size, 0)
-                    self.assertRegex(sha, r"^[0-9a-f]{64}$")
-            p = setup.ready_paths(m, setup.Path("M"))
-            self.assertEqual(sorted(p), ["dense", "embd", "pack", "ple"])
-            self.assertEqual(p["pack"].name, "pack")
-            self.assertIn("experts.bin", t["files"] and [x.split("/")[-1] for x in t["files"]])
+            self.assertIn("experts.bin", [x[3].split("/")[-1] for x in files])
+        self.assertEqual(setup.NVFP4_REPOS[setup.QWEN_GPTQ_REPO]["revision"][:8], "640a1db9")   # = upstream 0.1.44's pins
+        self.assertEqual(setup.NVFP4_REPOS[setup.QWEN_NV_REPO]["revision"][:8], "cca8f7fe")
 
     def test_unpinned(self):
         url = setup.FAMILIES["swift"]["hf"] + "x.gguf"

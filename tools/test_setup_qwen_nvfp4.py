@@ -10,6 +10,7 @@ risk below 128 GB, the names.  tools/test_setup_nvfp4.py's harness (setup.main()
 from __future__ import annotations
 
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -27,7 +28,7 @@ QWEN = {"qwen-nvidia-nvfp4": (QNV, "qwen3.8-flash-next-nvidia-nvfp4", "strata-qw
 
 def menu_lines(out: str) -> list:
     menu = out[out.index("=== Step 2"):out.index("[ok] model:")]
-    return [x.strip() for x in menu.splitlines() if x.strip()[:2] in {f"{i})" for i in range(1, 10)}]
+    return [x.strip() for x in menu.splitlines() if re.match(r"\d+\) ", x.strip())]
 
 
 class Names(unittest.TestCase):
@@ -166,7 +167,6 @@ class Q8Packs(unittest.TestCase):
                 self.assertEqual({x[1] for x in files}, {repo})
                 self.assertEqual(round(setup.nvfp4_experts_gib(files), 2), gib)
                 self.assertIn(f, setup.UNCENSOR_FAMILIES)
-                self.assertIn(f, setup.FAMILY_SAMPLING)
                 self.assertEqual(setup.NVFP4_FAMILIES[f]["min_ram"], (120, 128))
 
     def test_what_they_share_with_gptq(self):
@@ -233,7 +233,7 @@ class Q8Packs(unittest.TestCase):
                     self.assertIn(f"all {gib:.0f} GiB of experts are loaded into RAM", out)
                 self.assertIs(cfg["uncensored"], False)                      # the switch: loaded, off
                 self.assertIn("--control-vector-scaled", cfg["args"])
-                self.assertEqual(cfg["sampling"], setup.QWEN_SAMPLING)
+                self.assertNotIn("sampling", cfg)                          # the server's model card (0.2.0-beta-nvfp4.1)
                 self.assertNotIn("<- needs", out)
 
     def test_below_128_gb_a_risk_not_a_wall(self):

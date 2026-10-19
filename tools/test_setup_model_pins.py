@@ -99,9 +99,10 @@ class EveryFileIsPinned(unittest.TestCase):
                     self.assertRegex(sha, HEX)
 
     def test_known_values(self):
-        # the Hub's LFS pointers; the picture reader is the same file the NVFP4 family already pinned
+        # the Hub's LFS pointers; the picture reader is the same file upstream's NVFP4 family pinned (this fork: no
+        # such family, its NVFP4 families pin the same file in NVFP4_REPOS)
         self.assertEqual(setup.file_pin(pinned_url("mmproj-Qwen3.8-Flash-Next-BF16.gguf")),
-                         setup.FAMILIES["nvfp4"]["mmproj_sha256"])
+                         (907543008, "b1a82259702816a5330d7bd7607cd9676b11780e79ff7348c21103ff3ce49bd0"))
         self.assertEqual(setup.file_pin(pinned_url("Q2_0/Qwen3.8-Flash-Next-GSQ-RCO-Q2_0-00001-of-00002.gguf")),
                          (37623740192, "69820c02ec7d0b45ef2ebb19d6620299db749fe2aded7f39f93c6b88b199b720"))
         # the n-gram table is one file for the four sizes and the Coder
