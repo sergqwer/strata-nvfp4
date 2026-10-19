@@ -31,6 +31,9 @@
       <svg class="st-icon st-icon--sm"><use href="web/sprite.svg#i-info"/></svg><span data-i18n="tab.about">About</span></button>
   </nav>
   <span class="st-header__spacer"></span>
+  <span class="update-note" id="update-note" hidden>
+    <a id="update-link" target="_blank" rel="noopener noreferrer"></a>
+    <button type="button" class="update-note__hide" id="update-hide" title="Hide until the next release" aria-label="Hide the update notice">&times;</button></span>
   <span class="st-pill" id="pill" data-state="idle" role="status" aria-live="polite">
     <span class="st-pill__dot"></span><span id="pill-text" data-i18n="pill.connecting">Connecting&hellip;</span></span>
   <button class="st-btn st-btn--secondary" id="unload-btn" type="button" title="Waiting for the server" disabled>&hellip;</button>

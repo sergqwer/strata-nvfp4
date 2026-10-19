@@ -369,8 +369,26 @@ function render(m) {
   if (tab === "monitor") renderMonitor(live, hw, st, eng, h, last, m.requests || [], m.totals, m.requests_kept);
   if (tab === "monitor") renderConvCache(m.conversation_cache);
   if (tab === "monitor") renderGpus(m.gpus);
-  if (tab === "about") renderAbout(eng, hw, st, m.gpus);
+  if (tab === "about") renderAbout(eng, hw, st, m.gpus, m.update);
+  renderUpdate(m.update);
 }
+
+// this fork: a newer strata-nvfp4 release (the server asks GitHub at most once a day and never downloads anything):
+// a quiet link in the header, hidden for that release by its x
+function renderUpdate(u) {
+  const show = !!(u && u.tag && /^https:\/\/github\.com\//.test(u.url || "")) && store.get("update-hidden", "") !== u.tag;
+  $("update-note").hidden = !show;
+  if (!show || $("update-link").dataset.tag === u.tag) return;
+  $("update-link").dataset.tag = u.tag;
+  $("update-link").href = u.url;
+  $("update-link").textContent = `${u.tag} is out`;
+  $("update-link").title = `A newer strata-nvfp4 release is published (this is ${u.installed}): ${u.command}. ` +
+                           "Nothing is downloaded by itself. The release notes open in a new tab.";
+}
+$("update-hide").onclick = () => {
+  store.set("update-hidden", $("update-link").dataset.tag || "");
+  $("update-note").hidden = true;
+};
 
 // #596: the conversation cache - the prompt's state the engine keeps between requests (always), and the whole
 // conversations it parks in RAM when "--conversation-cache-mib N" is in the run config's args (opt-in)
@@ -690,11 +708,12 @@ function projectionText(c) {
          `${single ? ` (layer ${single.replace("single", "")}'s direction)` : ""}. Per chat in Sampling. Its package ` +
          "describes the vector as a refusal-direction projection; measure the speed yourself";
 }
-function renderAbout(eng, hw, st, gv) {
+function renderAbout(eng, hw, st, gv, upd) {
   const kv = {int8: "8-bit", q4_0: "4-bit (Hadamard-rotated)", fp16: "16-bit"}[eng.kv] || eng.kv;
   facts($("facts-engine"), [
     ["Model", eng.model],
     ["Engine", eng.version ? `v${eng.version}` : "built from source"],
+    ["Update", upd && upd.tag ? `${upd.tag} is published (this is ${upd.installed}): ${upd.command}` : null],
     ["Context", eng.max_context ? `${fmt(eng.max_context)} tokens` : null],
     ["KV cache", kv ? `${kv}${eng.kv_resident ? `, streamed: ${fmt(eng.kv_resident)} positions per layer in VRAM, the rest in RAM` : ", all in VRAM"}` : null],
     ["Experts in VRAM", eng.expert_slots ? `${fmt(eng.expert_slots)} (${gb((eng.expert_cache_mib || 0) * 1048576)} GB)` : null],
