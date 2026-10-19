@@ -329,6 +329,15 @@ page).
   model files stay. The release also has a stand-alone Windows bundle (`strata-nvfp4-v<version>-windows-x64.zip`) that
   updates itself with `update.cmd`; its `prepare-model.cmd` downloads `qwen-nvfp4-gptq` ready-made, the files and
   revision setup pins, with the same censorship switch, off by default.
+  `strata update` (`python strata.py update`) runs the same updater for the folder it is in: `update.cmd`'s in a
+  release folder, `UPDATE.bat` / `./update.sh` in a clone; `strata update --check` only says whether a newer release
+  (or, in a clone, newer commits) is there. Upstream's signed engine feed is used only when you name it (`--feed`).
+- **Update notice:** at start the server asks GitHub, at most once a day, which strata-nvfp4 release is the newest
+  (one small request, no token, nothing about the PC; the answer is kept in `.update/update-check.json`). When it is
+  newer than the installed one, the server's window says so with the command that updates this folder, and the web
+  page shows a small link in its header (hidden with its x until the next release; About lists it too). Nothing is
+  downloaded or installed by itself. Off: `STRATA_UPDATE_CHECK=0`, or `"update_check": false` in the run config
+  (About > Settings); `--offline` never asks.
 
 ## Requirements
 
