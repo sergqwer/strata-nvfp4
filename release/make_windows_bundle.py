@@ -91,6 +91,12 @@ for dll in ("cublas64_13.dll", "cublasLt64_13.dll"):
 
 # the server (with its chat page) and the tools
 shutil.copytree(REPO / "serve", OUT / "serve", ignore=skip)
+# upstream 0.2.0: serve imports strata_control (engine_component, vision_reader, procs, presets, private_files) at start,
+# and /v1/telemetry strata_cli's client (stdlib only).  Not the rest of strata_cli: no `strata update` in this bundle
+# (its default feed is upstream's engines; this fork's come with this zip / update.cmd).
+shutil.copytree(REPO / "strata_control", OUT / "strata_control", ignore=skip)
+for name in ("__init__.py", "client.py"):
+    cp(REPO / "strata_cli" / name, OUT / "strata_cli" / name)
 shutil.copytree(REPO / "tools", OUT / "tools", ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "test_*.py", "vision"))
 
 # the part of llama.cpp the converter imports, at its pinned commit, with its license
