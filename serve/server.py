@@ -9815,6 +9815,11 @@ def with_component_engine(cfg: dict) -> dict:
     the package's own folder first on the library path (the GPU runtime libraries ship beside the binary)."""
     if not engine_component.is_reference(cfg.get("exe")):
         return cfg
+    # strata-nvfp4: said, not refused - the engine component is the app's / Terminal's (upstream's signed feed); this
+    # fork's own run configs name engine/strata.exe
+    print("[strata] this run config names the engine component (\"component:strata-engine\": the engine the app or "
+          "`strata update` installed from upstream's feed), not this strata-nvfp4 release's engine\\strata.exe",
+          file=sys.stderr, flush=True)
     cfg = dict(cfg)
     cfg["exe"] = _component_exe(cfg["exe"], cfg)
     cfg["lib_dirs"] = [*engine_component.package_lib_dirs(Path(cfg["exe"]).parent), *(cfg.get("lib_dirs") or [])]

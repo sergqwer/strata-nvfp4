@@ -8364,6 +8364,10 @@ def engine_step(a, gpu, hip, amd, cuda_tk, vision):
     if SHAPE_ENGINE.get("shape"):
         return shape_engine_step(a, gpu, vision)
     if CONTROL:
+        # strata-nvfp4: under Strata Control the run config names the app's engine component (upstream's signed
+        # feed), not this fork's engine - said, so it is never a silent switch
+        warn("Strata Control (the desktop app) installs this model with ITS engine component (upstream's, from its "
+             "signed feed), not this strata-nvfp4 release's engine: run this fork's setup.py / START-HERE.bat for that")
         return control_engine_step(gpu, vision)
     llama = get_llama_cpp()
     ok(f"llama.cpp {LLAMA_CPP_COMMIT[:7]} (gguf-py, ggml, mtmd)")
