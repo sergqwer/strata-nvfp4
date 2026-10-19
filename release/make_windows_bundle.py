@@ -93,7 +93,8 @@ for dll in ("cublas64_13.dll", "cublasLt64_13.dll"):
 shutil.copytree(REPO / "serve", OUT / "serve", ignore=skip)
 # upstream 0.2.0: serve imports strata_control (engine_component, vision_reader, procs, presets, private_files) at start,
 # and /v1/telemetry strata_cli's client (stdlib only).  Not the rest of strata_cli: no `strata update` in this bundle
-# (its default feed is upstream's engines; this fork's come with this zip / update.cmd).
+# (update.cmd is its updater - tools/bundle_update.py, which `strata update` would only run; the server's update
+# notice is strata_control/fork_release.py).
 shutil.copytree(REPO / "strata_control", OUT / "strata_control", ignore=skip)
 for name in ("__init__.py", "client.py"):
     cp(REPO / "strata_cli" / name, OUT / "strata_cli" / name)
