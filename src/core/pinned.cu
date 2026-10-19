@@ -892,7 +892,7 @@ PinnedArena::PinnedArena(uint64_t bytes, ByNeed, const std::vector<std::pair<uin
     if (cap == 0 && env_gib != 0) {
         uint64_t lim = 0;
         std::string why;
-        cap = env_gib == -2 && sliced_pin_limit(lim, why) && lim > 0 ? lim : (29ull << 30);
+        cap = env_gib == -2 && shared_pin_limit(lim, why) && lim > 0 ? lim : (29ull << 30);   // (#243 sliced_pin_limit, renamed by extras/wddm-pin)
     }
 #endif
     constexpr uint64_t kPage = 4096;
