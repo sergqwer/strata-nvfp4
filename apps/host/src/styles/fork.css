@@ -1,0 +1,17 @@
+/* strata-nvfp4: controls this fork's page does not offer (src/lib/fork.ts sets the data attributes). */
+
+/* never in this fork: the projection switch (the uncensor projection in this fork's server) and update/roll-back buttons */
+[data-strata-fork] .response-projection,
+[data-strata-fork] .settings-version .st-btn,
+[data-strata-fork] .settings-update-actions .st-btn--ghost { display: none !important; }
+
+/* attached to a model server another process owns: no model management, tuning, serving or engine settings here */
+[data-strata-attach] a.navitem[href="#/models"],
+[data-strata-attach] a.menu__item[href="#/serving"],
+[data-strata-attach] #settings-tab-Engine,
+[data-strata-attach] #settings-tab-Storage { display: none !important; }
+
+/* no agent component: no subagents, permission modes or tool settings */
+[data-strata-no-agent] .chat-agents,
+[data-strata-no-agent] .composer-mode,
+[data-strata-no-agent] #settings-tab-Tools { display: none !important; }
