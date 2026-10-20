@@ -374,7 +374,7 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
-### The new interface in the browser (2026-10-20, not released yet)
+### The new interface in the browser (2026-10-20, release 0.2.0-beta-nvfp4.3)
 
 Upstream 0.2.0 ships a new React app (`apps/host`) inside a desktop program (Tauri). This fork runs the same page in
 the browser instead, as a front end over the server it already has: the server owns the engine, the page only uses it.
@@ -390,6 +390,11 @@ the browser instead, as a front end over the server it already has: the server o
 - **`start-ui.cmd`** starts only the host, attached to a server something else runs (the tray, a server on another
   port): `start-ui.cmd http://127.0.0.1:8092/v1` with `STRATA_ATTACH_KEY` or `STRATA_ATTACH_KEY_FILE`; without an
   address, the folder's config (`STRATA_ATTACH_CONFIG`: its port and `api_key`).
+- **From the run config.** `"app_ui": true` starts the host with the server wherever the server is started from, and
+  `"app_ui_open": false` does not open the browser (`serve/app_ui.py` `config_environ`; the environment's
+  `STRATA_APP_UI` / `STRATA_APP_UI_OPEN` win where set). A tray that starts the server with its model gets the page
+  for as long as the model is loaded; it ends with the server. Chats sent from the page go to the server directly,
+  and the server logs each one, so a tray that reads the log for activity still counts them.
 - **Attach mode** (`apps/host/server/attach.mjs`, set by `STRATA_ATTACH_URL` / `STRATA_ATTACH_CONFIG`) stands in for
   upstream's engine manager (`native-control.mjs`): the running server is the one loaded model. Its name, context
   and picture support come from the server's `/health`, which this fork's server answers without the key (`model`,
