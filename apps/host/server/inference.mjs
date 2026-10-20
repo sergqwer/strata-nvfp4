@@ -15,6 +15,7 @@
 import * as supervisor from './supervisor.mjs';
 import { get as getStore } from './store.mjs';
 import { which } from './util.mjs';
+import { samplingSetByPerson } from './attach.mjs';   // strata-nvfp4
 
 /** Where Strata's own API worker listens by default (`serve/server.py`, `--port 8095`). */
 const STRATA_DEFAULT_URL = 'http://127.0.0.1:8095/v1';
@@ -236,7 +237,7 @@ export async function streamChat({ message, history = [], systemPrompt = '', mod
 
 /* --------------------------------------------------------- real engine path --- */
 
-export async function proxyCompletion({ baseUrl, message, history = [], systemPrompt = '', onFrame, signal, supervised = false, engine,modelId='local',authorization,images=[],extra={} }) {
+export async function proxyCompletion({ baseUrl, message, history = [], systemPrompt = '', onFrame, signal, supervised = false, engine,modelId='local',authorization,images=[],extra={},samplingSetOnly=false }) {
   const started = Date.now();
   engine?.beginReading(0, engine.variantId);
   const messages = [
@@ -246,7 +247,8 @@ export async function proxyCompletion({ baseUrl, message, history = [], systemPr
   ];
 
   const defaults = getStore().expert ?? {};
-  const sampling = { temperature: defaults['sample.temp'] ?? 0.6, top_p: defaults['sample.topP'] ?? 0.95, top_k: defaults['sample.topK'] ?? 40, repeat_penalty: defaults['sample.repeat'] ?? 1.05, seed: defaults['sample.seed'] ?? -1, experimental_speed_projection: defaults['sample.speedProjection'] ?? true, ...(Number(defaults['sample.maxTokens']) > 0 ? {max_tokens: Number(defaults['sample.maxTokens'])} : {}) };
+  // strata-nvfp4: an attached server keeps its own sampling (the model card's); only what the person set here is sent
+  const sampling = samplingSetOnly ? samplingSetByPerson(defaults) : { temperature: defaults['sample.temp'] ?? 0.6, top_p: defaults['sample.topP'] ?? 0.95, top_k: defaults['sample.topK'] ?? 40, repeat_penalty: defaults['sample.repeat'] ?? 1.05, seed: defaults['sample.seed'] ?? -1, experimental_speed_projection: defaults['sample.speedProjection'] ?? true, ...(Number(defaults['sample.maxTokens']) > 0 ? {max_tokens: Number(defaults['sample.maxTokens'])} : {}) };
   const res = await fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...(authorization?{authorization:`Bearer ${authorization}`} :supervised && getStore().serving?.apiKey ? { authorization: `Bearer ${getStore().serving.apiKey}` } : {}) },
