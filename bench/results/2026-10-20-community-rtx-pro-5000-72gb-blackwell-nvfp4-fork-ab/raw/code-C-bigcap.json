@@ -1,0 +1,45 @@
+{
+ "when": "2026-10-20T16:36:52+0800",
+ "cap": 1200,
+ "requests": [
+  {
+   "run": 1,
+   "prompt_tokens": 85,
+   "gen": 552,
+   "finish": "stop",
+   "decode": 260.1,
+   "client_decode": 260.7,
+   "prefill": 524.5,
+   "acc": 81.2,
+   "ttft": 0.174,
+   "chars": 2130,
+   "syntax": "compiles"
+  },
+  {
+   "run": 2,
+   "prompt_tokens": 85,
+   "gen": 608,
+   "finish": "stop",
+   "decode": 269.2,
+   "client_decode": 269.8,
+   "prefill": 558.4,
+   "acc": 82.2,
+   "ttft": 0.163,
+   "chars": 2124,
+   "syntax": "compiles"
+  },
+  {
+   "run": 3,
+   "prompt_tokens": 85,
+   "gen": 555,
+   "finish": "stop",
+   "decode": 259.4,
+   "client_decode": 260.0,
+   "prefill": 560.5,
+   "acc": 81.6,
+   "ttft": 0.163,
+   "chars": 2131,
+   "syntax": "compiles"
+  }
+ ]
+}
