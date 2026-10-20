@@ -14,7 +14,8 @@
  *     learn whether the server is up: at start with a growing pause until it first answers, and every 2 s while a
  *     chat of the person's is on its way;
  *   - keyed requests (GET /metrics for the Monitor, GET /v1/models when /health does not name the model) only within
- *     30 s of the server answering /health or of a chat that finished: never while the server is not known to be up;
+ *     30 s of the server answering /health or of a chat that finished, and the Monitor's /metrics (while a chat runs
+ *     and 30 s after it) each time right after /health answered: never while the server is not known to be up;
  *   - nothing at all while the page sits idle. Only the person's chat (the native chat path, index.mjs) wakes a model.
  * Unload detaches (the host stops using the server; choosing the model again re-attaches it); the server keeps running.
  */
@@ -152,9 +153,11 @@ export function createAttach({ env = process.env, dataDir, requests = () => [], 
       const { active, lastOk } = chatActivity();
       chatActive = active;
       if (lastOk > lastChatEnd) { lastChatEnd = lastOk; upUntil = Math.max(upUntil, lastOk + UP_WINDOW_MS); }
-      if (active) { if (now() - lastHealth >= TICK_MS) await probe(); }
-      else if (!everUp && now() >= nextProbe) { const ok = await probe(); if (!ok) { nextProbe = now() + probeDelay; probeDelay = Math.min(probeDelay * 2, PROBE_MAX_MS); } }
-      await poll();
+      if (active || now() < lastChatEnd + UP_WINDOW_MS) {
+        // the key only right after the server answered the keyless /health: a model stopped or unloaded since the chat
+        // (a tray's Stop, its idle unload) is never woken by the Monitor
+        if (now() - lastHealth >= TICK_MS) { if (await probe()) await poll(); else upUntil = 0; }
+      } else if (!everUp && now() >= nextProbe) { const ok = await probe(); if (!ok) { nextProbe = now() + probeDelay; probeDelay = Math.min(probeDelay * 2, PROBE_MAX_MS); } }
     } catch (e) { note(e.message); }
   }
 

@@ -97,6 +97,21 @@ test('doorbell: a chat opens the window - keyless /health while it runs, keyed /
   assert.equal(h.calls.length, before, 'silent afterwards');
 });
 
+test('doorbell: a model stopped right after a chat (a tray\'s Stop) gets no keyed /metrics - /health goes first each time', async () => {
+  const h = harness();
+  await h.a.tick();
+  h.calls.length = 0;
+  const end = h.now();
+  h.setRequests([{ instanceId: ATTACHED_ID, state: 'done', at: new Date(end - 5000).toISOString(), durationMs: 5000 }]);
+  await h.advance(4000);
+  assert.ok(h.calls.some(c => c.path === '/metrics' && c.keyed), 'the Monitor reads /metrics after the chat');
+  h.server.up = false;                                // stopped within the 30 s window
+  const before = h.calls.filter(c => c.keyed).length;
+  await h.advance(UP_WINDOW_MS);
+  assert.equal(h.calls.filter(c => c.keyed).length, before, 'no keyed request once /health stopped answering');
+  assert.ok(h.calls.slice(-1)[0].path === '/health' && !h.calls.slice(-1)[0].keyed);
+});
+
 test('unload detaches without stopping anything; choosing the model again re-attaches', async () => {
   const h = harness();
   await h.a.tick();
