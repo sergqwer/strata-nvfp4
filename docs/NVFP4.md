@@ -404,7 +404,8 @@ the browser instead, as a front end over the server it already has: the server o
   through it counts as use. So the host sends the key only within 30 s of the server answering the keyless `/health`
   or of a chat that finished, asks `/health` (keyless) at start with a growing pause (2 s up to 5 min) until the server
   first answers and every 2 s while a chat of yours is on its way, reads `/metrics` (keyed) only while a chat runs and
-  30 s after it, and sends nothing at all while the page sits idle. Only a chat you send can wake a model; an open
+  30 s after it and each time right after `/health` answered (a model stopped meanwhile gets no key), and sends nothing
+  at all while the page sits idle. Only a chat you send can wake a model; an open
   page never keeps one from unloading.
 - **Hidden in attach mode:** Models, Tuning and Serving (the routes go to Monitor or Chat), Settings > Engine and
   Storage, "Manage models", tasks' Run now; without the agent component (upstream's DeepSeek Harness, not bundled):
