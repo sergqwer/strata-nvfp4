@@ -31,6 +31,19 @@ def wanted(environ=None) -> bool:
     return str(environ.get("STRATA_APP_UI", "")).strip().lower() not in ("", "0", "false", "no", "off")
 
 
+def config_environ(cfg: dict | None, environ=None) -> dict:
+    """The environment start() reads, with the run config's "app_ui": true / "app_ui_open": false where the environment
+    says nothing: a tray's per-model config turns the new interface on with its model, without a browser tab at every
+    load (the tray starts the server; the interface ends with it)."""
+    env = dict(os.environ if environ is None else environ)
+    cfg = cfg or {}
+    if "STRATA_APP_UI" not in env and cfg.get("app_ui") is True:
+        env["STRATA_APP_UI"] = "1"
+    if "STRATA_APP_UI_OPEN" not in env and cfg.get("app_ui_open") is False:
+        env["STRATA_APP_UI_OPEN"] = "0"
+    return env
+
+
 def find(root: Path = ROOT, environ=None):
     """(node, host dir) or (None, why)."""
     environ = os.environ if environ is None else environ

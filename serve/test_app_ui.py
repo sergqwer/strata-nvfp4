@@ -21,6 +21,16 @@ class AppUiTest(unittest.TestCase):
         self.assertFalse(app_ui.wanted({"STRATA_APP_UI": "0"}))
         self.assertTrue(app_ui.wanted({"STRATA_APP_UI": "1"}))
 
+    def test_config_turns_it_on_where_the_environment_says_nothing(self):
+        env = app_ui.config_environ({"app_ui": True, "app_ui_open": False}, {})
+        self.assertTrue(app_ui.wanted(env))
+        self.assertEqual(env["STRATA_APP_UI_OPEN"], "0")
+        self.assertFalse(app_ui.wanted(app_ui.config_environ({}, {})))
+        self.assertFalse(app_ui.wanted(app_ui.config_environ({"app_ui": "yes"}, {})))       # only a JSON true
+        env = app_ui.config_environ({"app_ui": True, "app_ui_open": False}, {"STRATA_APP_UI": "0", "STRATA_APP_UI_OPEN": "1"})
+        self.assertFalse(app_ui.wanted(env))                                                 # the environment wins
+        self.assertEqual(env["STRATA_APP_UI_OPEN"], "1")
+
     def test_find_names_what_is_missing(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
