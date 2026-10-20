@@ -55,15 +55,28 @@ Source, measurements and how it works: https://github.com/sergqwer/strata-nvfp4
    - OpenAI API at `/v1/chat/completions`, Anthropic API at `/v1/messages` (Claude Code can point at it)
    - pictures too: attach them in the chat page, send `image_url` parts or Anthropic image blocks. The image encoder
      runs on the CPU (2-6 s a picture), so the graphics card keeps all its memory for the model
+   - **the new interface at http://127.0.0.1:8791** (upstream Strata 0.2.0's app page, in your browser): once the model
+     is ready the server starts it beside itself, prints `New interface: http://127.0.0.1:8791` and opens it. It uses
+     this server's model - it starts no engine of its own - and stops when the server stops. The old page stays at
+     `http://127.0.0.1:8080/`. Chats are kept by the browser for that address. Without `node\node.exe` the old page
+     is the interface and one line says why; `set STRATA_APP_UI=0` leaves the new one out.
 
 First start after a reboot is slower while Windows reads the files; later starts take ~8-15 s.
+
+**`start-ui.cmd`** — only the new interface, for a model something else runs (a tray, a server on another port):
+`start-ui.cmd http://127.0.0.1:8092/v1`, with the server's API key in `STRATA_ATTACH_KEY` (or a file named by
+`STRATA_ATTACH_KEY_FILE`; never on the command line). Without an address it uses this folder's server and its config.
+It sends the key only while the server answers and nothing while the page sits idle, so a tray still unloads its model
+when idle; only a chat you send wakes it. What the new interface leaves out here: downloading, loading, tuning and
+serving models (that is `prepare-model.cmd` and `start-server.cmd`), updating (`update.cmd`), sharing on the network
+and the coding agent (not part of this release). It listens on 127.0.0.1 only.
 
 ## Updating
 
 **`update.cmd`** downloads the newest release of this fork, checks it against the SHA-256 GitHub publishes for it,
 and replaces the engine, the server and the tools. `config\`, `data\`, `models\` and the `.venv-*` folders stay;
-the replaced program is kept in `.previous\`. Close the server first. `update.cmd --check` only says whether a newer
-release is out. When a release changes a file of `config\` or `data\`, one you did not change is replaced; one you
+the replaced program is kept in `.previous\`. Close the server (and `start-ui.cmd`) first. `update.cmd --check` only
+says whether a newer release is out. When a release changes a file of `config\` or `data\`, one you did not change is replaced; one you
 changed stays, and the release's goes beside it as `<name>.new`. The program is swapped by renames, each one noted
 first: if a file in use stops it half way, the old program is put back - by the next `update.cmd` if it cannot be
 right away.
@@ -132,6 +145,7 @@ per tool turn (~0.5 s).
 | --- | --- |
 | `engine\` | `strata.exe`, `strata-vision.exe` (the image encoder), NVIDIA cuBLAS (`cublas64_13.dll`, `cublasLt64_13.dll`), `BUILD.json` |
 | `serve\` | the server and its chat page |
+| `app\host\`, `node\` | the new interface (upstream Strata's app page and its host) and the Node.js that runs it |
 | `tools\` | `bundle_model.py` (what `prepare-model.cmd` runs), the updater, and the converters for making a pack yourself (with `third_party\llama.cpp\`, llama.cpp's at its pinned commit) |
 | `data\` | the expert-cache profile, the draft vocabulary, `uncensor\` (the censorship switch's vector) |
 | `model-files.json` | the files `prepare-model.cmd` downloads: repository, revision, size and SHA-256 of each |

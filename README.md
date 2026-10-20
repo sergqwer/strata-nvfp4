@@ -51,6 +51,14 @@ files by hand.
 
 ## What's new
 
+- **Next release: upstream 0.2.0's new interface, in your browser.** The release folder's `start-server.cmd` now also
+  starts upstream Strata's app page on **http://127.0.0.1:8791** once the model is ready, and opens it: chat with
+  pictures and the thinking switch, chats kept by the browser, skills, workspaces and the Monitor with the engine's own
+  numbers. It runs on the folder's own `node\node.exe` and uses the server's model - it starts no engine of its own - and
+  stops with the server. The old page stays at http://127.0.0.1:8080/. `start-ui.cmd <address>` opens it for a model
+  something else runs (a tray); it never wakes a sleeping model except for a chat you send. Model downloads, tuning and
+  updates stay where they are (`prepare-model.cmd`, `update.cmd`); upstream's desktop app is not part of it
+  ([details](docs/NVFP4.md#the-new-interface-in-the-browser-2026-10-20-not-released-yet)).
 - **0.2.0-beta-nvfp4.2: this fork updates from this fork.** At start the server asks GitHub, at most once a day,
   which strata-nvfp4 release is the newest. When it is newer than the installed one, the server's window and the web
   page's header say so, with the command that updates the folder (`update.cmd` in a release folder, `UPDATE.bat` in a

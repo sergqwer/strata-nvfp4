@@ -374,6 +374,58 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### The new interface in the browser (2026-10-20, not released yet)
+
+Upstream 0.2.0 ships a new React app (`apps/host`) inside a desktop program (Tauri). This fork runs the same page in
+the browser instead, as a front end over the server it already has: the server owns the engine, the page only uses it.
+
+- **Start.** In a release folder `start-server.cmd` sets `STRATA_APP_UI=1`; once the model is ready `serve/app_ui.py`
+  starts the App Host (`app\host\server\index.mjs` on the folder's `node\node.exe`, Node.js 24 LTS) on
+  http://127.0.0.1:8791, prints `New interface: http://127.0.0.1:8791  (the old page stays at http://127.0.0.1:8080/)`
+  and opens it. The host gets the server's address and key in its environment (never on a command line), is put in
+  the server's job object and watches the server's process, so it ends with the server however that ends. No
+  `node\node.exe`: one line says so and the old page is the interface. The port is fixed (`STRATA_APP_UI_PORT`
+  changes it) because the page keeps its chats in the browser's storage, per address. In a clone: `npm ci && npm run
+  build` in `apps/host`, Node 24.12+ on PATH, `set STRATA_APP_UI=1` before `run-<model>.bat`.
+- **`start-ui.cmd`** starts only the host, attached to a server something else runs (the tray, a server on another
+  port): `start-ui.cmd http://127.0.0.1:8092/v1` with `STRATA_ATTACH_KEY` or `STRATA_ATTACH_KEY_FILE`; without an
+  address, the folder's config (`STRATA_ATTACH_CONFIG`: its port and `api_key`).
+- **Attach mode** (`apps/host/server/attach.mjs`, set by `STRATA_ATTACH_URL` / `STRATA_ATTACH_CONFIG`) stands in for
+  upstream's engine manager (`native-control.mjs`): the running server is the one loaded model. Its name, context
+  and picture support come from the server's `/health`, which this fork's server answers without the key (`model`,
+  `max_context` - the same values as `/v1/models` and its `meta.n_ctx` - and `images`); another server's
+  `/v1/models` is asked instead. Chats go to its `/v1/chat/completions` with its key, with no sampling of the page's
+  own unless you set it in the page (Expert sampling), so the model card's and the run config's sampling apply - the
+  Qwen set. The projection switch (`experimental_speed_projection`, this fork's uncensor switch) is never sent and
+  the page's "Speed projection" control is hidden: the new interface has no uncensor control, for any model and
+  never for NVIDIA's checkpoints. The Monitor's engine panels and context fill come from the server's `/metrics`.
+  Unload only detaches (the server keeps running; choosing the model again in the chat header re-attaches it).
+- **The doorbell rule.** Behind the tray's proxy a request that carries the key loads the model, and every request
+  through it counts as use. So the host sends the key only within 30 s of the server answering the keyless `/health`
+  or of a chat that finished, asks `/health` (keyless) at start with a growing pause (2 s up to 5 min) until the server
+  first answers and every 2 s while a chat of yours is on its way, reads `/metrics` (keyed) only while a chat runs and
+  30 s after it, and sends nothing at all while the page sits idle. Only a chat you send can wake a model; an open
+  page never keeps one from unloading.
+- **Hidden in attach mode:** Models, Tuning and Serving (the routes go to Monitor or Chat), Settings > Engine and
+  Storage, "Manage models", tasks' Run now; without the agent component (upstream's DeepSeek Harness, not bundled):
+  Subagents, the permission modes and Settings > Tools. Always hidden in this fork: the update and roll-back buttons.
+- **Security** (`apps/host/server/fork.mjs`): the host listens on 127.0.0.1 only (`STRATA_BIND` elsewhere stops it;
+  `STRATA_ALLOW_LAN_BIND=1` overrides that, unsupported: the page has no login); requests whose `Host` is not
+  `127.0.0.1:<port>`, `localhost:<port>` or `[::1]:<port>` get 421 (DNS rebinding); no CORS headers; upstream's
+  rule that refuses `/api` requests from other sites' pages stays; the host's own `/v1` is off (`STRATA_HOST_V1=1`
+  turns it on); the network share and the Cloudflare tunnel cannot be started; `STRATA_NO_ACQUIRE=1`.
+- **Updates:** About > Check for updates runs `strata_control/fork_release.py`'s check (this fork's GitHub release,
+  its daily cache shared with the server, `STRATA_UPDATE_CHECK=0` or the run config's `"update_check": false`) in the
+  folder's Python; never upstream's release feed. Updating stays `update.cmd` (it refuses while `node\node.exe` runs).
+- **Not here:** downloading, loading, tuning and deleting models, the engine updater, the coding agent (Harness), the
+  desktop window and its updater, LAN use.
+- **Bundle:** `release/make_windows_bundle.py` adds `node\` (the pinned official `node-v24.22.0-win-x64.zip`, its
+  SHA-256 checked against nodejs.org's SHASUMS256.txt and the script, cached in `%LOCALAPPDATA%\strata-nvfp4-build`;
+  `node\LICENSE` and the licences of the page's libraries in THIRD-PARTY-NOTICES.txt) and `app\host\` (the server
+  files and the page built from the lockfile, no source maps, without upstream's GT Walsheim Pro webfonts - a
+  commercial typeface; the page falls back to Segoe UI). `--engine-from <checkout>` takes the engine already built in
+  another checkout of the same engine sources, byte for byte.
+
 ### `strata update` runs this fork's updater; the start says when a newer release is out (2026-10-20, release 0.2.0-beta-nvfp4.2)
 
 - **`strata update`** (and `strata components update`) without a named feed runs this fork's own updater for the
