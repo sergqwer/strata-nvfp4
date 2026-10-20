@@ -1,6 +1,7 @@
 @echo off
 setlocal
-rem The OpenAI / Anthropic-compatible server and a chat page on http://127.0.0.1:8080
+rem The OpenAI / Anthropic-compatible server and a chat page on http://127.0.0.1:8080, and the new interface on
+rem http://127.0.0.1:8791 (node\node.exe runs it beside the server, attached to it; STRATA_APP_UI=0 leaves it out).
 rem Paths and engine flags: config\strata-qwen-nvfp4-gptq.json. Extra arguments go to serve.server (e.g. --port 9000).
 cd /d "%~dp0"
 set "CFG=config\strata-qwen-nvfp4-gptq.json"
@@ -23,4 +24,6 @@ if not exist "%PY%" (
   python -m venv .venv-serve || exit /b 1
   "%PY%" -m pip install --quiet -r requirements-serve.txt || exit /b 1
 )
+rem the new interface: the server starts it once the model is ready and ends it when it stops (serve/app_ui.py)
+if not defined STRATA_APP_UI set "STRATA_APP_UI=1"
 "%PY%" -m serve.server --engine strata --config %CFG% --port 8080 %*

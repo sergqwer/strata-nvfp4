@@ -137,12 +137,13 @@ def check(z: Path, size: int, sha: str | None) -> str | None:
 # programs that run from this folder: Windows keeps a running program's file locked (it cannot be opened for writing)
 RUNNING = (("engine", "strata.exe"), ("engine", "strata-vision.exe"),
            (".venv-serve", "Scripts", "python.exe"), (".venv-serve", "Scripts", "pythonw.exe"),
-           (".venv-convert", "Scripts", "python.exe"), (".venv-convert", "Scripts", "pythonw.exe"))
+           (".venv-convert", "Scripts", "python.exe"), (".venv-convert", "Scripts", "pythonw.exe"),
+           ("node", "node.exe"))                       # the new interface (start-server.cmd's, start-ui.cmd)
 
 
 def engine_running(root: Path) -> str | None:
     """The program of this folder that is running (the engine, the image encoder, the server's or the converter's
-    Python), or None.  This script's own Python is not counted."""
+    Python, the new interface's node.exe), or None.  This script's own Python is not counted."""
     me = os.path.normcase(os.path.abspath(sys.executable))
     for parts in RUNNING:
         p = root.joinpath(*parts)
