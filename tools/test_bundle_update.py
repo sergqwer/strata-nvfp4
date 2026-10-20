@@ -293,6 +293,18 @@ class Update(unittest.TestCase):
 
         with mock.patch("builtins.open", locked):
             self.assertEqual(U.engine_running(self.root), str(Path(".venv-serve", "Scripts", "python.exe")))
+        # strata-nvfp4: the new interface's node.exe counts too (Windows keeps it locked while it runs)
+        node = self.root / "node" / "node.exe"
+        write(node, b"node")
+
+        def node_locked(p, mode="r", *a, **k):
+            if Path(p) == node and "+" in mode:
+                raise PermissionError("in use")
+            return real(p, mode, *a, **k)
+
+        busy.unlink()
+        with mock.patch("builtins.open", node_locked):
+            self.assertEqual(U.engine_running(self.root), str(Path("node", "node.exe")))
         answers = iter([None, "engine\\strata.exe"])            # free before the download, started meanwhile
         with mock.patch.object(U, "engine_running", lambda root: next(answers)):
             code, out = run(self.root)
