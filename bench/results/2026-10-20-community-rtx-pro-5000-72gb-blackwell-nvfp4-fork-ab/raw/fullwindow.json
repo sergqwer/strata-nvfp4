@@ -1,0 +1,17 @@
+{
+ "kind": "full_window",
+ "target_tokens": 500000,
+ "payload_chars": 695169,
+ "prompt_tokens_reported": 524004,
+ "engine": {
+  "prompt_tokens": 524004,
+  "prefill_tps": 4723.3,
+  "generated": 16,
+  "decode_tps": 136.2
+ },
+ "content": "KILN-7734 MARROW-2216",
+ "finish": "stop",
+ "error": null,
+ "wall_s": 111.3,
+ "pass": true
+}

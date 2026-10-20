@@ -1,0 +1,230 @@
+[
+ {
+  "tag": "B1024-rep",
+  "engine": {
+   "prompt_tokens": 1184,
+   "reused": 0,
+   "read": 1184,
+   "prompt_ms": 506,
+   "prefill_tps": 2341.4,
+   "generated": 256,
+   "decode_ms": 846,
+   "decode_tps": 302.7,
+   "drafts_accepted": 215,
+   "drafts_offered": 217,
+   "expert_hit_pct": 97.6
+  },
+  "ttft_s": 0.5271117687225342,
+  "finish": "length",
+  "head": "PLUM-OTTER-B1024-rep\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13"
+ },
+ {
+  "tag": "B1024-nat",
+  "engine": {
+   "prompt_tokens": 1188,
+   "reused": 0,
+   "read": 1188,
+   "prompt_ms": 544,
+   "prefill_tps": 2184.3,
+   "generated": 256,
+   "decode_ms": 2238,
+   "decode_tps": 114.4,
+   "drafts_accepted": 53,
+   "drafts_offered": 109,
+   "expert_hit_pct": 97.8
+  },
+  "ttft_s": 0.5573256015777588,
+  "finish": "length",
+  "head": "深夜实验室里的意外发现\n\n凌晨三点，实验室的白炽灯管发出轻微的电流嗡鸣，像某种古老昆虫的低语。林远揉"
+ },
+ {
+  "tag": "B4096-rep",
+  "engine": {
+   "prompt_tokens": 4704,
+   "reused": 0,
+   "read": 4704,
+   "prompt_ms": 1108,
+   "prefill_tps": 4246.4,
+   "generated": 256,
+   "decode_ms": 814,
+   "decode_tps": 314.3,
+   "drafts_accepted": 213,
+   "drafts_offered": 215,
+   "expert_hit_pct": 99.5
+  },
+  "ttft_s": 1.1224431991577148,
+  "finish": "length",
+  "head": "PLUM-OTTER-B4096-rep\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13"
+ },
+ {
+  "tag": "B4096-nat",
+  "engine": {
+   "prompt_tokens": 4708,
+   "reused": 0,
+   "read": 4708,
+   "prompt_ms": 1114,
+   "prefill_tps": 4227.5,
+   "generated": 251,
+   "decode_ms": 2351,
+   "decode_tps": 106.8,
+   "drafts_accepted": 40,
+   "drafts_offered": 91,
+   "expert_hit_pct": 99.2
+  },
+  "ttft_s": 1.1280760765075684,
+  "finish": "stop",
+  "head": "深夜实验室里的意外发现\n\n凌晨三点，整栋科研大楼早已沉入寂静，只有地下二层的观测数据处理中心还亮着几"
+ },
+ {
+  "tag": "B32768-rep",
+  "engine": {
+   "prompt_tokens": 39362,
+   "reused": 0,
+   "read": 39362,
+   "prompt_ms": 6973,
+   "prefill_tps": 5644.6,
+   "generated": 256,
+   "decode_ms": 895,
+   "decode_tps": 286.0,
+   "drafts_accepted": 216,
+   "drafts_offered": 218,
+   "expert_hit_pct": 99.6
+  },
+  "ttft_s": 6.998727083206177,
+  "finish": "length",
+  "head": "PLUM-OTTER-B32768-rep\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n1"
+ },
+ {
+  "tag": "B32768-nat",
+  "engine": {
+   "prompt_tokens": 39366,
+   "reused": 0,
+   "read": 39366,
+   "prompt_ms": 7162,
+   "prefill_tps": 5496.5,
+   "generated": 225,
+   "decode_ms": 2223,
+   "decode_tps": 101.2,
+   "drafts_accepted": 28,
+   "drafts_offered": 70,
+   "expert_hit_pct": 99.5
+  },
+  "ttft_s": 7.187057733535767,
+  "finish": "stop",
+  "head": "深夜实验室里的意外发现\n\n凌晨三点，整栋科研大楼早已沉入寂静，唯有地下二层的观测数据归档室还亮着一盏"
+ },
+ {
+  "tag": "B65536-rep",
+  "engine": {
+   "prompt_tokens": 79073,
+   "reused": 0,
+   "read": 79073,
+   "prompt_ms": 13683,
+   "prefill_tps": 5779.1,
+   "generated": 256,
+   "decode_ms": 930,
+   "decode_tps": 275.2,
+   "drafts_accepted": 211,
+   "drafts_offered": 220,
+   "expert_hit_pct": 99.7
+  },
+  "ttft_s": 13.719357013702393,
+  "finish": "length",
+  "head": "PLUM-OTTER-B65536-rep\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n1"
+ },
+ {
+  "tag": "B65536-nat",
+  "engine": {
+   "prompt_tokens": 79077,
+   "reused": 0,
+   "read": 79077,
+   "prompt_ms": 13896,
+   "prefill_tps": 5690.8,
+   "generated": 256,
+   "decode_ms": 2367,
+   "decode_tps": 108.1,
+   "drafts_accepted": 56,
+   "drafts_offered": 128,
+   "expert_hit_pct": 99.5
+  },
+  "ttft_s": 13.932607889175415,
+  "finish": "length",
+  "head": "深夜实验室里的意外发现\n\n凌晨三点，整栋科研大楼早已沉入寂静，只有地下二层的观测数据处理中心还亮着一"
+ },
+ {
+  "tag": "B131072-rep",
+  "engine": {
+   "prompt_tokens": 164742,
+   "reused": 0,
+   "read": 164742,
+   "prompt_ms": 29906,
+   "prefill_tps": 5508.7,
+   "generated": 256,
+   "decode_ms": 956,
+   "decode_tps": 267.9,
+   "drafts_accepted": 209,
+   "drafts_offered": 218,
+   "expert_hit_pct": 99.8
+  },
+  "ttft_s": 29.968143224716187,
+  "finish": "length",
+  "head": "PLUM-OTTER-B131072-rep\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n"
+ },
+ {
+  "tag": "B131072-nat",
+  "engine": {
+   "prompt_tokens": 164746,
+   "reused": 0,
+   "read": 164746,
+   "prompt_ms": 30326,
+   "prefill_tps": 5432.6,
+   "generated": 256,
+   "decode_ms": 2401,
+   "decode_tps": 106.6,
+   "drafts_accepted": 49,
+   "drafts_offered": 92,
+   "expert_hit_pct": 99.7
+  },
+  "ttft_s": 30.387375831604004,
+  "finish": "length",
+  "head": "深夜实验室里的意外发现\n\n凌晨三点，整栋科研大楼早已沉入寂静，只有地下二层的观测数据处理中心还亮着一"
+ },
+ {
+  "tag": "B245760-rep",
+  "engine": {
+   "prompt_tokens": 312648,
+   "reused": 0,
+   "read": 312648,
+   "prompt_ms": 60420,
+   "prefill_tps": 5174.6,
+   "generated": 256,
+   "decode_ms": 985,
+   "decode_tps": 260.0,
+   "drafts_accepted": 210,
+   "drafts_offered": 216,
+   "expert_hit_pct": 99.7
+  },
+  "ttft_s": 60.52628016471863,
+  "finish": "length",
+  "head": "PLUM-OTTER-B245760-rep\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n"
+ },
+ {
+  "tag": "B245760-nat",
+  "engine": {
+   "prompt_tokens": 312652,
+   "reused": 0,
+   "read": 312652,
+   "prompt_ms": 60820,
+   "prefill_tps": 5140.6,
+   "generated": 226,
+   "decode_ms": 2278,
+   "decode_tps": 99.2,
+   "drafts_accepted": 42,
+   "drafts_offered": 106,
+   "expert_hit_pct": 99.7
+  },
+  "ttft_s": 60.92520523071289,
+  "finish": "stop",
+  "head": "深夜的实验室里，只有服务器机柜低沉的嗡鸣声在空气中回荡，像是一头沉睡巨兽的呼吸。林远揉了揉酸涩的双眼"
+ }
+]

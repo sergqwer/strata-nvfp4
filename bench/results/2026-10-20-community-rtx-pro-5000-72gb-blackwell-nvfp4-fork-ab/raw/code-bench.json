@@ -1,0 +1,373 @@
+{
+ "when": "2026-10-20T16:33:30+0800",
+ "base": "http://127.0.0.1:18083",
+ "model": "qwen3.8-flash-next-gptq-nvfp4",
+ "max_tokens": 512,
+ "runs": 3,
+ "all_decode_engine": {
+  "n": 12,
+  "median": 218.2,
+  "min": 118.6,
+  "max": 272.3
+ },
+ "all_decode_client": {
+  "n": 12,
+  "median": 219.2,
+  "min": 118.7,
+  "max": 292.8
+ },
+ "all_accept": {
+  "n": 12,
+  "median": 67.5,
+  "min": 30.8,
+  "max": 87.8
+ },
+ "by_task": {
+  "py_script": {
+   "decode_engine": {
+    "n": 3,
+    "median": 256.4,
+    "min": 255.2,
+    "max": 258.8
+   },
+   "decode_client": {
+    "n": 3,
+    "median": 257.0,
+    "min": 255.8,
+    "max": 259.4
+   },
+   "prefill": {
+    "n": 3,
+    "median": 419.7,
+    "min": 290.5,
+    "max": 437.4
+   },
+   "accept": {
+    "n": 3,
+    "median": 80.0,
+    "min": 79.2,
+    "max": 84.6
+   },
+   "ttft": {
+    "n": 3,
+    "median": 0.2,
+    "min": 0.2,
+    "max": 0.3
+   },
+   "completion_tokens": {
+    "n": 3,
+    "median": 512,
+    "min": 512,
+    "max": 512
+   }
+  },
+  "py_refactor": {
+   "decode_engine": {
+    "n": 3,
+    "median": 119.1,
+    "min": 118.6,
+    "max": 122.7
+   },
+   "decode_client": {
+    "n": 3,
+    "median": 119.2,
+    "min": 118.7,
+    "max": 122.8
+   },
+   "prefill": {
+    "n": 3,
+    "median": 467.2,
+    "min": 417.2,
+    "max": 499.8
+   },
+   "accept": {
+    "n": 3,
+    "median": 32.7,
+    "min": 30.8,
+    "max": 34.0
+   },
+   "ttft": {
+    "n": 3,
+    "median": 0.2,
+    "min": 0.2,
+    "max": 0.2
+   },
+   "completion_tokens": {
+    "n": 3,
+    "median": 51,
+    "min": 51,
+    "max": 51
+   }
+  },
+  "sql": {
+   "decode_engine": {
+    "n": 3,
+    "median": 270.4,
+    "min": 264.6,
+    "max": 272.3
+   },
+   "decode_client": {
+    "n": 3,
+    "median": 291.1,
+    "min": 284.0,
+    "max": 292.8
+   },
+   "prefill": {
+    "n": 3,
+    "median": 440.0,
+    "min": 385.1,
+    "max": 486.5
+   },
+   "accept": {
+    "n": 3,
+    "median": 87.7,
+    "min": 82.1,
+    "max": 87.8
+   },
+   "ttft": {
+    "n": 3,
+    "median": 0.2,
+    "min": 0.2,
+    "max": 0.2
+   },
+   "completion_tokens": {
+    "n": 3,
+    "median": 80,
+    "min": 80,
+    "max": 80
+   }
+  },
+  "bugfix": {
+   "decode_engine": {
+    "n": 3,
+    "median": 178.7,
+    "min": 152.9,
+    "max": 181.3
+   },
+   "decode_client": {
+    "n": 3,
+    "median": 179.0,
+    "min": 153.0,
+    "max": 182.6
+   },
+   "prefill": {
+    "n": 3,
+    "median": 468.4,
+    "min": 439.6,
+    "max": 498.0
+   },
+   "accept": {
+    "n": 3,
+    "median": 51.9,
+    "min": 42.5,
+    "max": 55.8
+   },
+   "ttft": {
+    "n": 3,
+    "median": 0.2,
+    "min": 0.2,
+    "max": 0.2
+   },
+   "completion_tokens": {
+    "n": 3,
+    "median": 411,
+    "min": 381,
+    "max": 496
+   }
+  }
+ },
+ "requests": [
+  {
+   "task": "py_script",
+   "run": 1,
+   "error": null,
+   "prompt_tokens": 80,
+   "completion_tokens": 512,
+   "finish": "length",
+   "ttft_s": 0.287,
+   "client_decode_tps": 255.8,
+   "engine_decode_tps": 255.2,
+   "engine_prefill_tps": 290.5,
+   "accept_pct": 84.6,
+   "drafts": "363/429",
+   "chars": 2420,
+   "_text": "```python\nimport os\nimport sys\nfrom collections import defaultdict\n\n\ndef scan_log_files(directory):\n    \"\"\"Scan directory for .log files.\"\"\"\n    if not os.path.exists(directory):\n        raise FileNotFoundError(f\"Directory does not exist: {directory}\")\n    if not os.path.isdir(directory):\n        raise NotADirectoryError(f\"Path is not a directory: {directory}\")\n\n    log_files = []\n    for root, dirs, files in os.walk(directory):\n        for file in files:\n            if file.lower().endswith('.log'):\n                log_files.append(os.path.join(root, file))\n    return log_files\n\n\ndef count_errors_by_hour(filepath):\n    \"\"\"Count ERROR lines by hour from a log file. Returns dict {hour: count}.\"\"\"\n    error_counts = defaultdict(int)\n\n    try:\n        with open(filepath, 'r', encoding='utf-8', errors='replace') as f:\n            for line in f:\n                if 'ERROR' in line:\n                    # Try to extract hour from common log formats\n                    # Look for patterns like [HH:MM:SS] or HH:MM:SS at start\n                    hour = None\n                    # Check for bracketed timestamp [HH:MM:SS]\n                    if '[' in line and ']' in line:\n                        try:\n                            start = line.index('[') + 1\n                            end = line.index(']', start)\n                            time_str = line[start:end]\n                            # Try to parse HH from time string\n                            parts = time_str.split(':')\n                            if len(parts) >= 1:\n                                h = int(parts[0])\n                                if 0 <= h <= 23:\n                                    hour = h\n                        except (ValueError, IndexError):\n                            pass\n\n                    # If not found in brackets, try to find HH:MM:SS pattern anywhere\n                    if hour is None:\n                        import re\n                        match = re.search(r'\\b(\\d{1,2}):(\\d{2}):(\\d{2})\\b', line)\n                        if match:\n                            h = int(match.group(1))\n                            if 0 <= h <= 23:\n                                hour = h\n\n                    # If still not found, try ISO format or other common patterns\n                    if hour is None:\n                        import re\n                        # Try to find a date-time pattern that includes hours"
+  },
+  {
+   "task": "py_refactor",
+   "run": 1,
+   "error": null,
+   "prompt_tokens": 86,
+   "completion_tokens": 51,
+   "finish": "stop",
+   "ttft_s": 0.196,
+   "client_decode_tps": 118.7,
+   "engine_decode_tps": 118.6,
+   "engine_prefill_tps": 467.2,
+   "accept_pct": 32.7,
+   "drafts": "16/49",
+   "chars": 101,
+   "_text": "将函数名和变量名改为具有语义的 `get_positive_keys`、`data` 和 `positive_keys`，并添加类型提示与文档字符串。使用列表推导式简化循环逻辑，提升代码简洁度与可读性。"
+  },
+  {
+   "task": "sql",
+   "run": 1,
+   "error": null,
+   "prompt_tokens": 83,
+   "completion_tokens": 80,
+   "finish": "stop",
+   "ttft_s": 0.2,
+   "client_decode_tps": 291.1,
+   "engine_decode_tps": 270.4,
+   "engine_prefill_tps": 440.0,
+   "accept_pct": 87.8,
+   "drafts": "65/74",
+   "chars": 269,
+   "_text": "```sql\nSELECT \n    user_id,\n    SUM(amount) AS total_amount,\n    COUNT(*) AS order_count,\n    AVG(amount) AS avg_order_value\nFROM orders\nWHERE created_at >= NOW() - INTERVAL '30 days'\n  AND status != 'cancelled'\nGROUP BY user_id\nORDER BY total_amount DESC\nLIMIT 10;\n```"
+  },
+  {
+   "task": "bugfix",
+   "run": 1,
+   "error": null,
+   "prompt_tokens": 98,
+   "completion_tokens": 496,
+   "finish": "stop",
+   "ttft_s": 0.234,
+   "client_decode_tps": 182.6,
+   "engine_decode_tps": 181.3,
+   "engine_prefill_tps": 439.6,
+   "accept_pct": 55.8,
+   "drafts": "284/509",
+   "chars": 1066,
+   "_text": "这段代码偶发 `KeyError` 的根本原因在于第二个循环：\n\n```python\nfor k in b:\n    out[k] += b[k]\n```\n\n当键 `k` **存在于字典 `b` 中，但不存在于字典 `a` 中**时，`out[k]` 尚未被初始化（因为第一个循环只遍历了 `a` 的键），此时执行 `out[k] += b[k]` 会尝试读取一个不存在的键 `out[k]`，从而抛出 `KeyError`。\n\n### ✅ 修复方案\n\n在第二个循环中，应使用 `.get()` 方法或先检查键是否存在，确保即使 `k` 不在 `out` 中也能安全地累加。最简洁且 Pythonic 的方式是使用 `dict.get(key, default)`：\n\n```python\ndef merge(a, b):\n    out = {}\n    for k in a:\n        out[k] = a[k]\n    for k in b:\n        # 如果 k 不在 out 中，则默认值为 0，再累加 b[k]\n        out[k] = out.get(k, 0) + b[k]\n    return out\n```\n\n### 🔍 补充说明\n\n- **为什么是“偶发”？**  \n  只有当 `b` 中包含 `a` 中没有的键时才会出错。如果测试数据中 `b` 的键总是 `a` 的子集，就不会触发该错误；一旦引入新键，就会崩溃。\n\n- **其他等价写法：**\n  ```python\n  # 方式二：显式检查\n  for k in b:\n      if k not in out:\n          out[k] = 0\n      out[k] += b[k]\n\n  # 方式三：使用 collections.defaultdict（需修改初始化）\n  from collections import defaultdict\n  def merge(a, b):\n      out = defaultdict(int)\n      for k in a:\n          out[k] = a[k]\n      for k in b:\n          out[k] += b[k]\n      return dict(out)  # 如需返回普通 dict\n  ```\n\n但根据题目要求“不要改函数签名”且保持最小改动，**推荐使用 `out.get(k, 0)` 的方式**。"
+  },
+  {
+   "task": "py_script",
+   "run": 2,
+   "error": null,
+   "prompt_tokens": 80,
+   "completion_tokens": 512,
+   "finish": "length",
+   "ttft_s": 0.202,
+   "client_decode_tps": 257.0,
+   "engine_decode_tps": 256.4,
+   "engine_prefill_tps": 419.7,
+   "accept_pct": 79.2,
+   "drafts": "373/471",
+   "chars": 1909,
+   "_text": "```python\nimport os\nimport sys\nfrom collections import defaultdict\n\n\ndef scan_log_files(directory):\n    \"\"\"Scan directory for .log files and count ERROR lines per hour.\"\"\"\n    if not os.path.isdir(directory):\n        print(f\"Error: Directory '{directory}' does not exist.\", file=sys.stderr)\n        return {}\n\n    error_counts = defaultdict(int)  # key: \"YYYY-MM-DD HH\", value: count\n\n    for root, dirs, files in os.walk(directory):\n        for filename in files:\n            if not filename.lower().endswith('.log'):\n                continue\n            filepath = os.path.join(root, filename)\n            try:\n                with open(filepath, 'r', encoding='utf-8', errors='replace') as f:\n                    for line in f:\n                        if 'ERROR' in line:\n                            # Try to extract timestamp from the line\n                            hour_key = extract_hour_from_line(line)\n                            if hour_key is not None:\n                                error_counts[hour_key] += 1\n            except (IOError, OSError) as e:\n                print(f\"Warning: Could not read file '{filepath}': {e}\", file=sys.stderr)\n                continue\n\n    return dict(error_counts)\n\n\ndef extract_hour_from_line(line):\n    \"\"\"Extract hour key from a log line. Assumes common timestamp formats.\"\"\"\n    # Try to find a timestamp pattern like YYYY-MM-DD HH or similar\n    # Common patterns: \"2023-10-05 14:30:00\", \"[2023-10-05 14:30:00]\", etc.\n    import re\n\n    # Pattern for YYYY-MM-DD HH (with optional separators)\n    patterns = [\n        r'(\\d{4}-\\d{2}-\\d{2})[ T](\\d{2}):',\n        r'\\[(\\d{4}-\\d{2}-\\d{2})[ T](\\d{2}):',\n        r'(\\d{4}/\\d{2}/\\d{2})[ T](\\d{2}):',\n    ]\n\n    for pattern in patterns:\n        match = re.search(pattern, line)\n        if match:\n            date_part = match.group(1).replace('/', '-')\n            hour_part = match.group(2)\n            return f"
+  },
+  {
+   "task": "py_refactor",
+   "run": 2,
+   "error": null,
+   "prompt_tokens": 86,
+   "completion_tokens": 51,
+   "finish": "stop",
+   "ttft_s": 0.217,
+   "client_decode_tps": 119.2,
+   "engine_decode_tps": 119.1,
+   "engine_prefill_tps": 417.2,
+   "accept_pct": 30.8,
+   "drafts": "16/52",
+   "chars": 101,
+   "_text": "将函数名和变量名改为具有语义的 `get_positive_keys`、`data` 和 `positive_keys`，并添加类型提示与文档字符串。使用列表推导式简化循环逻辑，提升代码简洁度与可读性。"
+  },
+  {
+   "task": "sql",
+   "run": 2,
+   "error": null,
+   "prompt_tokens": 83,
+   "completion_tokens": 80,
+   "finish": "stop",
+   "ttft_s": 0.226,
+   "client_decode_tps": 284.0,
+   "engine_decode_tps": 264.6,
+   "engine_prefill_tps": 385.1,
+   "accept_pct": 82.1,
+   "drafts": "64/78",
+   "chars": 269,
+   "_text": "```sql\nSELECT \n    user_id,\n    SUM(amount) AS total_amount,\n    COUNT(*) AS order_count,\n    AVG(amount) AS avg_order_value\nFROM orders\nWHERE created_at >= NOW() - INTERVAL '30 days'\n  AND status != 'cancelled'\nGROUP BY user_id\nORDER BY total_amount DESC\nLIMIT 10;\n```"
+  },
+  {
+   "task": "bugfix",
+   "run": 2,
+   "error": null,
+   "prompt_tokens": 98,
+   "completion_tokens": 411,
+   "finish": "stop",
+   "ttft_s": 0.221,
+   "client_decode_tps": 153.0,
+   "engine_decode_tps": 152.9,
+   "engine_prefill_tps": 468.4,
+   "accept_pct": 42.5,
+   "drafts": "193/454",
+   "chars": 810,
+   "_text": "这段代码偶发 `KeyError` 的根本原因在于第二个循环中的逻辑假设错误。\n\n### 根因分析\n\n在第二个循环中：\n```python\nfor k in b:\n    out[k] += b[k]\n```\n代码假设键 `k` **一定已经存在于** `out` 字典中（即也存在于 `a` 中）。然而，如果字典 `b` 中包含一个 `a` 中不存在的键，那么 `out[k]` 就会抛出 `KeyError`，因为该键尚未被初始化。\n\n### 修复方案\n\n在累加之前，需要确保键 `k` 存在于 `out` 中。如果不存在，应将其初始化为 `0`（假设值为数值类型），然后再进行累加。或者更简洁地，使用 `dict.get()` 方法或 `collections.defaultdict`。这里采用最通用且无需额外导入的方式：先检查键是否存在，若不存在则初始化。\n\n### 修复后的完整函数\n\n```python\ndef merge(a, b):\n    out = {}\n    for k in a:\n        out[k] = a[k]\n    for k in b:\n        if k not in out:\n            out[k] = 0\n        out[k] += b[k]\n    return out\n```\n\n### 说明\n- **函数签名未改变**：仍为 `def merge(a, b):`。\n- **逻辑修正**：在累加前检查键是否存在，若不存在则初始化为 `0`，从而避免 `KeyError`。\n- **适用场景**：假设 `a` 和 `b` 的值均为可相加的数值类型（如 int、float）。如果值可能是其他类型（如字符串），需根据业务逻辑调整初始化值（例如空字符串 `\"\"`），但通常此类合并操作针对数值累加，故初始化为 `0` 是合理默认行为。"
+  },
+  {
+   "task": "py_script",
+   "run": 3,
+   "error": null,
+   "prompt_tokens": 80,
+   "completion_tokens": 512,
+   "finish": "length",
+   "ttft_s": 0.194,
+   "client_decode_tps": 259.4,
+   "engine_decode_tps": 258.8,
+   "engine_prefill_tps": 437.4,
+   "accept_pct": 80.0,
+   "drafts": "372/465",
+   "chars": 2092,
+   "_text": "```python\nimport os\nimport sys\nfrom collections import defaultdict\n\n\ndef scan_log_files(directory):\n    \"\"\"Scan directory for .log files.\"\"\"\n    if not os.path.isdir(directory):\n        raise FileNotFoundError(f\"Directory not found: {directory}\")\n    \n    log_files = []\n    for root, dirs, files in os.walk(directory):\n        for file in files:\n            if file.endswith('.log'):\n                log_files.append(os.path.join(root, file))\n    return log_files\n\n\ndef count_errors_by_hour(filepath):\n    \"\"\"Count ERROR lines by hour from a log file, handling encoding errors and streaming large files.\"\"\"\n    error_counts = defaultdict(int)\n    \n    try:\n        with open(filepath, 'r', encoding='utf-8', errors='replace') as f:\n            for line in f:\n                if 'ERROR' in line:\n                    # Try to extract hour from timestamp patterns like [HH:MM:SS] or HH:MM:SS\n                    hour = None\n                    # Common log formats: look for HH:MM:SS pattern\n                    import re\n                    match = re.search(r'\\b(\\d{2}):\\d{2}:\\d{2}\\b', line)\n                    if match:\n                        hour = int(match.group(1))\n                    else:\n                        # Try ISO format or other common patterns\n                        match = re.search(r'(\\d{4}-\\d{2}-\\d{2})[T ](\\d{2}):\\d{2}:\\d{2}', line)\n                        if match:\n                            hour = int(match.group(2))\n                    \n                    if hour is not None and 0 <= hour <= 23:\n                        error_counts[hour] += 1\n    except Exception as e:\n        print(f\"Error processing file {filepath}: {e}\", file=sys.stderr)\n    \n    return error_counts\n\n\ndef generate_markdown_table(hourly_counts):\n    \"\"\"Generate a Markdown table from hourly error counts.\"\"\"\n    lines = []\n    lines.append(\"| Hour | Error Count |\")\n    lines.append(\"|------|-------------|\")\n    \n    for hour in range(24):\n        count = hourly_counts.get(hour, 0)\n        lines.append(f\"| {hour:02d} | {count} |\")\n    \n    return \"\\n\".join(lines)\n\n\ndef main():\n   "
+  },
+  {
+   "task": "py_refactor",
+   "run": 3,
+   "error": null,
+   "prompt_tokens": 86,
+   "completion_tokens": 51,
+   "finish": "stop",
+   "ttft_s": 0.183,
+   "client_decode_tps": 122.8,
+   "engine_decode_tps": 122.7,
+   "engine_prefill_tps": 499.8,
+   "accept_pct": 34.0,
+   "drafts": "17/50",
+   "chars": 101,
+   "_text": "将函数名和变量名改为具有语义的 `get_positive_keys`、`data` 和 `positive_keys`，并添加类型提示与文档字符串。使用列表推导式简化循环逻辑，提升代码简洁度与可读性。"
+  },
+  {
+   "task": "sql",
+   "run": 3,
+   "error": null,
+   "prompt_tokens": 83,
+   "completion_tokens": 80,
+   "finish": "stop",
+   "ttft_s": 0.182,
+   "client_decode_tps": 292.8,
+   "engine_decode_tps": 272.3,
+   "engine_prefill_tps": 486.5,
+   "accept_pct": 87.7,
+   "drafts": "64/73",
+   "chars": 269,
+   "_text": "```sql\nSELECT \n    user_id,\n    SUM(amount) AS total_amount,\n    COUNT(*) AS order_count,\n    AVG(amount) AS avg_order_value\nFROM orders\nWHERE created_at >= NOW() - INTERVAL '30 days'\n  AND status != 'cancelled'\nGROUP BY user_id\nORDER BY total_amount DESC\nLIMIT 10;\n```"
+  },
+  {
+   "task": "bugfix",
+   "run": 3,
+   "error": null,
+   "prompt_tokens": 98,
+   "completion_tokens": 381,
+   "finish": "stop",
+   "ttft_s": 0.208,
+   "client_decode_tps": 179.0,
+   "engine_decode_tps": 178.7,
+   "engine_prefill_tps": 498.0,
+   "accept_pct": 51.9,
+   "drafts": "220/424",
+   "chars": 736,
+   "_text": "这段代码偶发 `KeyError` 的根本原因在于第二个循环：\n\n```python\nfor k in b:\n    out[k] += b[k]\n```\n\n当键 `k` **存在于字典 `b` 中，但不存在于字典 `a` 中**时，`out[k]` 尚未被初始化（因为第一个循环只遍历了 `a` 的键），此时执行 `out[k] += b[k]` 会尝试读取一个不存在的键 `out[k]`，从而抛出 `KeyError`。\n\n### 修复方案\n在第二个循环中，应使用 `dict.get()` 方法或先检查键是否存在，以确保即使键不在 `out` 中也能安全地累加。最简洁且 Pythonic 的方式是使用 `out.get(k, 0)` 来获取当前值（若不存在则默认为 0）。\n\n### 修复后的完整函数\n\n```python\ndef merge(a, b):\n    out = {}\n    for k in a:\n        out[k] = a[k]\n    for k in b:\n        # 如果 k 不在 out 中，get(k, 0) 返回 0，避免 KeyError\n        out[k] = out.get(k, 0) + b[k]\n    return out\n```\n\n### 说明\n- **原问题**：`out[k] += b[k]` 等价于 `out[k] = out[k] + b[k]`，当 `k not in out` 时，`out[k]` 读取失败。\n- **修复后**：`out.get(k, 0)` 确保即使键不存在也返回默认值 `0`，从而安全地完成加法操作。\n- **函数签名未改变**，符合题目要求。"
+  }
+ ]
+}

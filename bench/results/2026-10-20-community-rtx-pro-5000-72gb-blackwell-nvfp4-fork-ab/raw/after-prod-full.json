@@ -1,0 +1,230 @@
+[
+ {
+  "tag": "B1024-rep-PROD",
+  "engine": {
+   "prompt_tokens": 1238,
+   "reused": 0,
+   "read": 1238,
+   "prompt_ms": 543,
+   "prefill_tps": 2281.3,
+   "generated": 256,
+   "decode_ms": 751,
+   "decode_tps": 340.9,
+   "drafts_accepted": 215,
+   "drafts_offered": 215,
+   "expert_hit_pct": 98.1
+  },
+  "ttft_s": 0.5547478199005127,
+  "finish": "length",
+  "head": "PLUM-OTTER-B1024-rep-PROD\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n"
+ },
+ {
+  "tag": "B1024-nat-PROD",
+  "engine": {
+   "prompt_tokens": 1242,
+   "reused": 0,
+   "read": 1242,
+   "prompt_ms": 545,
+   "prefill_tps": 2276.9,
+   "generated": 256,
+   "decode_ms": 2018,
+   "decode_tps": 126.9,
+   "drafts_accepted": 55,
+   "drafts_offered": 118,
+   "expert_hit_pct": 98.0
+  },
+  "ttft_s": 0.5578715801239014,
+  "finish": "length",
+  "head": "**深夜实验室里的意外发现**\n\n凌晨三点的实验室静得只能听见服务器风扇低沉的嗡鸣，林远揉了揉酸涩的"
+ },
+ {
+  "tag": "B4096-rep-PROD",
+  "engine": {
+   "prompt_tokens": 4918,
+   "reused": 0,
+   "read": 4918,
+   "prompt_ms": 1130,
+   "prefill_tps": 4352.4,
+   "generated": 256,
+   "decode_ms": 752,
+   "decode_tps": 340.5,
+   "drafts_accepted": 212,
+   "drafts_offered": 213,
+   "expert_hit_pct": 99.7
+  },
+  "ttft_s": 1.1432979106903076,
+  "finish": "length",
+  "head": "PLUM-OTTER-B4096-rep-PROD\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n"
+ },
+ {
+  "tag": "B4096-nat-PROD",
+  "engine": {
+   "prompt_tokens": 4922,
+   "reused": 0,
+   "read": 4922,
+   "prompt_ms": 1159,
+   "prefill_tps": 4245.9,
+   "generated": 233,
+   "decode_ms": 1884,
+   "decode_tps": 123.6,
+   "drafts_accepted": 54,
+   "drafts_offered": 121,
+   "expert_hit_pct": 99.4
+  },
+  "ttft_s": 1.172255516052246,
+  "finish": "stop",
+  "head": "验证码是 PLUM-OTTER-B4096-nat-PROD。\n\n深夜的实验室里，只有服务器机柜低沉"
+ },
+ {
+  "tag": "B32768-rep-PROD",
+  "engine": {
+   "prompt_tokens": 41068,
+   "reused": 0,
+   "read": 41068,
+   "prompt_ms": 7246,
+   "prefill_tps": 5667.8,
+   "generated": 256,
+   "decode_ms": 820,
+   "decode_tps": 312.3,
+   "drafts_accepted": 216,
+   "drafts_offered": 218,
+   "expert_hit_pct": 99.7
+  },
+  "ttft_s": 7.269503116607666,
+  "finish": "length",
+  "head": "PLUM-OTTER-B32768-rep-PROD\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11"
+ },
+ {
+  "tag": "B32768-nat-PROD",
+  "engine": {
+   "prompt_tokens": 41072,
+   "reused": 0,
+   "read": 41072,
+   "prompt_ms": 7411,
+   "prefill_tps": 5542.3,
+   "generated": 256,
+   "decode_ms": 2222,
+   "decode_tps": 115.2,
+   "drafts_accepted": 35,
+   "drafts_offered": 73,
+   "expert_hit_pct": 99.5
+  },
+  "ttft_s": 7.43454122543335,
+  "finish": "length",
+  "head": "# 深夜实验室里的意外发现\n\n凌晨三点的观测中心大厅里，只有服务器机柜发出的低频嗡鸣声在空气中震颤，"
+ },
+ {
+  "tag": "B65536-rep-PROD",
+  "engine": {
+   "prompt_tokens": 82487,
+   "reused": 0,
+   "read": 82487,
+   "prompt_ms": 14294,
+   "prefill_tps": 5770.7,
+   "generated": 256,
+   "decode_ms": 856,
+   "decode_tps": 299.1,
+   "drafts_accepted": 214,
+   "drafts_offered": 218,
+   "expert_hit_pct": 99.8
+  },
+  "ttft_s": 14.329317808151245,
+  "finish": "length",
+  "head": "PLUM-OTTER-B65536-rep-PROD\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11"
+ },
+ {
+  "tag": "B65536-nat-PROD",
+  "engine": {
+   "prompt_tokens": 82491,
+   "reused": 0,
+   "read": 82491,
+   "prompt_ms": 14480,
+   "prefill_tps": 5696.8,
+   "generated": 238,
+   "decode_ms": 1923,
+   "decode_tps": 123.8,
+   "drafts_accepted": 61,
+   "drafts_offered": 104,
+   "expert_hit_pct": 99.6
+  },
+  "ttft_s": 14.515531778335571,
+  "finish": "stop",
+  "head": "**深夜实验室里的意外发现**\n\n凌晨三点的观测中心静得只能听见服务器风扇低沉的嗡鸣，林远揉了揉酸涩"
+ },
+ {
+  "tag": "B131072-rep-PROD",
+  "engine": {
+   "prompt_tokens": 171572,
+   "reused": 0,
+   "read": 171572,
+   "prompt_ms": 30853,
+   "prefill_tps": 5561.0,
+   "generated": 256,
+   "decode_ms": 901,
+   "decode_tps": 284.2,
+   "drafts_accepted": 213,
+   "drafts_offered": 225,
+   "expert_hit_pct": 99.8
+  },
+  "ttft_s": 30.915199041366577,
+  "finish": "length",
+  "head": "PLUM-OTTER-B131072-rep-PROD\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n1"
+ },
+ {
+  "tag": "B131072-nat-PROD",
+  "engine": {
+   "prompt_tokens": 171576,
+   "reused": 0,
+   "read": 171576,
+   "prompt_ms": 31254,
+   "prefill_tps": 5489.8,
+   "generated": 256,
+   "decode_ms": 2196,
+   "decode_tps": 116.6,
+   "drafts_accepted": 48,
+   "drafts_offered": 87,
+   "expert_hit_pct": 99.7
+  },
+  "ttft_s": 31.306804895401,
+  "finish": "length",
+  "head": "**深夜实验室里的意外发现**\n\n凌晨三点的观测中心静得只能听见服务器风扇低沉的嗡鸣，林远揉了揉酸涩"
+ },
+ {
+  "tag": "B245760-rep-PROD",
+  "engine": {
+   "prompt_tokens": 325454,
+   "reused": 0,
+   "read": 325454,
+   "prompt_ms": 63191,
+   "prefill_tps": 5150.3,
+   "generated": 256,
+   "decode_ms": 980,
+   "decode_tps": 261.3,
+   "drafts_accepted": 213,
+   "drafts_offered": 224,
+   "expert_hit_pct": 99.8
+  },
+  "ttft_s": 63.292648792266846,
+  "finish": "length",
+  "head": "PLUM-OTTER-B245760-rep-PROD\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n1"
+ },
+ {
+  "tag": "B245760-nat-PROD",
+  "engine": {
+   "prompt_tokens": 325458,
+   "reused": 0,
+   "read": 325458,
+   "prompt_ms": 63816,
+   "prefill_tps": 5099.9,
+   "generated": 220,
+   "decode_ms": 1982,
+   "decode_tps": 111.0,
+   "drafts_accepted": 41,
+   "drafts_offered": 70,
+   "expert_hit_pct": 99.7
+  },
+  "ttft_s": 63.92008066177368,
+  "finish": "stop",
+  "head": "凌晨三点，第1号观测站的服务器机房里只剩下冷却风扇低沉的嗡鸣，像是一头沉睡巨兽的呼吸。林远揉了揉酸涩"
+ }
+]

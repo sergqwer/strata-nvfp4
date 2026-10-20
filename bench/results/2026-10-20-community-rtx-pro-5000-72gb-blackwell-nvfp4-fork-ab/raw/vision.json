@@ -1,0 +1,10 @@
+{
+ "kind": "vision",
+ "image": "/home/hermes/AI/bench-20261020/vision-probe.png",
+ "content": "3个圆形、2个三角形\nGLASS-TIGER-8830",
+ "finish": "stop",
+ "error": null,
+ "wall_s": 1.8,
+ "pass": true,
+ "expected_text": "GLASS-TIGER-8830"
+}
