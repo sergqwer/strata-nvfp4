@@ -19,6 +19,7 @@ files by hand.
 | Unsloth UD-Q4_K_XL (`unsloth`, `--model UD-Q4_K_XL`) | 94.1% | 169 | 4.9 s | 77 GiB | 96 GB | [unsloth/Qwen3.8-Flash-Next-GGUF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) |
 | NVFP4 GPTQ (ours, `qwen-nvfp4-gptq`, setup's default) | 93.6% | 177 | 3.9 s | 69 GiB | 96 GB | [Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata) |
 | NVIDIA NVFP4, converted by us (`qwen-nvidia-nvfp4`) | 92.9% | 167 | 3.9 s | 69 GiB | 96 GB | [Maximilian228/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Strata](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVIDIA-NVFP4-Strata) |
+| NVIDIA FP4-Local, retrained by NVIDIA for FP4 (QAD), converted on the PC | 92.2% | 191¹ | 3.7 s¹ | 69 GiB | 96 GB | [nvidia/Qwen3.8-Flash-Next-FP4-Local](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-FP4-Local) |
 | Unsloth UD-Q3_K_XL (`unsloth`, `--model UD-Q3_K_XL`) | 90.7% | 208 | 3.8 s | 58 GiB | 96 GB | [unsloth/Qwen3.8-Flash-Next-GGUF](https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF) |
 | ISTA-DASLab IQ3_S (`qwen`, `--model IQ3_S`) | 90.0% | 228 | 3.9 s | 52 GiB | 64 GB | [ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF) |
 | ISTA-DASLab IQ3_XXS (`qwen`, `--model IQ3_XXS`, upstream's pick) | 87.3% | 239 | 3.9 s | 45 GiB | 64 GB | [ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF](https://huggingface.co/ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-GGUF) |
@@ -48,6 +49,15 @@ files by hand.
   Q8_0 than the table shows.
 - The two 128 GB models need a 128 GB PC (setup asks below that). Q8_0 runs there in the low-RAM mode by itself (100 GiB
   of experts locked in RAM); the mix keeps every expert in RAM.
+- ¹ **NVIDIA FP4-Local** is NVIDIA's retrained 4-bit model (quantization-aware distillation): its experts and n-gram
+  table were trained again for FP4, so it is a slightly different model rather than a rounding of the original. Its
+  KL to the Q8_0 model is 0.051 (the NVFP4 GPTQ and NVIDIA's NVFP4: 0.038), while its perplexity on these texts is a
+  little below Q8_0's. Measured on 2026-10-24 on the same texts against the same reference, with the engine of this
+  fork's 0.2.0-beta-nvfp4.3. The NVFP4 GPTQ model gives the same accuracy on that engine (93.65%), and in the same runs
+  it decoded 180-191 tokens/s, so the two run at the same speed within the noise. NVIDIA ships ModelOpt safetensors
+  (95 GiB) that are converted on the PC (upstream Strata's `tools/nvfp4_local_pack.py prepare`, about 10 minutes,
+  99 GiB of files); this fork's setup does not install it. Its license, the NVIDIA Open Model Agreement, rules out the
+  censorship switch.
 
 ## What's new
 
