@@ -1,0 +1,36 @@
+{
+ "seed": 107,
+ "target_tokens": 262144,
+ "prompt_tokens_server": 262327,
+ "meets_target": true,
+ "finish": "stop",
+ "truncated": false,
+ "prefill_s": 91.8,
+ "prefill_tps": 2859,
+ "gen_tps": 105.0,
+ "output_tokens": 4555,
+ "wall_s": 135,
+ "score": 1.0,
+ "checks": {
+  "needle_start": true,
+  "needle_mid": true,
+  "needle_end": true,
+  "distractor": true,
+  "multihop": true,
+  "contradiction": true,
+  "count": true,
+  "var_chain": true,
+  "billing_fee": true,
+  "migration_date": true,
+  "capacity": true,
+  "callers": true,
+  "ack": true
+ },
+ "peaks": {
+  "vram_mib": 23408.0,
+  "proc_rss_gb": 75.65,
+  "swap_in_total_mb": 9.2,
+  "temp_c": 89.0,
+  "power_w": 145.86
+ }
+}
