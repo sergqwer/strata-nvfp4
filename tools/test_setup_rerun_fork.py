@@ -54,13 +54,15 @@ def q36_cfg(size: str) -> tuple:
 
 
 class GgufFamilies(unittest.TestCase):
-    def test_an_installed_ud_q3_k_xl_stays_the_unsloth_default(self):
+    def test_an_installed_unsloth_size_stays_the_unsloth_default(self):
+        # strata-nvfp4 (port 0.2.13): was the fork's 3-shard UD-Q3_K_XL; upstream's v3.1 UD-Q3_K_XL (engine 0.1.57) replaced
+        # it, and this harness's engine is older - the same rule on Q8_0 (engine 0.1.38)
         ram, found = PC128
         code, out, cfg, asked = fork_install(ram, found, ["--family", "unsloth", "--setup", "--no-start"], answers="",
-                                             configs=[gguf_cfg("unsloth-ud-q3_k_xl")])
+                                             configs=[gguf_cfg("unsloth-q8_0")])
         self.assertEqual(code, 0, out[-2000:])
-        self.assertEqual(cfg["model_name"], "qwen3.8-flash-next-unsloth-ud-q3_k_xl")
-        line = next(x for x in out.splitlines() if "UD-Q3_K_XL" in x and "download" in x)
+        self.assertEqual(cfg["model_name"], "qwen3.8-flash-next-unsloth-q8_0")
+        line = next(x for x in out.splitlines() if ") Q8_0 " in x and "download" in x)
         self.assertIn("(installed)", line)
         line = next(x for x in out.splitlines() if "UD-Q4_K_XL" in x and "download" in x)
         self.assertIn("(recommended)", line)                  # still marked, still a choice

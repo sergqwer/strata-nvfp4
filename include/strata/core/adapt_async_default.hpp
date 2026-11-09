@@ -34,6 +34,7 @@ struct AdaptAsyncAuto {
 /// STRATA_ADAPT_ASYNC as the process sees it (-1 unset).
 inline int adapt_async_env() {
     const char* v = std::getenv("STRATA_ADAPT_ASYNC");
+    if (v != nullptr && v[0] == 'a') return -2;   // strata-nvfp4: "auto" = upstream's measured choice
     return v == nullptr || v[0] == '\0' ? -1 : std::atoi(v);
 }
 
@@ -42,6 +43,9 @@ inline bool adapt_async_self_decides(const AdaptAsyncAuto& a, const char** why_n
     auto no = [&](const char* why) { if (why_not != nullptr) *why_not = why; return false; };
     if (a.flag >= 0) return no("--adapt-async was given");          // the user's choice, 0 or 1, is applied as before
     if (a.env == 0) return no("STRATA_ADAPT_ASYNC=0");
+    // strata-nvfp4: upstream's self-chosen asynchronous tier is not bit-exact run to run, so this fork keeps the blocking
+    // tier unless STRATA_ADAPT_ASYNC asks for it (=auto: the engine chooses, as upstream; --adapt-async 1: always on)
+    if (a.env == -1) return no("this fork's default (STRATA_ADAPT_ASYNC=auto lets the engine choose)");
     if (!a.cuda) return no("not a CUDA build");
     if (!a.serve) return no("it needs --serve");
     if (!a.adaptive) return no("the adaptive tier is off");

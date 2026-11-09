@@ -49,7 +49,8 @@ export function forkGuard(req, res, { port, bind = '127.0.0.1', env = process.en
     return true;
   };
   const host = String(req.headers.host ?? '').toLowerCase();
-  if (!allowedHosts(port, bind, env).has(host)) return refuse(421, `This interface answers at http://127.0.0.1:${port}/ only.`);
+  const http10NoHost = req.headers.host === undefined && req.httpVersion === '1.0';   // no browser sends that (DNS rebinding needs a Host): served, as upstream does
+  if (!http10NoHost && !allowedHosts(port, bind, env).has(host)) return refuse(421, `This interface answers at http://127.0.0.1:${port}/ only.`);
   const path = new URL(req.url ?? '/', 'http://localhost').pathname;
   if (path.startsWith('/v1/') && env.STRATA_HOST_V1 !== '1') return refuse(404, "This interface's own /v1 is off in strata-nvfp4: use the model's server (start-server.cmd prints its address).");
   if ((path === '/api/serving/share' || path === '/api/serving/tunnel') && req.method !== 'GET') return refuse(403, 'Sharing on the network and Cloudflare tunnels are not part of the strata-nvfp4 interface.');

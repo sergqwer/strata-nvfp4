@@ -1,6 +1,7 @@
 """Tests for setup.py's model menu (0.1.44): the family order, NVFP4 hidden on AMD and Intel, the NVFP4 line's card note
 (RTX 50 native FP4, older RTX slower than UD-IQ4_XS), the Unsloth sizes in order with images on, and the prebuilt
-install removing a stale strata_kq library.
+install removing a stale strata_kq library.  This fork: the NVFP4 models are its own families (qwen-nvfp4-gptq, ...,
+listed before the GGUF ones where nvfp4_offer allows; tools/test_setup_nvfp4.py), upstream's `--family nvfp4` names them.
 
     python -m unittest tools.test_setup_menu
 """
@@ -22,7 +23,7 @@ import setup  # noqa: E402
 class FamilyOrder(unittest.TestCase):
     def test_the_menu_order_on_nvidia(self):
         fams = setup.menu_families(False) + list(setup.OWN_PATH_FAMILIES)
-        self.assertEqual(fams, ["qwen", "swift", "coder", "unsloth", "gyro", "nvfp4", "qwen36"])
+        self.assertEqual(fams, ["qwen", "swift", "coder", "unsloth", "gyro", "qwen36"])   # this fork's NVFP4 families: before them
 
     def test_the_default_stays_the_first_family(self):
         self.assertEqual(setup.menu_families(False)[0], "qwen")
@@ -30,9 +31,10 @@ class FamilyOrder(unittest.TestCase):
 
     def test_nvfp4_is_not_listed_on_amd_and_intel(self):
         fams = setup.menu_families(True)
-        self.assertNotIn("nvfp4", fams)
         self.assertEqual(fams, ["qwen", "swift", "coder", "unsloth", "gyro"])
-        self.assertIn("nvfp4", setup.FAMILIES)             # --family nvfp4 still exists, and says why not
+        for f in setup.NVFP4_FAMILIES:                     # not offered there, and the menu says why
+            self.assertIn("NVIDIA cards only", setup.nvfp4_offer(f, {"arch": "1200"}, True))
+        self.assertIn("nvfp4", setup.NVFP4_UPSTREAM_ALIAS)   # --family nvfp4: upstream's name for them
 
     def test_the_unsloth_line_names_the_alternative_on_amd_and_intel(self):
         self.assertIn("UD-IQ4_XS", setup.family_menu_note("unsloth", True, None))
@@ -42,17 +44,18 @@ class FamilyOrder(unittest.TestCase):
 
 class Nvfp4Note(unittest.TestCase):
     def test_rtx_50_has_native_fp4(self):
-        line = setup.family_menu_note("nvfp4", False, {"arch": 120, "name": "RTX 5070"})
-        self.assertIn("native FP4 on this card", line)
+        for f in setup.NVFP4_FAMILIES:
+            line = setup.family_menu_note(f, False, {"arch": 120, "name": "RTX 5070"})
+            self.assertIn("native FP4 on this card", line, f)
 
     def test_older_rtx_runs_but_is_slower_than_ud_iq4_xs(self):
         for arch in (75, 86, 89):
-            line = setup.family_menu_note("nvfp4", False, {"arch": arch})
+            line = setup.family_menu_note("qwen-nvfp4-gptq", False, {"arch": arch})
             self.assertIn("runs, but UD-IQ4_XS is faster on this card", line, arch)
             self.assertNotIn("native FP4", line)
 
-    def test_an_avx2_cpu_is_told_its_rows_but_not_refused(self):      # #2347
-        line = setup.family_menu_note("nvfp4", False, {"arch": 120}, avx2=True, avx512=False)
+    def test_an_avx2_cpu_is_told_its_rows_but_not_refused(self):      # #2347 (upstream), on this fork's NVFP4 lines
+        line = setup.family_menu_note("qwen-nvfp4-gptq", False, {"arch": 120}, avx2=True, avx512=False)
         self.assertIn("no AVX-512", line)
         self.assertIn("AVX2", line)
         self.assertIn("native FP4 on this card", line)               # the card part is unchanged
@@ -61,15 +64,13 @@ class Nvfp4Note(unittest.TestCase):
     def test_an_avx512_cpu_and_a_cpu_without_avx2_get_no_cpu_note(self):
         self.assertEqual(setup.nvfp4_cpu_note(True, True), "")
         self.assertEqual(setup.nvfp4_cpu_note(False, False), "")     # the older-CPU build says its own piece
-        line512 = setup.family_menu_note("nvfp4", False, {"arch": 120})
+        line512 = setup.family_menu_note("qwen-nvfp4-gptq", False, {"arch": 120})
         self.assertNotIn("AVX", line512)
-        self.assertEqual(line512, setup.family_menu_note("nvfp4", False, {"arch": 120}, avx2=True, avx512=True))
+        self.assertEqual(line512, setup.family_menu_note("qwen-nvfp4-gptq", False, {"arch": 120}, avx2=True, avx512=True))
 
-    def test_the_line_gives_the_download_and_the_ram_need(self):
-        line = setup.family_menu_note("nvfp4", False, {"arch": 120})
-        d = setup.MODELS["NVFP4"]
-        self.assertIn(f"{d['download_gb']:.0f} GB download", line)
-        self.assertIn(f"~{d['ram_gb']} GB of RAM", line)
+    def test_only_the_nvfp4_families_get_it(self):
+        for f in ("qwen", "swift", "coder"):
+            self.assertEqual(setup.family_menu_note(f, False, {"arch": 120}), "", f)
 
 
 class UnslothSizes(unittest.TestCase):
@@ -91,7 +92,7 @@ class UnslothSizes(unittest.TestCase):
 
     def test_the_family_line_lists_every_size(self):
         about = setup.FAMILIES["unsloth"]["about"]
-        for m in ("UD-IQ4_XS", "UD-Q4_K_XL", "UD-Q5_K_XL", "UD-Q6_K_XL", "Q8_0"):
+        for m in ("UD-Q3_K_XL", "UD-IQ4_XS", "UD-Q4_K_XL", "UD-Q5_K_XL", "UD-Q6_K_XL", "Q8_0"):
             self.assertIn(m, about)
 
 
@@ -182,21 +183,23 @@ class UnslothDefaultEnv(unittest.TestCase):
             setup.WIN = old
 
     def test_other_families_are_untouched(self):
-        for fam, m in (("qwen", "IQ3_S"), ("swift", "Q2_0"), ("coder", "IQ1_M"), ("nvfp4", "NVFP4")):
+        for fam, m in (("qwen", "IQ3_S"), ("swift", "Q2_0"), ("coder", "IQ1_M"), ("qwen-nvfp4-gptq", "NVFP4")):
             self.assertEqual(setup.unsloth_default_env(fam, m, False, False), {}, fam)
 
 
 class EnginePlaceholders(unittest.TestCase):
     def test_every_engine_minimum_is_this_release(self):
-        self.assertEqual(setup.NVFP4_ENGINE, (0, 1, 44))
-        self.assertEqual(setup.MIN_ENGINE, (0, 1, 46))
-        for m in ("UD-Q5_K_XL", "UD-Q6_K_XL", "NVFP4", "NVFP4-NVIDIA"):
+        self.assertEqual(setup.UPSTREAM_MIN_ENGINE, (0, 1, 46))   # this fork: MIN_ENGINE is its own release, above it
+        self.assertGreaterEqual(setup.MIN_ENGINE, (0, 1, 46))
+        for m in ("UD-Q5_K_XL", "UD-Q6_K_XL"):
             self.assertEqual(setup.MODELS[m]["engine"], (0, 1, 44), m)
         # No minimum may name an engine newer than this tree (a placeholder for a release that does not exist yet would make setup
         # ask for an engine nobody can download). The tree's version is read from CMakeLists.txt, so this does not go stale each release.
         text = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
         tree = tuple(int(n) for n in re.search(r"project\(strata VERSION ([0-9.]+)", text).group(1).split("."))
-        for what, minimum in [("MIN_ENGINE", setup.MIN_ENGINE), ("NVFP4_ENGINE", setup.NVFP4_ENGINE)] + [(m, setup.MODELS[m]["engine"]) for m in setup.MODELS if "engine" in setup.MODELS[m]]:
+        # strata-nvfp4: MIN_ENGINE is this fork's release (0.2.x, by design above the engine's 0.1.x) and the ready-made
+        # NVFP4 family (NVFP4_ENGINE) is not in this fork: upstream's minimum is the one that must not run ahead
+        for what, minimum in [("UPSTREAM_MIN_ENGINE", setup.UPSTREAM_MIN_ENGINE)] + [(m, setup.MODELS[m]["engine"]) for m in setup.MODELS if "engine" in setup.MODELS[m]]:
             self.assertLessEqual(tuple(minimum), tree[:len(minimum)], f"{what} {minimum} is ahead of the tree {tree}")
 
 

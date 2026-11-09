@@ -910,7 +910,7 @@ bool token_rows_ok(int t, int64_t w_cols) {
     return t == GGML_TYPE_NVFP4 && x2_mode() && w_cols >= kX2MinK;
 #endif
 }
-bool swiglu_quant_ok(int t) {
+bool swiglu_quant_scaled_ok(int t) {
     // the q8_1 D4 rows quantize() writes for a down product's H (K 640): Q8_0, and NVFP4 unless w4a4 takes FP4 rows
     if (t == GGML_TYPE_NVFP4) return fp4_activations(t) ? x2_mode() : true;
     return mmq_get_q8_1_ds_layout((ggml_type) t) == MMQ_Q8_1_DS_LAYOUT_D4;

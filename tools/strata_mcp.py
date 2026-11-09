@@ -62,7 +62,7 @@ FALLBACK_MODELS = {
     "IQ1_M": {"about": "the Coder's only size: half the experts, stored like IQ3_S (3.5 bits)", "download_gb": 58.4,
               "ram_gb": 32, "arena_gb": 23.4, "families": ("coder",)},
     "UD-IQ4_XS": {"about": "~4-bit i-quant (Unsloth Dynamic), between IQ3_S and UD-Q4_K_XL in quality; on a PC with "
-                           "less than ~80 GB of RAM part of its experts are read from the SSD",
+                           "less than ~72 GB of RAM part of its experts are read from the SSD",
                   "download_gb": 93.7, "ram_gb": 48, "arena_gb": 59.5, "families": ("unsloth",), "budget": True,
                   "vision": True},
     "UD-Q4_K_XL": {"about": "4-bit (Unsloth Dynamic): K-quant experts, between UD-IQ4_XS and UD-Q5_K_XL in quality",
@@ -102,15 +102,6 @@ FALLBACK_MODELS = {
                "engine": (0, 1, 45, 1),
                "download_gb": 92.0, "ram_gb": 35.0, "arena_gb": 32.1, "families": ("gyro",), "mem_total": True,
                "vision": True},
-    "NVFP4": {"about": "4-bit NVFP4 experts, GPTQ (sergqwer's strata-nvfp4 pack); RTX 50 has FP4 tensor cores, other "
-                       "NVIDIA cards run it at 8-bit precision", "download_gb": 128.0, "ram_gb": 80, "arena_gb": 68.0,
-              "families": ("nvfp4",), "vision": True},
-    "NVFP4-NVIDIA": {"about": "NVIDIA's own NVFP4 checkpoint (plain rounding), converted by sergqwer; the same size "
-                              "and speed as NVFP4", "download_gb": 128.0, "ram_gb": 80, "arena_gb": 68.0,
-                     "families": ("nvfp4",), "vision": True},
-    "NVFP4-QAD": {"about": "NVIDIA's FP4, trained for FP4 - slightly faster on short prompts; a 102 GB download "
-                           "that this PC turns into a Strata pack once; it reads pictures",
-                  "download_gb": 102.2, "ram_gb": 80, "arena_gb": 68.0, "families": ("nvfp4",), "vision": True},
 }
 FALLBACK_FAMILIES = {
     "qwen": {"title": "Qwen3.8-Flash-Next", "about": "the original model", "tag": ""},
@@ -127,9 +118,6 @@ FALLBACK_FAMILIES = {
                                                               "sizes, for PCs with little memory; 58 and 92 GB "
                                                               "downloads (the files include the n-gram table)",
              "tag": "gyro-"},
-    "nvfp4": {"title": "Qwen3.8-Flash-Next (NVFP4)", "about": "4-bit NVFP4 experts, NVIDIA cards; a 128 GB download, "
-                                                              "~80 GB of RAM to keep every expert in RAM",
-              "tag": "nvfp4-"},
 }
 OWN_PATH_ENGINE = (0, 1, 45)   # the first engine that runs Qwen3.6-35B-A3B with pictures and parallel requests (setup.py MIN_ENGINE note)
 MEMORY_TIERS = ((62.0, "qwen", "IQ3_S"), (46.0, "qwen", "IQ3_XXS"), (38.0, "swift", "IQ2_XS"))   # as setup.py's: RAM + VRAM floors of the owner's 64 / 48 / 40 GB tiers

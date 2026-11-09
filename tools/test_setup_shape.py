@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -127,7 +128,8 @@ class EngineStep(base.Base):
         found = mock.Mock(root=str(folder), version="0.1.59", backend="cuda", platform="linux-x86_64")
         said = []
         with mock.patch.object(shape_engine, "ensure", return_value=folder / "strata") as ensure, mock.patch.object(shape_engine, "find", return_value=found),                 mock.patch.object(self.setup, "llama_cpp_if_here", return_value=Path("llama")), mock.patch.object(self.setup, "get_llama_cpp", return_value=Path("llama")),                 mock.patch.object(self.setup, "ok", side_effect=said.append):
-            self.setup.engine_step(argparse.Namespace(feed=None), {"index": 0}, False, False, 13, "none")
+            # strata-nvfp4: the shape engine comes from a feed only when one is named (never upstream's by itself)
+            self.setup.engine_step(argparse.Namespace(feed="https://feed.example/strata.json"), {"index": 0}, False, False, 13, "none")
         self.assertEqual(ensure.call_args.kwargs["title"], "Q4 Lite Shape")
         self.assertTrue(any(line.startswith("engine for Q4 Lite Shape: 0.1.59") for line in said), said)
         self.assertFalse(any("q4_lite" in line.split(" in ")[0] for line in said), said)
@@ -138,6 +140,15 @@ class EngineStep(base.Base):
         plain = {"exe": "component:strata-engine", "args": [], "model_name": "y"}      # another model's config is exactly what it was
         self.setup.write_setup_config(self.root / "strata-other.json", plain)
         self.assertNotIn("shape_title", json.loads((self.root / "strata-other.json").read_text(encoding="utf-8")))
+
+    def test_no_named_feed_fetches_no_shape_engine(self):
+        """strata-nvfp4: without --feed / STRATA_UPDATE_FEED nothing is fetched from upstream's signed feed for a shape engine."""
+        self.setup.SHAPE_ENGINE.update(shape="q4_lite", title="Q4 Lite Shape")
+        from strata_cli import update_cmd
+        with mock.patch.object(shape_engine, "ensure") as ensure, mock.patch.object(update_cmd, "_feed_source", return_value=None), \
+                mock.patch.dict(os.environ, {"STRATA_ALLOW_NO_ENGINE": "1"}), mock.patch.object(self.setup, "warn"):
+            self.assertIsNone(self.setup.shape_engine_fetch(argparse.Namespace(feed=None)))
+        ensure.assert_not_called()
 
     def test_without_a_shape_the_strata_engine_step_runs_as_before(self):
         self.assertEqual(self.setup.SHAPE_ENGINE, {})

@@ -3691,7 +3691,9 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
             }
         }
     }
-    if (static const bool dbg = std::getenv("STRATA_DBG_NAN") != nullptr; dbg) {   // debug: the first non-finite head
+    // debug: the first non-finite head (STRATA_DBG_NAN_VERIFY: this check alone, without the prompt path's)
+    static const bool dbg = std::getenv("STRATA_DBG_NAN") != nullptr || std::getenv("STRATA_DBG_NAN_VERIFY") != nullptr;
+    if (dbg) {
         static bool reported = false;
         if (!reported) {
             std::vector<float> h((size_t) T * (size_t) n_vocab_);
@@ -4538,6 +4540,19 @@ void Verifier::apply_node_priorities(cudaGraph_t graph, int T) {
 #endif
 }
 
+int Verifier::drop_solo_graphs() {
+    // --pipeline-windows prepares its graphs once (capture_all) and never captures them again: those stay
+    if (ev_done_ != nullptr || cudaStreamSynchronize(cs_) != cudaSuccess) return 0;
+    int n = 0;
+    for (int l = 0; l < 2; ++l)
+        for (int t = 0; t <= strata::kernels::kVerifyLongT; ++t) {
+            if (exec_[l][t]) { cudaGraphExecDestroy(exec_[l][t]); exec_[l][t] = nullptr; launched_[l][t] = false; ++n; }
+            if (exec_nr_[l][t]) { cudaGraphExecDestroy(exec_nr_[l][t]); exec_nr_[l][t] = nullptr; launched_nr_[l][t] = false; ++n; }
+        }
+    if (commit_exec_) { cudaGraphExecDestroy(commit_exec_); commit_exec_ = nullptr; ++n; }
+    return n;
+}
+
 bool Verifier::instantiate_evicting(cudaGraphExec_t& ex, cudaGraph_t graph, const std::vector<int>& key,
                                    const char* what, std::string& err, int keep_t, unsigned long long flags) {
     // #997: every layout of active slots keeps its own graph pair (20-30 MiB each on an L40S), and with an expert cache
@@ -4547,17 +4562,34 @@ bool Verifier::instantiate_evicting(cudaGraphExec_t& ex, cudaGraph_t graph, cons
     // capture() reads as "captured" when it is not null)
     capture_oom_ = false;
     cudaGraphExec_t got = nullptr;
-    cudaError_t ie = cudaGraphInstantiate(&got, graph, flags);
-    int freed = 0;
+    // strata-nvfp4 batch-oom (4090, parallel 4): the last layout's commit graph still did not fit and the engine exited.
+    // Then the solo window graphs (a batch graph only), then the expert cache's slots (set_vram_relief).
+    static const int test_oom = [] {   // test hook: the first N instantiations after the first batch graph fail
+        const char* v = std::getenv("STRATA_TEST_GRAPH_OOM");
+        return v != nullptr ? std::atoi(v) : 0;
+    }();
+    static int test_left = test_oom;
+    auto inst = [&]() -> cudaError_t {
+        if (test_left > 0 && !exec_bm_.empty() && !key.empty()) { --test_left; return cudaErrorMemoryAllocation; }
+        got = nullptr;
+        return cudaGraphInstantiate(&got, graph, flags);
+    };
+    cudaError_t ie = inst();
+    int freed = 0, solo = 0;
+    size_t relief = 0;
     for (bool evicted = true; ie == cudaErrorMemoryAllocation && evicted;) {
         (void) cudaGetLastError();
         if (!evict_batch_graph(key, evicted, err)) return false;
         if (evicted) {
             ++freed;
-            ie = cudaGraphInstantiate(&got, graph, flags);
+            ie = inst();
         }
     }
-    if (freed > 0)
+    if (ie == cudaErrorMemoryAllocation && !key.empty()) {
+        (void) cudaGetLastError();
+        if ((solo = drop_solo_graphs()) > 0) ie = inst();
+    }
+    if (freed > 0 && solo == 0 && relief == 0)
         std::fprintf(stderr, "strata verify: no VRAM for a new window graph: freed the graphs of %d older batch slot "
                              "layouts, %zu kept (a larger --vram-reserve-mib keeps more)\n", freed, exec_bm_.size());
     // #3702: a single-request window with nothing of a batch left to free: free the graphs of other window sizes
@@ -4567,13 +4599,27 @@ bool Verifier::instantiate_evicting(cudaGraphExec_t& ex, cudaGraph_t graph, cons
         if (!evict_window_graph(keep_t, evicted, err)) return false;
         if (evicted) {
             ++freed_sizes;
-            ie = cudaGraphInstantiate(&got, graph, flags);
+            ie = inst();
         }
     }
     if (freed_sizes > 0)
         std::fprintf(stderr, "strata verify: no VRAM for the %d-token window graph: freed the graphs of %d other window "
                              "sizes (they are captured again when used; a larger --vram-reserve-mib or "
                              "--vram-reserve-later-mib keeps them)\n", keep_t, freed_sizes);
+    for (int r = 0; ie == cudaErrorMemoryAllocation && vram_relief_ && r < 8; ++r) {
+        (void) cudaGetLastError();
+        if (cudaStreamSynchronize(cs_) != cudaSuccess) break;
+        const size_t gave = vram_relief_((size_t) 64 << 20);
+        if (gave == 0) break;
+        relief += gave;
+        ie = inst();
+    }
+    if ((solo > 0 || relief > 0) && !graph_oom_said_) {
+        graph_oom_said_ = true;   // once: later ones are the same story
+        std::fprintf(stderr, "strata verify: no VRAM for a new window graph: freed %d batch layouts, %d solo window "
+                             "graphs and %zu MiB of the expert cache%s (said once; a larger --vram-reserve-mib avoids it)\n",
+                     freed, solo, relief >> 20, ie == cudaSuccess ? "" : " - still not enough");
+    }
     if (ie != cudaSuccess) {
         capture_oom_ = ie == cudaErrorMemoryAllocation;
         if (capture_oom_) (void) cudaGetLastError();

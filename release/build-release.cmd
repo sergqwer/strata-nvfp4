@@ -11,9 +11,9 @@ if not exist "%VSWHERE%" (echo build-release: vswhere.exe not found - install th
 set /p VS=<"%TEMP%\strata-vs-path.txt"
 if not defined VS (echo build-release: no Visual Studio installation found & exit /b 1)
 call "%VS%\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1 || exit /b 1
+rem strata-nvfp4 0.2.13: the vendored third_party/strata-ggml (upstream 0.2.x; the same llama.cpp pin 3cf03257), no llama.cpp checkout
 rem configured on every run: an existing build-release\ from before takes the architecture list too
 cmake -G Ninja -S "%ROOT%" -B "%ROOT%\build-release" -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=ON ^
-      -DSTRATA_BUILD_TESTS=OFF -DSTRATA_PORTABLE=ON "-DCMAKE_CUDA_ARCHITECTURES=75-real;86-real;89-real;120-real" ^
-      "-DSTRATA_GGML_DIR=%ROOT%\third_party\llama.cpp" >nul || exit /b 1
+      -DSTRATA_BUILD_TESTS=OFF -DSTRATA_PORTABLE=ON "-DCMAKE_CUDA_ARCHITECTURES=75-real;86-real;89-real;120-real" "-DSTRATA_GGML_DIR=" >nul || exit /b 1
 cmake --build "%ROOT%\build-release" --target strata -j 16 || exit /b 1
 exit /b 0

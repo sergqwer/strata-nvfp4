@@ -67,6 +67,8 @@ class SetupInputs:
     resident: Any = None
     budget: Any = None
     GGUFFile: Any = None
+    uncensored: Any = None      # strata-nvfp4: this fork's censorship switch's default (None: no switch for this family)
+    rope_auto: Any = None       # strata-nvfp4: setup chose the RoPE method itself (fit_auto_rope keeps it in step)
 
 
 @dataclass
@@ -152,6 +154,8 @@ def config_for(inp: SetupInputs, lib) -> SetupConfig:
     resident = inp.resident
     budget = inp.budget
     GGUFFile = inp.GGUFFile
+    uncensored = inp.uncensored                        # strata-nvfp4
+    rope_auto = inp.rope_auto                          # strata-nvfp4
     CONTROL = lib.CONTROL
     DISPLAY_RESERVE_MIB = lib.DISPLAY_RESERVE_MIB
     GFX1103_OPT_IN = lib.GFX1103_OPT_IN
@@ -191,7 +195,7 @@ def config_for(inp: SetupInputs, lib) -> SetupConfig:
     parallel_note = lib.parallel_note
     ple_ram_platform_ok = lib.ple_ram_platform_ok
     pool_workers_note = lib.pool_workers_note
-    ready_paths = lib.ready_paths
+    ready_paths = getattr(lib, "ready_paths", None)   # strata-nvfp4: no ready-made NVFP4 packs here (ready is False)
     recommend_pool_workers = lib.recommend_pool_workers
     recommend_remote_expert_opt = lib.recommend_remote_expert_opt
     resident_budget_gib = lib.resident_budget_gib
@@ -201,6 +205,7 @@ def config_for(inp: SetupInputs, lib) -> SetupConfig:
     setup_images = lib.setup_images
     small_card_note = lib.small_card_note
     two_socket_note = lib.two_socket_note
+    uncensor_args = lib.uncensor_args                  # strata-nvfp4
     uma_expert_cache = lib.uma_expert_cache
     unsloth_default_env = lib.unsloth_default_env
     unsloth_runtime_mib = lib.unsloth_runtime_mib
@@ -216,7 +221,7 @@ def config_for(inp: SetupInputs, lib) -> SetupConfig:
         profile = neutral_profile_if_other_shape(profile, shards[0], pack, GGUFFile, say)       # a feed model of another shape than the shipped profile's
     args = [*model_args,
             "--expert-profile", str(profile), "--expert-cache", "auto",
-            "--prefill", "auto", "--spec", "4", "--spec-min-p", "0.5", "--mtp", str(rt),
+            "--prefill", "auto", "--spec", "6", "--spec-min-p", "0.7", "--mtp", str(rt),   # strata-nvfp4: --spec 6 / 0.7
             "--max-context", str(ctx)]
     if scaling is not None:     # the resolved config: explicit flags as given, or the automatic yarn+factor
         args += ["--rope-scaling", scaling, "--rope-scale", f"{rope_scale:g}"]
@@ -418,6 +423,8 @@ def config_for(inp: SetupInputs, lib) -> SetupConfig:
             w = compute_mode_warning(gi, gpu_compute_mode(gi))
             if w:
                 warn(w)                                   # #1445: a warning only, never a refusal
+    if uncensored is not None:                         # strata-nvfp4: this fork's switch: loaded, the default in the config
+        args += uncensor_args()
     if esp is not None:
         # the package's profile, with llama.cpp's flags (the engine takes the same ones)
         args += ["--control-vector-scaled", f"{esp}:1.0", "--control-vector-layer-range", "4", "44",
@@ -425,10 +432,14 @@ def config_for(inp: SetupInputs, lib) -> SetupConfig:
     cfg = {"exe": engine_exe(eng), "args": args, "cwd": str(ROOT), "tokenizer": str(pack / "tokenizer"),
            "model_name": f"{fam['name']}-{model.lower()}", "log": str(home() / f"strata-{tag.lower()}.log"),
            "lib_dirs": lib_dirs, "port": port}
+    if scaling is not None:                            # strata-nvfp4: setup's own RoPE choice is kept in step (fit_auto_rope)
+        cfg["rope_auto"] = rope_auto
     if cuda_tk == 12:                                  # the experimental CUDA 12 engine (engine-cuda12/)
         cfg["cuda"] = 12
     if (uenv := unsloth_default_env(family, model, hip, in_budget, str(gpu.get("arch") or ""))):
         cfg["env"] = uenv
+    if uncensored is not None:                         # strata-nvfp4: the switch's default for requests ("uncensored")
+        cfg["uncensored"] = uncensored
     if hip:
         cfg["backend"] = "hip"
         # the dense prompt GEMMs through hipBLASLt with kernels measured on this GPU generation (tools/hip; +40-60%

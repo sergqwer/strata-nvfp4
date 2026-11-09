@@ -9,6 +9,9 @@
     strata components use X       switch to an installed engine (a version or folder name; `newest` follows updates again)
     strata components remove X    delete an installed engine (never the one in use)
 
+strata-nvfp4: the signed feed is used only when named (--feed, STRATA_UPDATE_FEED, or one chosen before); without one
+`strata update` and `strata components update` run this fork's own updater instead (strata_cli/fork_update.py).
+
 Starting and serving never come here. A process that has forbidden acquiring (STRATA_NO_ACQUIRE) is refused with exit 5.
 Exit codes: 0 done or nothing to do, 2 usage, 5 refused (signature, hash, downgrade, no key, acquiring forbidden),
 6 failed and the old version is still in use (network, test start), 7 a model is loaded and nothing was changed, 8 the update is done (or
@@ -34,7 +37,10 @@ from pathlib import Path
 #: one-line installers use). Only a feed signed with a key in update_keys.json (or STRATA_UPDATE_TRUSTED_KEYS) is accepted.
 DEFAULT_FEED = "https://github.com/Niko1221/Strata/releases/latest/download/strata-feed.json"
 ENV_FEED = "STRATA_UPDATE_FEED"
-
+#: strata-nvfp4 (this fork): DEFAULT_FEED is upstream's, and its engines are upstream's - an install of this fork must not
+#: switch to them by a plain `strata update`.  The feed is used only when named (--feed, STRATA_UPDATE_FEED, or one chosen
+#: before); without one `strata update` runs this fork's own updater (strata_cli/fork_update.py: update.cmd's
+#: tools/bundle_update.py in a release folder, UPDATE.bat / update.sh in a clone).
 ENV_APP_VERSION = "STRATA_APP_VERSION"
 
 
@@ -57,9 +63,11 @@ def _common(p: argparse.ArgumentParser) -> None:
 
 
 def add_parsers(sp, components_sp) -> list:
-    update = sp.add_parser("update", help="download and install the engine for this PC (and Control) from the signed feed; switches only after a test start")
+    # strata-nvfp4: without a feed, this fork's updater (fork_update.py)
+    update = sp.add_parser("update", help="update this strata-nvfp4 install with its own updater (update.cmd / UPDATE.bat); "
+                                          "with --feed: the engine for this PC (and Control) from that signed feed")
     _common(update)
-    update.add_argument("--check", action="store_true", help="only read the feed and say what would change")
+    update.add_argument("--check", action="store_true", help="only say what would change (a newer release; with --feed: the feed)")
     update.add_argument("--app", action="store_true", help="also download and verify the desktop app's installer")
     update.add_argument("--app-version", default=None, help=f"the installed app's version (default: ${ENV_APP_VERSION})")
     update.add_argument("--no-engine", action="store_true")
@@ -120,16 +128,20 @@ def _emit_factory(a, lines: list):
     return emit
 
 
-def _feed_source(a, root: Path) -> str:
+def _feed_source(a, root: Path) -> str | None:
+    """The feed named for this update, or None (strata-nvfp4: never upstream's DEFAULT_FEED by itself; None runs this
+    fork's own updater)."""
     from strata_control import updater
     if a.feed:
         return a.feed
     if os.environ.get(ENV_FEED):
         return os.environ[ENV_FEED]
     remembered = (updater.State(root).data.get("feed") or {}).get("source")
-    if remembered == DEFAULT_FEED:                    # the common feed remembered from before: a Linux ARM64 machine reads its own file
-        return default_feed()
-    return remembered if _may_be_remembered(remembered) else default_feed()
+    # strata-nvfp4: upstream's own feed (any file of its release, the Linux ARM64 one too) is never taken by itself, and
+    # only an https address is carried over (upstream's #rule below); None runs this fork's own updater
+    if remembered and _may_be_remembered(remembered) and not remembered.startswith(DEFAULT_FEED.rsplit("/", 1)[0] + "/"):
+        return remembered
+    return None
 
 
 def _may_be_remembered(source) -> bool:
@@ -287,6 +299,12 @@ def run(a) -> int:
         return code
 
     root = Path(a.components_dir) if a.components_dir else default_components_dir(ec)
+    source = None
+    if getattr(a, "components_command", None) not in ("rollback", "engines", "use", "remove", "install-file"):   # those need no feed
+        source = _feed_source(a, root)
+        if source is None:                       # strata-nvfp4: no feed named - this fork's own updater
+            from strata_cli import fork_update
+            return fork_update.run(a)
     try:
         hardware = updater.detect_hardware()
         if a.backend:
@@ -329,7 +347,7 @@ def run(a) -> int:
         acquisition.require("the update", "`strata update` from a terminal")
         trusted = signing.load_trusted_keys()
         ctx.trusted = trusted
-        ctx.source = _feed_source(a, root)
+        ctx.source = source
         if signing.extra_keys_in_effect() and not machine:
             print(f"note: trusting the extra keys in {os.environ.get(signing.ENV_EXTRA_KEYS)} (a test setup)", file=sys.stderr)
         if a.check:

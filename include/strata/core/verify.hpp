@@ -421,6 +421,9 @@ public:
     /// STRATA_ADAPT_FETCH's admissions).
     /// It gets this verifier's stream; false (with the message in `err`) fails the launch.
     void set_pre_launch(std::function<bool(cudaStream_t cs, std::string& err)> f) { pre_launch_ = std::move(f); }
+    /// A graph that finds no VRAM after the verifier freed its own graphs asks this for `bytes` more (the engine's
+    /// expert cache gives up slots); it returns what it freed, 0 when it cannot.  Runs on a quiet stream.
+    void set_vram_relief(std::function<size_t(size_t bytes)> f) { vram_relief_ = std::move(f); }
     /// the pool never plans a PCIe share (--pcie-frac 0): the window skips that path.  Before the first run.
 
     /// The PCIe count of each layer from measured costs (PcieModel) instead of a fixed share: the spin kernels stamp
@@ -732,6 +735,9 @@ private:
     void set_plan_slot(int grp);
     bool split_ = false;   // opt-in (--spec-split): exact but slower, see the overlap study
     std::function<bool(cudaStream_t, std::string&)> pre_launch_;   // set_pre_launch
+    std::function<size_t(size_t)> vram_relief_;                   // set_vram_relief
+    bool graph_oom_said_ = false;          ///< the escalation below said once
+    int drop_solo_graphs();                ///< free the idle solo window graphs (captured again on first use)
     int groups_[strata::kernels::kVerifyLongT + 1] = {};
     float* h_ymiss_ = nullptr;   float* m_ymiss_ = nullptr;     // T * k * n_embd
 

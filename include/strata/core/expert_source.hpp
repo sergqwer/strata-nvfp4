@@ -1248,6 +1248,11 @@ private:
     /// (sorted by `start`, page-aligned; empty otherwise).  A blob is pinned only when one slice holds all of it.
     struct ComplementSlice { uint64_t start, end; const uint8_t* device; };
     std::vector<ComplementSlice> complement_slices_;
+    /// strata-nvfp4 #20: path 2's blobs that no slice holds whole, each in its own page-locked copy (sorted by index):
+    /// resident_blob() hands those out, so a host-to-device copy of one never spans two registrations
+    std::vector<std::pair<size_t, uint8_t*>> straddle_copies_;
+    bool straddle_pinned_ = false;            ///< the copies came from cudaHostAlloc (else malloc)
+    void copy_straddling_blobs();
     bool complement_vmem_ = false;            ///< Windows: the sliced copy is VirtualAlloc'd (page-aligned), not malloc'd
     const ComplementSlice* complement_slice(uint64_t offset, uint64_t bytes) const;
     std::vector<std::vector<std::pair<int32_t, int32_t>>> stage_lend_regions_;  ///< a split: each stage's lend region

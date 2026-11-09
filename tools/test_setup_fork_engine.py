@@ -74,7 +74,10 @@ class Case(unittest.TestCase):
                 z.writestr(setup.EXE, b"fork")
                 z.writestr(setup.VEXE, b"fork vision")
 
+        # strata-nvfp4 (port 0.2.13): upstream's prebuilt_bases skips the tag when the version reads "0" (no source tree, as
+        # the temp ROOT here): the fork's release is named, so the tag is tried first as in a real install
         return [mock.patch.object(setup, "ROOT", self.root),
+                mock.patch.object(setup, "release_version", lambda: "0.2.13-nvfp4.1"),
                 mock.patch.object(setup.urllib.request, "urlopen", urlopen),
                 mock.patch.object(setup, "download", download),
                 mock.patch.object(setup, "engine_digest", lambda asset, base: None),
@@ -250,7 +253,7 @@ class Texts(unittest.TestCase):
             out = io.StringIO()
             with mock.patch.object(setup, "pip_install", lambda *a, **k: None), \
                     mock.patch.object(setup, "update_installed_engine", lambda *a, **k: None), \
-                    mock.patch.object(setup, "requirement_lines", lambda: []), redirect_stdout(out):
+                    mock.patch.object(setup, "requirement_lines", lambda *a: []), redirect_stdout(out):
                 setup.update_install([cfg], mock.Mock(build=False, prebuilt=setup.PREBUILT_URL))
         self.assertIn(f"Strata is updated (engine {FORK['version']})", out.getvalue())
 

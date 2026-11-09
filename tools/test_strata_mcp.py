@@ -609,7 +609,7 @@ class Helpers(unittest.TestCase):
 
     def test_unsloth_sizes(self):
         """0.1.39: UD-IQ4_XS is a regular size, listed first; MODEL-UPDATE Phase 2: UD-Q4_K_XL is no longer experimental,
-        and UD-Q5_K_XL, UD-Q6_K_XL and Q8_0 follow by size."""
+        and UD-Q5_K_XL, UD-Q6_K_XL and Q8_0 follow by size.  0.1.42-nvfp4.2: UD-Q3_K_XL, a regular size, after UD-IQ4_XS."""
         s = M.Strata(HERE.parent)
         for models in (s.tables()[0], M.FALLBACK_MODELS):
             self.assertEqual(s.sizes_of(models, "unsloth"), ["UD-IQ4_XS", "UD-Q4_K_XL", "UD-Q5_K_XL", "UD-Q6_K_XL", "Q8_0", "UD-IQ1_M", "UD-Q2_0",

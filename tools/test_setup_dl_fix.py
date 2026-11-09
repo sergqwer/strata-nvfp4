@@ -123,8 +123,11 @@ class Fp4LocalOrder(unittest.TestCase):
         events = []
         with mock.patch.object(setup, "ensure_nvfp4_local_packages", lambda: events.append("packages")):
             ram, found = G.PROFILES["128GB-1x24GB"]
-            _ = G.install(ram, found, ["--family", "nvfp4", "--no-start", "--model", "NVFP4-QAD"])
-        self.assertEqual(events, ["packages"])
+            code, out, *_ = G.install(ram, found, ["--family", "nvfp4", "--no-start", "--model", "NVFP4-QAD"])
+        # strata-nvfp4: NVFP4-QAD is refused here (NVFP4_UPSTREAM_NOT_HERE) before any package or prepare step
+        self.assertEqual(events, [])
+        self.assertNotEqual(code, 0)
+        self.assertIn("NVFP4-QAD", out)
 
 
 if __name__ == "__main__":

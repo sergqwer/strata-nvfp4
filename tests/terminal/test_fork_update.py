@@ -134,7 +134,7 @@ class ForkUpdate(unittest.TestCase):
             self.assertNotIn("fork path", err)
             with mock.patch.dict(os.environ, {"STRATA_UPDATE_FEED": str(feed)}):
                 self.assertNotIn(self.cli("update", "--check")[0], (0, 2))
-            write(self.components / ".updates" / "state.json", json.dumps({"feed": {"source": str(feed)}}))
+            write(self.components / ".updates" / "state.json", json.dumps({"feed": {"source": "https://127.0.0.1:9/feed.json"}}))   # upstream 0.2.x remembers only an https feed
             self.assertNotIn(self.cli("update", "--check")[0], (0, 2))
             code, _, err = self.cli("components", "rollback")          # rollback is upstream's, feed or not
             self.assertNotIn("fork path", err)

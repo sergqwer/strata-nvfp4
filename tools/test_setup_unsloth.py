@@ -1,7 +1,9 @@
-"""Tests for setup.py's Unsloth choices (docs/UNSLOTH_Q4.md): UD-IQ4_XS (regular from 0.1.39) and the experimental
-UD-Q4_K_XL: the four pinned shards with
+"""Tests for setup.py's Unsloth choices (docs/UNSLOTH_Q4.md): UD-IQ4_XS (regular from 0.1.39), UD-Q3_K_XL
+(0.1.42-nvfp4.2) and the experimental UD-Q4_K_XL: the four pinned shards with
 their sizes and SHA-256, the RAM budget from the PC's RAM, the pack with --compat-bf16 (never experts.bin), the
-engine version it needs, one GPU, no images.  Mocked - no GPU, no downloads, nothing written outside a temp folder.
+engine version it needs, one GPU, no images.  0.1.42-nvfp4.2: every expert in RAM where they fit with 16 GiB more
+(Resident), the RAM budget below that - the budget tests force it (budget_mode) where their PC would now fit them.
+Mocked - no GPU, no downloads, nothing written outside a temp folder.
 
     python -m unittest tools.test_setup_unsloth
 """
@@ -179,6 +181,7 @@ class Base(unittest.TestCase):
         patches = [
             mock.patch.object(setup, "ROOT", self.t),
             mock.patch.object(setup, "GPU_PICK", None),
+            mock.patch.object(setup, "NVFP4_REPOS", {}),   # the GGUF menus (this fork's NVFP4 families not offered)
             mock.patch.object(setup, "data_folder", lambda d, *a, **k: (self.t / "data", [])),
             mock.patch.object(setup, "installed_configs", lambda: []),
             mock.patch.object(setup, "gpus", lambda: found),
@@ -240,9 +243,12 @@ class Main(Base):
         args = cfg["args"]
         self.assertEqual(args[args.index("--resident-budget-gib") + 1], "40")
         self.assertTrue(args[args.index("--native") + 1].endswith("-00001-of-00004.gguf"))
-        for flag in ("--ple-gguf", "--mmap-experts", "--resident-experts", "--control-vector-scaled",
-                     "--kv-resident"):
+        for flag in ("--ple-gguf", "--mmap-experts", "--resident-experts", "--kv-resident"):
             self.assertNotIn(flag, args)
+        # this fork's censorship switch: loaded, off by default (not upstream's speed projection)
+        self.assertTrue(args[args.index("--control-vector-scaled") + 1].replace("\\", "/").endswith(
+            "/data/uncensor/qwen-nvfp4-gptq-uncensored.gguf:1.0"))
+        self.assertIs(cfg["uncensored"], False)
         self.assertEqual(args[args.index("--max-context") + 1], "8192")
         self.assertEqual(cfg["model_name"], "qwen3.8-flash-next-unsloth-ud-q4_k_xl")
         self.assertFalse(cfg["vision"]["gpu"])                               # 11.9 GB: the CPU reader
@@ -583,6 +589,88 @@ class IQ4XS(Base):
         self.assertNotIn("has not been run on AMD cards yet", out)
         self.assertIn("RAM budget: 40 GiB of UD-IQ4_XS's experts", out)
 
+
+Q3 = "UD-Q3_K_XL"
+
+
+class Resident(Base):
+    """0.1.42-nvfp4.2: every expert of an Unsloth file in RAM (a pinned arena, no --resident-budget-gib) where they fit
+    with UNSLOTH_RESIDENT_BESIDE_GB more - measured on 128 GB: UD-Q4_K_XL 169 tokens/s and a 4.9 s 32K prompt in the
+    arena against 118 and 30 s in the budget mode; the budget below that (a 64 GB PC), when asked for, and on a
+    unified-memory APU."""
+
+    def test_the_rule(self):
+        self.assertEqual(setup.UNSLOTH_RESIDENT_BESIDE_GB, 16)
+        need = {m: setup.MODELS[m]["arena_gb"] / 1.073741824 + 16 for m in (M, X, Q3)}
+        self.assertEqual({m: round(v, 1) for m, v in need.items()}, {M: 87.7, X: 71.4, Q3: 68.0})
+        for ram, budget in ((63.7, {M, X, Q3}), (80.0, {M}), (93.4, set()), (127.2, set())):
+            for m in (M, X, Q3):
+                self.assertEqual(setup.unsloth_budget(m, ram), m in budget, (m, ram))
+        uma = {"uma": True}
+        self.assertTrue(setup.unsloth_budget(X, 124.0, uma))                 # #1715: measured on a discrete card only
+        self.assertTrue(setup.unsloth_budget(M, 127.2, None, 40))             # --resident-budget-gib: asked for
+        self.assertFalse(setup.unsloth_budget(M, 127.2, {"uma": False}))
+
+    def test_install_at_128_gb(self):
+        for m, ver in ((M, "0.1.32"), (X, "0.1.38"), (Q3, "0.1.38")):
+            with self.subTest(m):
+                code, out, cfg = self.main(["--context", "131072"], ram=127.2, version=ver, m=m)
+                self.assertEqual(code, 0, out)
+                args = cfg["args"]
+                for flag in ("--resident-budget-gib", "--mmap-experts", "--resident-experts", "--low-ram"):
+                    self.assertNotIn(flag, args)
+                self.assertIn(f"all of {m}'s experts", out)
+                self.assertNotIn("RAM budget:", out)
+                self.assertIn("--kv-resident", args)                          # the measured 131072 + KV streaming
+                self.assertEqual(args[args.index("--max-context") + 1], "131072")
+                self.assertNotIn("most of its experts are read from the SSD while it answers", out)
+
+    def test_recommended_context_is_the_gguf_models(self):
+        """Not the budget mode's 8192 / 32768: every GB of KV is no longer a GB fewer cached experts in RAM."""
+        code, out, cfg = self.main([], ram=127.2, version="0.1.38", m=Q3)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(cfg["args"][cfg["args"].index("--max-context") + 1], "32768")   # a 12 GB card's
+
+    def test_the_menu_and_check_say_so(self):
+        code, out, cfg = self.main(["--context", "8192"], ram=127.2, version="0.1.38", model=False, m=X)
+        self.assertEqual(code, 0, out)
+        for line in (ln for ln in out.splitlines() if ln.startswith(("  1) UD-", "  2) UD-", "  3) UD-"))):
+            self.assertIn("keeps all of its", line)
+        code, out, _ = self.main(["--check"], ram=127.2, m=X)
+        for m in (M, X, Q3):
+            line = next(ln for ln in out.splitlines() if ln.strip().startswith(m))
+            self.assertIn("fits (all of its experts in RAM)", line)
+        code, out, _ = self.main(["--check"], ram=63.7, m=X)
+        for m in (M, X, Q3):
+            line = next(ln for ln in out.splitlines() if ln.strip().startswith(m))
+            self.assertIn("fits with 40 GiB of its experts in RAM", line)
+
+    def test_64_gb_keeps_the_budget(self):
+        for m, ver in ((M, "0.1.32"), (X, "0.1.38"), (Q3, "0.1.38")):
+            with self.subTest(m):
+                code, out, cfg = self.main(["--context", "8192"], ram=63.7, version=ver, m=m)
+                self.assertEqual(code, 0, out)
+                self.assertEqual(cfg["args"][cfg["args"].index("--resident-budget-gib") + 1], "40")
+                self.assertIn(f"RAM budget: 40 GiB of {m}'s experts in RAM", out)
+
+    def test_an_asked_budget_is_kept(self):
+        code, out, cfg = self.main(["--context", "8192", "--resident-budget-gib", "40"], ram=127.2)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(cfg["args"][cfg["args"].index("--resident-budget-gib") + 1], "40")
+        self.assertNotIn(f"all of {M}'s experts", out)
+
+    def test_two_gpus_split_with_every_expert_in_ram(self):
+        """Where the experts fit, two cards are the GGUF models' layer split (no budget question, no #498 note)."""
+        code, out, cfg = self.main(["--context", "8192"], n_gpus=2, ram=127.2)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(cfg["gpu"], [0, 1])
+        self.assertEqual(cfg["layer_split"], "auto")
+        self.assertNotIn("--resident-budget-gib", cfg["args"])
+        self.assertNotIn("which GPUs?", out)
+
+
+# strata-nvfp4 (port 0.2.13): the fork's own 3-shard UD-Q3_K_XL (766911a6, 0.1.42-nvfp4.2) and its tests are gone: upstream
+# 0.2.x publishes UD-Q3_K_XL itself (Unsloth v3.1, four shards, engine 0.1.57), tested in its own suite.
 
 class StrixHaloCache(Base):
     """#1715: on a unified-memory APU the expert cache and the RAM budget are the same RAM: setup writes a cache size

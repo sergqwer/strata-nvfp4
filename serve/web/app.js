@@ -555,7 +555,7 @@ function renderMonitor(live, hw, st, eng, h, last, requests, totals, kept) {
     body.innerHTML = requests.slice(0, reqShowAll ? requests.length : 12).map((r) => {
       const [cls, text] = badge[r.finish] || ["", r.finish || "–"];
       const t = new Date(r.time * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
-      const proj = r.projection == null ? "" : ` <span class="st-badge${r.projection ? " st-badge--reading" : ""}" title="experimental speed projection ${r.projection ? "on" : "off"}">${r.projection ? "ESP" : "stock"}</span>`;
+      const proj = r.projection == null ? "" : ` <span class="st-badge${r.projection ? " st-badge--reading" : ""}" title="censorship ${r.projection ? "off (the refusal-direction projection)" : "on (the original model)"}">${r.projection ? "uncensored" : "stock"}</span>`;
       // #588: the VRAM share; the PCIe share (--pcie-frac) beside it when there is one
       const hit = r.hit_rate == null ? "–" : `${(r.hit_rate * 100).toFixed(1)}%` +
         (r.pcie_share ? ` <span class="muted" title="routed experts the GPU read over PCIe (--pcie-frac) or another GPU computed">+${(r.pcie_share * 100).toFixed(1)}% PCIe</span>` : "");
@@ -705,8 +705,8 @@ function projectionText(c) {
   const [mode, range, single] = String(c).split(":");
   const [a, b] = (range || "").split("-");
   return `${mode === "project" ? "Projection" : "Additive"} control vector on layers ${a}–${b}` +
-         `${single ? ` (layer ${single.replace("single", "")}'s direction)` : ""}. Per chat in Sampling. Its package ` +
-         "describes the vector as a refusal-direction projection; measure the speed yourself";
+         `${single ? ` (layer ${single.replace("single", "")}'s direction)` : ""}: a refusal-direction projection, so ` +
+         "censorship is off while it is on. Per chat in Sampling (Disable censorship); the API field is \"uncensored\"";
 }
 function renderAbout(eng, hw, st, gv, upd) {
   const kv = {int8: "8-bit", q4_0: "4-bit (Hadamard-rotated)", fp16: "16-bit"}[eng.kv] || eng.kv;
@@ -719,7 +719,7 @@ function renderAbout(eng, hw, st, gv, upd) {
     ["Experts in VRAM", eng.expert_slots ? `${fmt(eng.expert_slots)} (${gb((eng.expert_cache_mib || 0) * 1048576)} GB)` : null],
     ["Speculation", eng.spec ? `MTP drafts up to ${Math.max(0, (eng.mtp_max || eng.spec) - 1)} tokens${eng.lookup ? ", prompt lookup on" : ""}` : null],
     ["Images", eng.images ? "on" : "off"],
-    ["Experimental speed projection", projectionText(eng.cvec)],
+    ["Disable censorship", projectionText(eng.cvec)],
   ]);
   const cards = (gv && gv.cards) || [];
   // every card with its PCIe link; with several, what each one does
@@ -942,14 +942,16 @@ function markdown(text) {
 // fields: the server picks the card's set for the request's thinking state (thinking 1.0 / 0.95 / 20, not thinking
 // 0.7 / 0.8 / 20 with a presence penalty). Before 0.1.45 the page sent 0.6 itself; a stored 0.6 with the other two
 // values untouched counts as "not set" too.
-const DEFAULTS = {thinking: "high", temperature: 1.0, top_p: 0.95, top_k: 20, max: "", seed: "", show: true, esp: true, mcp: true, math: false,
+// esp: the censorship switch - undefined follows the server's default (the config's "uncensored"), true/false is
+// the user's own pick.  espv 2: a pick saved by this version (an older one saved esp: true by itself)
+const DEFAULTS = {thinking: "high", temperature: 1.0, top_p: 0.95, top_k: 20, max: "", seed: "", show: true, esp: undefined, mcp: true, math: false,
                   chatList: false, chatEdit: false, whileBusy: "wait"};
 const OLD_DEFAULT_TEMPERATURE = 0.6;
 function samplingUntouched(s) {
   const t = +s.temperature;
   return (t === DEFAULTS.temperature || t === OLD_DEFAULT_TEMPERATURE) && +s.top_p === DEFAULTS.top_p && +s.top_k === DEFAULTS.top_k;
 }
-let settings = {...DEFAULTS, ...store.get("sampling", {})};
+let settings = (() => { const s = store.get("sampling", {}); if (s.espv !== 2) delete s.esp; return {...DEFAULTS, ...s}; })();
 if (samplingUntouched(settings)) settings.temperature = DEFAULTS.temperature;
 let messages = store.get("chat", []);   // the open chat's messages (chats-ui.js: with the saved-chats list on, also that chat's own)
 let attachments = [];                 // {name, url}
@@ -1377,7 +1379,7 @@ async function generateReply() {
   }
   if (settings.seed) body.seed = +settings.seed;
   if (settings.max) body.max_tokens = +settings.max;
-  if (projectionLoaded()) body.experimental_speed_projection = !!settings.esp;
+  if (projectionLoaded() && settings.esp != null) body.experimental_speed_projection = !!settings.esp;
   if (settings.mcp !== false && mcpInfo.tools > 0) body.strata_mcp = true;   // this server may run MCP tools for it
 
   let firstAt = null, thinkStart = null, usage = null, frame = 0;
@@ -1442,7 +1444,7 @@ async function generateReply() {
   if (n && firstAt) {
     const secs = (performance.now() - firstAt) / 1000;
     m.meta = tr("chat.tokens", "{n} tokens", {n: fmt(n)}) + (secs > 0.25 ? ` · ${fmt(n / secs, 1)} tok/s` : "") + (m.stopped ? ` · ${ended}` : "") +
-             (projectionLoaded() ? (settings.esp ? ` · ${tr("chat.projectionOn", "projection on")}` : ` · ${tr("chat.projectionOff", "projection off")}`) : "");
+             (projectionLoaded() ? (espOn() ? ` · ${tr("chat.projectionOn", "uncensored")}` : ` · ${tr("chat.projectionOff", "censored")}`) : "");   // strata-nvfp4: the fork's words, upstream's keys
   } else if (m.stopped) {
     m.meta = cut ? tr("chat.interrupted", "Interrupted") : tr("chat.stopped", "Stopped");
   }
@@ -1596,7 +1598,7 @@ function loadDrawer(s = settings) {
   $("s-max").value = s.max; $("s-seed").value = s.seed;
   $("s-math").setAttribute("aria-checked", String(!!s.math));
   $("s-show").setAttribute("aria-checked", String(!!s.show));
-  $("s-esp").setAttribute("aria-checked", String(s.esp !== false));
+  $("s-esp").setAttribute("aria-checked", String(espOn(s)));
   $("esp-row").hidden = !projectionLoaded();
   $("s-mcp").setAttribute("aria-checked", String(s.mcp !== false));
   $("s-share").setAttribute("aria-checked", String(sharedOn));
@@ -1620,7 +1622,7 @@ function sharedDefaults(s) {
   else if (!samplingUntouched(s)) Object.assign(d, {temperature: +s.temperature, top_p: +s.top_p, top_k: +s.top_k});
   if (s.seed) d.seed = +s.seed;
   if (s.max) d.max_tokens = +s.max;
-  if (projectionLoaded()) d.experimental_speed_projection = s.esp !== false;
+  if (projectionLoaded() && s.esp != null) d.experimental_speed_projection = s.esp !== false;
   return d;
 }
 async function saveShared(on, s) {
@@ -1633,6 +1635,12 @@ async function saveShared(on, s) {
   }
   sharedOn = !!(await r.json()).shared;
 }
+// the switch's default for requests that leave it out (the server's config): censored unless it says otherwise
+function espDefault() {
+  const e = lastMetrics && lastMetrics.engine;
+  return e && typeof e.uncensored_default === "boolean" ? e.uncensored_default : true;   // an older server: on
+}
+function espOn(s = settings) { return s.esp == null ? espDefault() : s.esp !== false; }
 // the engine was started with the experimental-speed-projection control vector (INFO cvec=...)
 function projectionLoaded() {
   const c = lastMetrics && lastMetrics.engine ? lastMetrics.engine.cvec : 0;
@@ -1665,9 +1673,10 @@ $("s-apply").onclick = async () => {
   const locked = !!busy || !!panel;
   settings = {thinking: segValue("s-thinking") || "high", temperature: +$("s-temp").value, top_p: +$("s-topp").value,
               top_k: +$("s-topk").value, max: $("s-max").value.trim(), seed: $("s-seed").value.trim(),
-              math: checked("s-math"), show: checked("s-show"), esp: checked("s-esp"), mcp: checked("s-mcp"),
+              math: checked("s-math"), show: checked("s-show"), mcp: checked("s-mcp"),
               chatList: locked ? !!prev.chatList : checked("s-list"), chatEdit: locked ? !!prev.chatEdit : checked("s-edit"),
-              whileBusy: segValue("s-busy") || "wait"};
+              whileBusy: segValue("s-busy") || "wait",
+              esp: (checked("s-esp") === espDefault() ? undefined : checked("s-esp")), espv: 2};   // strata-nvfp4: undefined follows the server
   store.set("sampling", settings);
   StrataMath.reset();                                  // math on or off: every answer is drawn again
   if (settings.chatList !== !!prev.chatList) await setChatList(settings.chatList, true);

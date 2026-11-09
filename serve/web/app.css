@@ -114,6 +114,32 @@ main { flex: 1; min-height: 0; display: flex; }
 .ctx-gauge__pct { font-weight: var(--st-fw-black); font-size: var(--st-fs-xl); line-height: 1.1; font-variant-numeric: tabular-nums; }
 .bar-row { display: flex; justify-content: space-between; font-size: var(--st-fs-sm); font-weight: var(--st-fw-medium);
            margin-top: var(--st-s-2); font-variant-numeric: tabular-nums; }
+/* the GPUs card: one row per card - who it is, its role, load, VRAM, temperature and power */
+.gpu-card { display: flex; flex-direction: column; gap: var(--st-s-2); }
+.gpu-list { display: flex; flex-direction: column; }
+.gpu-row { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1.15fr) minmax(0, .7fr) minmax(0, 1fr)
+           minmax(0, 1.05fr) 86px; gap: var(--st-s-2) var(--st-s-4); align-items: center;
+           padding: var(--st-s-3) 0; border-top: 1px solid var(--st-line-soft); font-variant-numeric: tabular-nums; }
+.gpu-row:first-child { border-top: 0; }
+.gpu-row[data-role="unused"] .gpu-name, .gpu-row[data-role="unused"] .gpu-vitals { color: var(--st-ink-muted); }
+.gpu-id, .gpu-role, .gpu-bar { min-width: 0; }
+.gpu-name { font-weight: var(--st-fw-medium); font-size: var(--st-fs-md); overflow: hidden; text-overflow: ellipsis;
+            white-space: nowrap; }
+.gpu-idx { display: inline-block; min-width: 46px; margin-right: var(--st-s-2); font-weight: var(--st-fw-bold); color: var(--st-ink); }
+.gpu-id .small, .gpu-role .small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gpu-role .st-badge { margin-bottom: 2px; }
+.gpu-row .gpu-bar .bar-row { margin-top: 0; margin-bottom: 4px; }
+.gpu-link { display: flex; flex-direction: column; min-width: 0; font-size: var(--st-fs-sm); line-height: 1.35; }
+.gpu-link .small { overflow: hidden; text-overflow: ellipsis; }
+.gpu-link__main { font-weight: var(--st-fw-medium); white-space: nowrap; }
+.gpu-link--warn .gpu-link__main { color: var(--st-warn-text); }
+.gpu-link--warn .gpu-link__main::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+                                          background: var(--st-warn); margin-right: 6px; vertical-align: 1px; }
+.gpu-vitals { display: flex; flex-direction: column; align-items: flex-end; font-size: var(--st-fs-sm); line-height: 1.5;
+              white-space: nowrap; }
+.gpu-note:empty { display: none; }
+.gpu-note { margin: 0; }
+.copyable { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
 .req-card { display: flex; flex-direction: column; gap: var(--st-s-3); min-width: 0; }
 .table-wrap { overflow-x: auto; }
 /* Recent requests: keep headings, values and status badges on one line. */
@@ -132,11 +158,16 @@ main { flex: 1; min-height: 0; display: flex; }
 .cc-note { margin: 0; }
 .cc-note:empty { display: none; }
 .mcp-card { display: flex; flex-direction: column; gap: var(--st-s-3); }
-.cfg-form { display: grid; grid-template-columns: minmax(min(180px, 100%), max-content) minmax(0, 1fr); gap: var(--st-s-3) var(--st-s-4);
+/* label | control: a max-content label column took the card's width (a long help) and pushed the controls out */
+.cfg-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(180px, 280px); gap: var(--st-s-3) var(--st-s-5);
             align-items: center; }
-.cfg-form label { overflow-wrap: anywhere; font-size: var(--st-fs-sm); font-weight: var(--st-fw-medium); }
+.cfg-form label { font-size: var(--st-fs-sm); font-weight: var(--st-fw-medium); min-width: 0; overflow-wrap: anywhere; }
 .cfg-form label code { font: 400 12px var(--st-font-mono); color: var(--st-ink-muted); display: block; }
-.cfg-form .st-input { height: 38px; width: 100%; max-width: 360px; min-width: 0; }
+.cfg-form .st-input { height: 38px; width: 100%; min-width: 0; }
+.cfg-section { grid-column: 1 / -1; margin: var(--st-s-3) 0 0; padding-top: var(--st-s-4); border-top: 1px solid var(--st-line-soft);
+               font-size: var(--st-fs-xs); font-weight: var(--st-fw-bold); letter-spacing: .04em; text-transform: uppercase;
+               color: var(--st-ink-muted); }
+.cfg-section:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
 .cfg-actions { display: flex; align-items: center; gap: var(--st-s-3); }
 .mcp-server { display: flex; flex-direction: column; gap: var(--st-s-2); padding-top: var(--st-s-3); border-top: 1px solid var(--st-line-soft); }
 .mcp-server:first-child { padding-top: 0; border-top: 0; }
@@ -173,12 +204,19 @@ main { flex: 1; min-height: 0; display: flex; }
 .st-toast { animation: toast-in 180ms var(--st-ease); }
 @keyframes toast-in { from { opacity: 0; transform: translateY(6px); } }
 
+/* this fork: a newer strata-nvfp4 release, a quiet link in the header (GET /metrics "update") */
+.update-note { display: inline-flex; align-items: center; gap: 2px; font-size: var(--st-fs-sm); color: var(--st-ink-muted); white-space: nowrap; }
+.update-note a { color: inherit; text-underline-offset: 2px; }
+.update-note a:hover { color: var(--st-accent); }
+.update-note__hide { border: 0; background: none; color: inherit; font: inherit; font-size: 16px; line-height: 1; padding: 2px 6px; border-radius: var(--st-r-sm); cursor: pointer; }
+.update-note__hide:hover { color: var(--st-ink-soft); }
+
 /* ---------------------------------------------------------------- narrow screens */
 @media (max-width: 1000px) {
   .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .cc-bars { grid-template-columns: 1fr; }
-  .cfg-form { grid-template-columns: 1fr; gap: 4px; }
-  .cfg-form .st-input { margin-bottom: var(--st-s-2); }
+  .gpu-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .gpu-vitals { flex-direction: row; align-items: baseline; gap: var(--st-s-4); }
 }
 @media (max-width: 900px) {
   .monitor-row { grid-template-columns: minmax(0, 1fr); }
@@ -192,6 +230,7 @@ main { flex: 1; min-height: 0; display: flex; }
   .st-header .st-tabs { margin-left: 0; flex: 1 1 auto; min-width: 9rem; overflow-x: auto; }
   .st-tab { padding: 0 10px; }
   .st-tab .st-icon { display: none; }
+  .update-note { display: none; }               /* About > Model and engine still says it */
 }
 @media (max-width: 457px) {
   #unload-btn { min-width: 0; padding: 0 8px; }
@@ -215,6 +254,9 @@ main { flex: 1; min-height: 0; display: flex; }
   .st-msg__meta .st-btn--icon, .facts .st-btn--icon { width: 40px; height: 40px; }
   .st-composer__bar { flex-wrap: wrap; }
   .tool-call__pre, .st-code pre, .table-wrap { max-width: 100%; }
+  .cfg-form { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .cfg-form .st-input { margin-bottom: var(--st-s-2); }
+  .gpu-row { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 560px) {
   .metrics { grid-template-columns: minmax(0, 1fr); }

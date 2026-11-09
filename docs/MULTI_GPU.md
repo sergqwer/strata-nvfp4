@@ -334,3 +334,20 @@ cold 19.9K prompt; one run per arm (community report #1447, not repeated here).
 | `--pipeline-windows 2` | 136.7 | 2,097 |
 | `STRATA_PF_FUSED=1` | 137.2 | 1,913 |
 | pipeline-windows 2 + async + lag 2 + rotate + pf_fused | 142.0 | 2,302 |
+
+
+## This fork (strata-nvfp4): its own switches
+
+Upstream rewrote this page in 0.2.x; these are the fork's own parts of it, kept as they were (the rest of the
+fork - RoPE past 262K, image URLs, the NVFP4 defaults - is in [NVFP4.md](NVFP4.md)).
+
+The web page's Monitor tab has a **GPUs** card with one row per card of the PC: the engine's device number for it
+(CUDA0, ...), what it does (a stage and its layers with its expert cache, the peer tier, a helper cache, the image
+encoder, or nothing), its load, VRAM, temperature and power, and its PCIe link against the best the slot gives (a
+link under x8, narrower than the slot's, or a slower generation under load is marked; an idle card drops to Gen1 to
+save power, so that alone is not). The roles and each card's measured link come from the engine's start-up lines in
+its log; the cards are matched to the engine's devices by PCI bus id from its `CUDA_VISIBLE_DEVICES` and
+`CUDA_DEVICE_ORDER`. `/metrics` has the same under `"gpus"`, `/v1/status` under `machine.gpus`.
+`STRATA_GPU_POLL_S` sets how often the server reads the cards (default 1 s; 0 = never: the NVML query that #905 found
+stalling CUDA-graph branches on Linux). `STRATA_MOCK_GPUS=4` (or a fixture such as `gpus-mixed-roles.json` in
+`serve/fixtures`) shows fake cards, to check the page without them.

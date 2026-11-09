@@ -57,6 +57,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
                           src/kernels/cuda/router_top10.cu
                           src/kernels/cuda/quantize_act.cu
                           src/kernels/cuda/rope.cu
+                          src/kernels/cuda/rope_dynamic.cu
                           src/kernels/cuda/sampler.cu
                           src/kernels/cuda/s2_gemv_q8.cu
     src/kernels/cuda/s2_expert_grouped.cu
@@ -288,7 +289,8 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     src/core/remote_expert_opt.cu
     src/core/expert_cache.cpp src/core/native_head.cpp src/core/native_dense.cpp src/core/verify.cpp src/core/mtp.cpp src/core/dflash2.cpp
     src/core/conversation_snapshot.cpp src/core/conversation_state.cpp src/core/conversation_memory.cpp src/core/peer_experts.cpp
-    src/core/arch_defaults.cpp src/core/nv_defaults.cpp src/core/vmm.cpp src/core/conversation_file.cpp)
+    src/core/arch_defaults.cpp src/core/nv_defaults.cpp src/core/vmm.cpp src/core/conversation_file.cpp src/core/conversation_disk.cpp
+    src/core/rope_dynamic.cpp)
   target_include_directories(strata_engine PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_link_libraries(strata_engine PUBLIC strata_core strata_kernels strata_kernels_cpu ${_strata_gpu_runtime_target})
   if(STRATA_BUILD_TESTS AND STRATA_ENABLE_CUDA AND NOT STRATA_HIP_GFX906)
@@ -905,6 +907,18 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     target_include_directories(mmvq_multi_parity PRIVATE ${_strata_gpu_include_directories})
     target_link_libraries(mmvq_multi_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
     add_test(NAME mmvq_multi_parity COMMAND mmvq_multi_parity)
+    # strata-nvfp4 STRATA_MMVQ_V2: the Q8_0 decode GEMV (weights loaded first, grouped launches) bitwise the EXACT layout
+    add_executable(mmvq_v2_parity src/kernels/mmvq_v2_parity.cpp)
+    target_include_directories(mmvq_v2_parity PRIVATE ${_strata_gpu_include_directories})
+    target_link_libraries(mmvq_v2_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+    add_test(NAME mmvq_v2_parity COMMAND mmvq_v2_parity)
+    # strata-nvfp4: fetch_blobs / copy_rows_from_mapped / copy_i32_from_mapped: the same bytes as the mapped host memory,
+    # every 16 B source alignment, the range past the copy untouched (synthetic, GPU, no model)
+    add_executable(mapped_copy_parity src/kernels/mapped_copy_parity.cpp)
+    target_include_directories(mapped_copy_parity PRIVATE ${_strata_gpu_include_directories})
+    target_link_libraries(mapped_copy_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+    add_test(NAME mapped_copy_parity COMMAND mapped_copy_parity)
+    set_tests_properties(mapped_copy_parity PROPERTIES SKIP_RETURN_CODE 77)
     if(STRATA_HIP_GFX906)   # the CUDA layout, where the negative control has power (the wave64 one is exact at every T)
       add_test(NAME mmvq_multi_parity_cuda_layout COMMAND mmvq_multi_parity)
       set_tests_properties(mmvq_multi_parity_cuda_layout PROPERTIES ENVIRONMENT "STRATA_MMVQ_WAVE=0")
@@ -1030,6 +1044,12 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     target_link_libraries(gr_upmix_parity PRIVATE strata_prefill )
     add_test(NAME gr_upmix_parity COMMAND gr_upmix_parity)
     set_tests_properties(gr_upmix_parity PROPERTIES SKIP_RETURN_CODE 77)
+    # strata-nvfp4: the MoE combine fused with the hyper-connection write (moe_combine_write_norm_rs) against the two
+    # kernels, bit for bit (GPU, synthetic, no model)
+    add_executable(prefill_combine_write_test tests/cuda/prefill_combine_write_test.cpp)
+    target_link_libraries(prefill_combine_write_test PRIVATE strata_prefill )
+    add_test(NAME prefill_combine_write_test COMMAND prefill_combine_write_test)
+    set_tests_properties(prefill_combine_write_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
     # the two kernels of the layer-major prompt path (STRATA_PREFILL_LAYER_MAJOR=1, #3976): moe_shared_init and
     # moe_scatter_add against a host reference, bitwise for the scatter (GPU, synthetic, no model)
     add_executable(lm_kernels_parity src/prefill/lm_kernels_parity.cu)
@@ -1106,6 +1126,10 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   target_include_directories(gr_parity PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(gr_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
   add_test(NAME gr_parity COMMAND gr_parity --selftest)
+  add_executable(gr_v4_check src/kernels/gr_v4_check.cpp)
+  target_include_directories(gr_v4_check PRIVATE ${_strata_gpu_include_directories})
+  target_link_libraries(gr_v4_check PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+  add_test(NAME gr_v4_check COMMAND gr_v4_check --selftest)
 
   add_executable(gdn_parity src/kernels/gdn_parity.cpp)
   target_include_directories(gdn_parity PRIVATE ${_strata_gpu_include_directories})

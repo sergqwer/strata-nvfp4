@@ -86,6 +86,9 @@ import { apiPath } from './api-paths.mjs';
 import { findFreePort, listenProblem } from './ports.mjs';
 import { validateChatImages } from './chat-images.mjs';
 import { createTimeSkip, measureFolder, timeskipRevisionMessage, imageTypeOf } from './timeskip.mjs';
+// strata-nvfp4: attach mode (the model another process owns) and the fork's guards and update check
+import { createAttach, localEngineVersion } from './attach.mjs';
+import { forkBindCheck, forkGuard, forkRoot, forkUpdateCheck } from './fork.mjs';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
 const ROOT = resolve(HERE, '..');
@@ -103,6 +106,7 @@ const DIST = process.env.STRATA_DIST
     : join(ROOT, 'dist');
 const PORT = Number(process.env.STRATA_PORT ?? 8791);
 const HOST = process.env.STRATA_BIND ?? '127.0.0.1';
+try { const note = forkBindCheck(HOST); if (note) console.warn(note); } catch (e) { console.error(e.message); process.exit(2); }   // strata-nvfp4: loopback only
 /* The folder chats work in when nothing else is chosen. It is never the app's own folder (the host is started inside its install
    directory, so `process.cwd()` was "host" in the sidebar and the agent could read and write the app): the person's own
    Documents\Strata\Workspace (the models folder is next to it, not in it), created on first use, unless STRATA_WORKSPACE names one. */
@@ -167,7 +171,10 @@ if (control) {
     return answer && !answer.usable && bundledWrongMake ? { ...answer, notice: bundledWrongMake, wrongMake: true } : answer;
   };
 }
-const native=createNativeControl({control,ready:bundledEngine,appUpdater,hardwareProbe:()=>(hardware.cachedHardware()?.gpus??[]).map((g,n)=>({index:g.index??n,vram_gb:g.vramGb})),directory:store.DATA_DIR,modelsDirectory:()=>store.MODELS_DIR,nativeDataDirectory:store.nativeDataDirectory,beforeLoad:async()=>{if(models.REAL&&models.library().loaded){if(serving.state().requests.some(r=>runtimeModels.state().instances.some(i=>i.id===r.instanceId)&&["queued","generating"].includes(r.state)))throw new Error("Finish requests before switching engines.");await models.unload();runtimeState();}},requests:()=>serving.state().requests,changed:value=>hub.send('native',value)});
+// strata-nvfp4: with STRATA_ATTACH_URL / STRATA_ATTACH_CONFIG the host uses that running server and starts no engine (attach.mjs)
+const attached=createAttach({dataDir:store.DATA_DIR,requests:()=>serving.state().requests,changed:value=>hub.send('native',value),appVersion:()=>appVersion(),engineVersion:()=>localEngineVersion(forkRoot()),log:line=>console.log(line)});
+monitor.setAttachedLive(() => attached?.live?.() ?? null);   // strata-nvfp4 #16: attached server's live state on the Monitor tab
+const native=attached??createNativeControl({control,ready:bundledEngine,appUpdater,hardwareProbe:()=>(hardware.cachedHardware()?.gpus??[]).map((g,n)=>({index:g.index??n,vram_gb:g.vramGb})),directory:store.DATA_DIR,modelsDirectory:()=>store.MODELS_DIR,nativeDataDirectory:store.nativeDataDirectory,beforeLoad:async()=>{if(models.REAL&&models.library().loaded){if(serving.state().requests.some(r=>runtimeModels.state().instances.some(i=>i.id===r.instanceId)&&["queued","generating"].includes(r.state)))throw new Error("Finish requests before switching engines.");await models.unload();runtimeState();}},requests:()=>serving.state().requests,changed:value=>hub.send('native',value)});
 /* The agent: chats become DeepSeek Harness sessions when that component is installed. It is a separate
    pinned component (STRATA_HARNESS_DIR), not part of this host, so its absence is a visible capability
    state and the chat falls back to the direct path with a notice, never silently to another model. */
@@ -181,7 +188,7 @@ function withPictureAnswers(list) {
   const secrets = new Map(modelProviders.withSecrets().map(c => [c.id, c]));
   const connections = (list.connections ?? []).map(c => ({ ...c, models: c.models.map(m => {
     const asked = visionProbe.known(c, m.id);
-    if ((m.vision == null || m.reasoning == null) && asked === undefined && c.protocol === 'openai-chat' && secrets.has(c.id)) void visionProbe.check(secrets.get(c.id), m.id).catch(() => {});
+    if ((m.vision == null || m.reasoning == null) && asked === undefined && c.protocol === 'openai-chat' && secrets.has(c.id) && !(attached && c.baseUrl.replace(/\/v1$/, '') === attached.summary().url.replace(/\/v1$/, ''))) void visionProbe.check(secrets.get(c.id), m.id).catch(() => {});
     // Pictures are on unless the person or the server says no; a model that thinks says so too (OpenRouter's supported_parameters).
     return { ...m, reads: readsPicturesByDefault(m, asked), thinks: m.reasoning ?? visionProbe.knownThinks(c, m.id) ?? null };
   }) }));
@@ -213,7 +220,7 @@ const agent = createAgentBridge({
   bundledDir: resolve(HERE, '..', '..', 'harness'),
   defaultLocalId: () => native.defaultInstanceId(),
   localInstances: () => native.readyInstances().map(i => ({
-    id: i.id, label: i.label, baseUrl: `http://127.0.0.1:${i.port}/v1`, modelId: i.apiModelId,
+    id: i.id, label: i.label, baseUrl: i.url ?? `http://127.0.0.1:${i.port}/v1`, modelId: i.apiModelId,
     context: i.metrics?.engine?.max_context ?? i.context ?? undefined, key: i.key, vision: i.vision,
     // The engine's request slots: helper agents never outnumber them.
     slots: i.metrics?.live?.slots?.length || i.parallel || 1,
@@ -657,7 +664,7 @@ async function runTurn({ message, history = [], onFrame, signal, client, workspa
   if(native.hasLive()||nativeModelId){
     let instance;try{instance=native.resolveInstance(nativeModelId??native.state().defaultId);}catch(e){const message=plainNoModel(e.message);onFrame({type:'error',message});return {error:message};}const started=Date.now(),cancel=new AbortController();
     const entry=serving.open({client:client??'Strata chat',endpoint:'/chat/completions',model:instance.apiModelId,instanceId:instance.id,gpuIds:instance.gpus.map(String),cancel:()=>cancel.abort()});
-    try{serving.mark(entry.id,{state:'generating'});const applied=selectSkills(skillState,message,workspaceId);const result=await proxyCompletion({baseUrl:`http://127.0.0.1:${instance.port}/v1`,modelId:instance.apiModelId,authorization:instance.key,message,history,images,extra:{strata_mcp:useTools===true,...(thinkingBudget>0&&String(thinking).toLowerCase()!=='off'?{reasoning_budget_tokens:thinkingBudget}:{}),reasoning_effort:({off:'none',max:'high'}[String(thinking).toLowerCase()]??String(thinking).toLowerCase())},systemPrompt:[SYSTEM_PROMPT,skillInstructions(applied)].filter(Boolean).join('\n\n'),signal:signal?AbortSignal.any([signal,cancel.signal]):cancel.signal,onFrame:frame=>onFrame({...frame,requestId:entry.id,model:instance.label,contextMax:instance.metrics?.engine?.max_context??instance.context,skills:applied.map(s=>s.name)})});serving.mark(entry.id,{...result,usageSource:result.usageSource});serving.finish(entry.id,{tokensOut:result.tokensOut,durationMs:Date.now()-started});return result;}catch(e){serving.finish(entry.id,{durationMs:Date.now()-started,error:e.message});onFrame({type:'error',message:e.message,requestId:entry.id});return {error:e.message};}
+    try{serving.mark(entry.id,{state:'generating'});const applied=selectSkills(skillState,message,workspaceId);const result=await proxyCompletion({baseUrl:instance.baseUrl??`http://127.0.0.1:${instance.port}/v1`,samplingSetOnly:!!instance.attached,modelId:instance.apiModelId,authorization:instance.key,message,history,images,extra:{strata_mcp:useTools===true,...(thinkingBudget>0&&String(thinking).toLowerCase()!=='off'?{reasoning_budget_tokens:thinkingBudget}:{}),reasoning_effort:({off:'none',max:'high'}[String(thinking).toLowerCase()]??String(thinking).toLowerCase())},systemPrompt:[SYSTEM_PROMPT,skillInstructions(applied)].filter(Boolean).join('\n\n'),signal:signal?AbortSignal.any([signal,cancel.signal]):cancel.signal,onFrame:frame=>onFrame({...frame,requestId:entry.id,model:instance.label,contextMax:instance.metrics?.engine?.max_context??instance.context,skills:applied.map(s=>s.name)})});serving.mark(entry.id,{...result,usageSource:result.usageSource});serving.finish(entry.id,{tokensOut:result.tokensOut,durationMs:Date.now()-started});return result;}catch(e){serving.finish(entry.id,{durationMs:Date.now()-started,error:e.message});onFrame({type:'error',message:e.message,requestId:entry.id});return {error:e.message};}
   }
   runtimeState();
   let instance;
@@ -966,6 +973,7 @@ const server = http.createServer(async (req, res) => {
   const path = url.pathname;
   const method = req.method ?? 'GET';
 
+  if (forkGuard(req, res, { port: PORT, bind: HOST })) return;   // strata-nvfp4: Host allowlist, no CORS, no host /v1, no share/tunnel
   res.setHeader('access-control-allow-origin', '*');
   res.setHeader('access-control-allow-headers', 'content-type, authorization, x-api-key, x-strata-client');
   res.setHeader('access-control-allow-methods', 'GET, POST, PATCH, DELETE, OPTIONS');
@@ -1359,7 +1367,7 @@ async function api(req, res, path, method, url) {
     return token.length >= 32 && sameSecret(req.headers['x-strata-shutdown'], token);
   };
   // Which window the person is using: the page shows "Quit Strata" in browser mode only.
-  if (path === '/api/app/mode' && method === 'GET') return json(res, 200, appUi.state());
+  if (path === '/api/app/mode' && method === 'GET') return json(res, 200, { ...appUi.state(), fork: { attach: attached?.summary() ?? null, agent: agent.status().state !== 'unavailable' } });   // strata-nvfp4
   if (path === '/api/app/quit' && method === 'POST') {
     // A web page cannot send this header without the browser asking the host first, and the host refuses pages that are not local (above).
     if (!req.headers['x-strata-client']) return error(res, 403, 'Not allowed.');
@@ -1397,7 +1405,8 @@ async function api(req, res, path, method, url) {
     res.writeHead(200, { 'content-type': file.type, 'content-length': file.bytes.length, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); res.end(file.bytes); return undefined;
   }
 
-  if (path === '/api/setup' && method === 'GET') return json(res, 200, setupState());
+  if (path === '/api/setup' && method === 'GET') return json(res, 200, attached ? { ...setupState(), complete: true } : setupState());   // strata-nvfp4: attached: nothing to set up
+  if (attached && (path.startsWith('/api/engine/') || path.startsWith('/api/engines'))) return path === '/api/engine/first-run' ? json(res, 200, { status: 'unavailable', gpus: [] }) : error(res, 404, 'Not available: the attached server runs its own engine (strata-nvfp4 updates with update.cmd).');   // strata-nvfp4: no upstream engine install or switch in attach mode
   if (path === '/api/engine/first-run' && method === 'GET') {
     if (!control?.updateCheck) return json(res, 200, { status: 'unavailable', gpus: [] });
     const info = await engineFirstRun({ control, gpus: hardware.cachedHardware()?.gpus ?? [] });
@@ -1428,6 +1437,7 @@ async function api(req, res, path, method, url) {
     await pipeline(req, createWriteStream(target, { mode: 0o600 }));
     return json(res, 202, native.operation('install-engine-file', { path: target }));
   }
+  if (path === '/api/updates/check' && method === 'GET') return json(res, 200, await forkUpdateCheck());   // strata-nvfp4: this fork's releases, never upstream's feed
   if (path === '/api/updates/check' && method === 'GET' && control?.updateCheck) return json(res, 200, await checkComponentUpdates({ control, appUpdater, appVersion: process.env.STRATA_APP_VERSION || null }));
   if (path === '/api/updates/check' && method === 'GET') return json(res, 200, await checkUpdates({ appVersion:appVersionToShow(setupState().app.version,native.state().version), engineVersion:native.state().available?(native.state().installed?.engine?.version??null):(await engine.config()).engine.version }));
 
@@ -1662,7 +1672,7 @@ async function api(req, res, path, method, url) {
   if (cancelMatch && method === 'POST') return json(res, 200, serving.cancel(cancelMatch[1]));
 
   // --- monitor ------------------------------------------------------------
-  if (path === '/api/monitor') { monitor.watch(); if (url.searchParams.get('drives') === '1') monitor.watchDrives(); return json(res, 200, monitor.snapshot()); }
+  if (path === '/api/monitor') { if (url.searchParams.get('drives') === '1') attached?.watchMonitor?.(); monitor.watch(); if (url.searchParams.get('drives') === '1') monitor.watchDrives(); return json(res, 200, monitor.snapshot()); }
 
   // --- skills / workspace -------------------------------------------------
   if (path === '/api/skills' && method === 'GET') {
@@ -2109,6 +2119,7 @@ async function api(req, res, path, method, url) {
         res.end();
         return undefined;
       }
+      if (!(attached && capability.code === 'component-missing'))   // strata-nvfp4: attached, no agent component: plain chat, no notice
       res.write(`${JSON.stringify({ type: 'notice', code: 'agent-unavailable', message: `${capability.reason}`, ...(capability.detail ? { details: capability.detail } : {}) })}\n`);
     } else if (agentSkip && chatId && body.agent !== false && body.tools !== false && process.env.STRATA_AGENT !== 'off') {
       res.write(`${JSON.stringify({ type: 'notice', code: 'agent-skipped', message: agentSkip })}\n`);

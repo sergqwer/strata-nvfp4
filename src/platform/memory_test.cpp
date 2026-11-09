@@ -71,6 +71,71 @@ int file_cache_keeps_cases() {
     }
     return fail;
 }
+
+// ram88: the auto low-RAM rule and the page-file check (setup.py: test_setup_nvfp4's RamRule and PageFile)
+int ram_rule_cases() {
+    using namespace strata::platform;
+    int fail = 0;
+    const struct { double gib; bool low; } ram[] = {
+        {127.18, false}, {95.6, false}, {93.4, false}, {92.0, false}, {91.9, true}, {63.7, true}, {31.9, true}, {0, false}};
+    for (const auto& c : ram) {
+        const bool got = low_ram_auto((uint64_t) (c.gib * 1073741824.0));
+        std::printf("low_ram_auto %7.2f GiB -> %s%s\n", c.gib, got ? "low-RAM" : "arena", got == c.low ? "" : "   <-- WRONG");
+        fail |= got != c.low;
+    }
+    // 0.1.42-nvfp4.2: by the pack's size too (experts.bin GiB + 16)
+    const struct { double gib, experts; bool low, by_size; } packs[] = {
+        {127.18, 119.53, true, true}, {127.18, 103.13, false, false}, {127.18, 63.28, false, false},
+        {95.6, 63.28, false, false}, {95.6, 103.13, true, true}, {91.9, 63.28, true, false}, {255.7, 119.53, false, false},
+        {0, 119.53, false, false}};
+    for (const auto& c : packs) {
+        const uint64_t in = (uint64_t) (c.gib * 1073741824.0), ex = (uint64_t) (c.experts * 1073741824.0);
+        const bool got = low_ram_auto(in, ex), by = low_ram_by_size(in, ex);
+        std::printf("low_ram_auto %7.2f GiB, experts %7.2f GiB -> %s%s%s\n", c.gib, c.experts, got ? "low-RAM" : "arena",
+                    by ? " (by size)" : "", got == c.low && by == c.by_size ? "" : "   <-- WRONG");
+        fail |= got != c.low || by != c.by_size;
+    }
+    const struct { const char* line; bool ok; char drive; int64_t initial, max; } lines[] = {
+        {"c:\\pagefile.sys 64000 64000", true, 'C', 64000, 64000},
+        {"D:\\pagefile.sys 16000 64000", true, 'D', 16000, 64000},
+        {"C:\\pagefile.sys 0 0", true, 'C', -1, -1},
+        {"C:\\pagefile.sys", true, 'C', -1, -1},
+        {"?:\\pagefile.sys", true, '?', -1, -1},
+        {"", false, 0, 0, 0},
+    };
+    for (const auto& c : lines) {
+        char d = 0;
+        int64_t i = 0, m = 0;
+        const bool ok = parse_paging_file(c.line, d, i, m);
+        const bool right = ok == c.ok && (!ok || (d == c.drive && i == c.initial && m == c.max));
+        std::printf("parse_paging_file \"%s\" -> %d %c %lld %lld%s\n", c.line, (int) ok, d ? d : '-', (long long) i,
+                    (long long) m, right ? "" : "   <-- WRONG");
+        fail |= !right;
+    }
+    // MB as the dialog counts them.  Only what is there for sure: the size now, or a larger initial size (#60)
+    const struct { const char* what; int64_t initial, max; uint64_t free, cur, want; bool grows; } pf[] = {
+        {"set 64000, on the disk", 64000, 64000, 900000, 64000, 64000, false},
+        {"set 16000", 16000, 16000, 900000, 16000, 16000, false},
+        {"16000-64000: its initial size", 16000, 64000, 900000, 16000, 16000, true},
+        {"16000-64000, grown to 30000 now", 16000, 64000, 900000, 30000, 30000, true},
+        {"system-managed, now 6000", -1, -1, 900000, 6000, 6000, true},
+        {"set 64000, the file still 16000", 64000, 64000, 900000, 16000, 64000, false},
+        {"set 64000, the file 16000, 20000 free", 64000, 64000, 20000, 16000, 36000, false},
+        {"none on the drive", -1, -1, 900000, 0, 0, true},
+    };
+    for (const auto& c : pf) {
+        const uint64_t got = page_file_guaranteed_mb(c.initial, c.free, c.cur);
+        const bool grows = page_file_grows(c.initial, c.max);
+        std::printf("page_file_guaranteed_mb %-40s -> %llu%s%s\n", c.what, (unsigned long long) got,
+                    grows ? " (grows on demand)" : "", got == c.want && grows == c.grows ? "" : "   <-- WRONG");
+        fail |= got != c.want || grows != c.grows;
+    }
+    const PageFiles here = page_files();
+    std::printf("page_files here: known=%d total %llu MB for sure, grows=%d (%s)%s\n", (int) here.known,
+                (unsigned long long) here.total_mb, (int) here.grows, here.detail.c_str(),
+                here.known && here.total_mb < kPageFileWarnMb ? " - the engine warns" : "");
+    return fail;
+}
 }  // namespace
 
 // #3237: the drive probe's decision
@@ -102,7 +167,7 @@ int file_tier_prefers_direct_cases() {
 }
 
 int main() {
-    int fail_keeps = file_cache_keeps_cases() | file_tier_prefers_direct_cases();
+    int fail_keeps = file_cache_keeps_cases() | file_tier_prefers_direct_cases() | ram_rule_cases();
     const uint64_t bytes = 256ull << 20;
     void* p = std::malloc(bytes);
     if (p == nullptr) return 2;

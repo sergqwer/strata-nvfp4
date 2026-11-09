@@ -50,6 +50,12 @@ NETWORK_ALLOWED = {
     ("strata_control/components.py", "urlopen"): "the component fetcher: only `strata install`/UPDATE call it",
     ("strata_control/dsv41_engine.py", "urlopen"): "the DeepSeek engine's one 10-second 'is the feed reachable' check, called only by strata launch and "
                                                   "setup (test_the_deepseek_engine_check_is_reached_only_from_launch_and_setup); never while serving",
+    # strata-nvfp4: the server's update notice - not an acquisition: no download, no install, off by a switch
+    ("strata_control/fork_release.py", "urlopen"): "strata-nvfp4's update notice: at most once a day the latest "
+                                                   "release's tag (a version, read only; STRATA_UPDATE_CHECK=0 off)",
+    # strata-nvfp4: the new interface's start (run config "app_ui"): its own loopback /api/health, then one log line
+    ("serve/app_ui.py", "urlopen"): "strata-nvfp4's new interface beside the server: polls the host it started on "
+                                    "127.0.0.1 for /api/health (loopback only, no download)",
 }
 #: Modules that import the installer on purpose, with the explicit command that reaches them.
 INSTALLER_IMPORT_ALLOWED = {

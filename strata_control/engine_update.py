@@ -124,7 +124,10 @@ def start_daily_check(on_done: Callable[[], None] | None = None, root=None, *, f
                 from strata_cli import update_cmd
                 from strata_control import signing
                 base = Path(root) if root else ec.components_dir()
-                ctx = updater.Context(components=base, source=update_cmd._feed_source(argparse.Namespace(feed=feed), base), trusted=signing.load_trusted_keys(),
+                source = update_cmd._feed_source(argparse.Namespace(feed=feed), base)
+                if source is None:                   # strata-nvfp4: no feed (upstream's is guarded off): no daily check
+                    return None
+                ctx = updater.Context(components=base, source=source, trusted=signing.load_trusted_keys(),
                                       hardware=updater.detect_hardware(), feed_timeout=CHECK_TIMEOUT_S, serving=lambda: [])
                 return updater.check(ctx)
             if refresh_cache(check, root) and on_done is not None:
