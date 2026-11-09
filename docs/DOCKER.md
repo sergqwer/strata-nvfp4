@@ -315,7 +315,7 @@ The images are built from the **engine packages of a release**, never from a bui
 files the signed update feed names. Nothing publishes by itself: a maintainer starts the workflow, after the owner's OK.
 
 1. Make the release first (its `strata-feed.json`, `strata-feed.json.sig` and the engine archives must be on the GitHub release).
-2. GitHub, **Actions, Docker images, Run workflow** ([.github/workflows/docker-images.yml](../.github/workflows/docker-images.yml); the file has to be on
+2. GitHub, **Actions, Docker images, Run workflow** (upstream's `.github/workflows/docker-images.yml`, which this fork does not carry; the file has to be on
    the default branch to show up). Inputs: the release tag (`v0.2.7`), the flavors (empty: every flavor the release has a package
    for), **push** and **latest**. Run it once with **push off**: it builds every image and publishes nothing (a dry run).
 3. Run it again with **push on**. It logs in to `ghcr.io` with the job's `GITHUB_TOKEN` (`packages: write`) and pushes
