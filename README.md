@@ -2,7 +2,7 @@
 
 **Qwen3.8-Flash-Next (125B hybrid MoE) with NVFP4 experts on one RTX 20, 30, 40 or 50 card (12 GB of VRAM or more)
 and 64 GB of RAM or more, text and pictures.** A fork of [Niko1221/Strata](https://github.com/Niko1221/Strata), on
-upstream 0.2.0-beta (its engine, server and setup; not its app or installers). Setup installs, ready-made from Hugging Face, the original Qwen in NVFP4 (our GPTQ, or NVIDIA's
+upstream 0.2.13 (its engine, server and setup; not its app or installers). Setup installs, ready-made from Hugging Face, the original Qwen in NVFP4 (our GPTQ, or NVIDIA's
 checkpoint converted), censored as Qwen ships it; on ours an opt-in switch turns the censorship off. Upstream's GGUF
 models are still offered.
 
@@ -61,6 +61,24 @@ files by hand.
 
 ## What's new
 
+- **On upstream 0.2.13 (0.2.13-nvfp4.1).** Upstream's engine, server and setup of 0.2.1 to 0.2.13 (the engine reports
+  0.1.59) under this fork's NVFP4 models. One GPU and one dialog give the same bits as 0.2.0-beta-nvfp4.3 at 2K and 32K;
+  decode and a 32K prompt run at the same speed as 0.2.0-beta-nvfp4.3 on the 5090 (12.2 ms a round both;
+  the 32K prompt 8,589 tokens/s both)
+  ([the port and its checks](docs/NVFP4.md#upstream-0213-2026-11-09-release-0213-nvfp41)). New in this fork:
+  - **#20 fixed:** a model copy that is page-locked slice by slice (a 64 GiB Mix, for example) no longer stops with
+    "adaptive swap copy failed ... invalid argument". Each expert that spans two slices gets its own page-locked copy.
+  - **#15 / #16:** the browser interface attached to a server (a tray's, for example) shows the server's tools. Its
+    Monitor shows the server's live numbers, but asks for them only while the Monitor tab is open, and first asks the
+    keyless `/health`. An idle page never wakes a sleeping model.
+  - Upstream's new defaults that change answers and were not measured on NVFP4 stay at 0.2.0's behaviour: the PCIe
+    share that follows the CPU's speed, the pool-sized PCIe start, the server's wider verify window, and the async
+    adaptive tier that switches itself on. Each has its variable
+    ([which](docs/NVFP4.md#upstream-0213-2026-11-09-release-0213-nvfp41)).
+  - Behaviour change from upstream: a call to a tool the request did not declare now arrives as text;
+    `"undeclared_tool_calls": "call"` restores the old behaviour. This fork's opt-in `tool_name_repair` gave way to
+    upstream's tool-name aliases.
+  - Setup: upstream's UD-Q3_K_XL (4 files) replaces this fork's 3-file one.
 - **0.2.0-beta-nvfp4.3: upstream 0.2.0's new interface, in your browser.** The release folder's `start-server.cmd` now also
   starts upstream Strata's app page on **http://127.0.0.1:8791** once the model is ready, and opens it: chat with
   pictures and the thinking switch, chats kept by the browser, skills, workspaces and the Monitor with the engine's own

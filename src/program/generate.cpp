@@ -209,7 +209,7 @@ bool draft_vocab_whole_head();       // STRATA_METAL_DRAFT_VOCAB=full
 
 namespace strata::program {
 // strata-nvfp4 0.2.13: upstream defaults that change answers and were not measured on this fork's NVFP4 setup are pinned to
-// 0.2.0-beta's behaviour here; setting the variable (any value) takes upstream's meaning back:
+// 0.2.0-beta's behaviour here; upstream's values set by hand bring upstream's behaviour back (1 / 0.95 / 1, new, 12):
 //   STRATA_PCIE_K_RULE / STRATA_PCIE_SHARE_MAX / STRATA_PCIE_AUTO_SPLIT (0.2.11: the PCIe share follows the CPU's speed,
 //     ceiling 0.95; upstream's own agent tasks went 7/6 -> 4/5, KL 0.0316) -> 0, 0.60, 0;
 //   STRATA_PCIE_START (0.2.10: PcieAuto starts from the pool size; flips near-tie tokens in the first windows) -> old;

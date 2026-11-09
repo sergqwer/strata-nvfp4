@@ -1663,18 +1663,10 @@ fork - RoPE past 262K, image URLs, the NVFP4 defaults - is in [NVFP4.md](NVFP4.m
   ordinary requests had no rewrite. A client's `stop` / `stop_sequences` naming the token's text still stops there.
   `"stop_token_text": false` in `strata-<model>.json` turns it off.
 
-- **Undeclared tool names repaired (opt-in).** `"tool_name_repair": true` in `strata-<model>.json` (from
-  ANBAL534's fork, 9453382a). The model sometimes names a call after the template's own block: it wraps a real call
-  in `<function=tools>` (the `<tools>` block's word) or writes `tools/write_stdin` (that word as a prefix). A call
-  naming a tool the request did not declare goes out as that call; routers reject it (seen through OpenCodex:
-  "routed provider emitted undeclared client tool 'tools'") and the stream dies mid-turn. With the switch on, the
-  name is mapped to the declared tool it plainly meant - case, spacing, quotes, `ns.tool` for `ns__tool`, the block
-  word as a prefix, or a suffix of at least 4 characters that exactly one declared tool ends with - a declared call
-  nested inside a "tools" wrapper is taken as the call, and one tool declared with no name written is that call.
-  What cannot be mapped becomes the text it is: the turn completes and the agent loop goes on. Off by default,
-  because the suffix rule guesses (`fetch` becomes `WebFetch` when that is the only declared tool ending in it)
-  and an unmappable call turns into text instead of a call the client may still run. Checked by
-  `serve/test_undeclared_tool_name.py` (the live wrapper shapes fed 3 characters at a time).
+- **Undeclared tool names (since 0.2.13-nvfp4.1: upstream's rules).** The fork's opt-in `"tool_name_repair"`
+  (from ANBAL534's fork) gave way to upstream's own alias table (namespaced forms, `ns__tool`, the `tools.` /
+  `functions.` prefixes). A call to a tool the request did not declare stays text (upstream #804);
+  `"undeclared_tool_calls": "call"` sends it as a call. An older config's `"tool_name_repair"` is accepted and ignored.
 
 `STRATA_PARK_REWIND_MAX=N` (opt-in, off unless set; Xiaomi2008 8e4ccbe9): a request that resumes from a checkpoint of
 the conversation the session itself holds, leaving N tokens or fewer of it behind, does not park the session first.

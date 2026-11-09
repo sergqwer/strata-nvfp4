@@ -378,6 +378,72 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### Upstream 0.2.13 (2026-11-09, release 0.2.13-nvfp4.1)
+
+The fork moves from upstream 0.2.0-beta to upstream 0.2.13 (the engine reports 0.1.59). As before, the release takes
+upstream's engine, server and setup; upstream's desktop app, Terminal and installers are not part of it. The port went
+the usual way (port-fork.md). The fork's 217 commits since 0.2.0-beta were cherry-picked onto the tag, which gave 195
+commits; 22 were already in upstream and came out empty. 58 files that both sides changed were each carried over as one
+3-way merge. Upstream now vendors its ggml (`third_party/strata-ggml`, the same commit this fork built against), so
+`release/build-release.cmd` no longer needs a llama.cpp checkout.
+
+- **New upstream defaults that change answers are pinned to 0.2.0's behaviour.** None of them was measured on NVFP4.
+  Each has its switch, so the upstream behaviour is one variable away:
+  - the PCIe share that follows the CPU's speed: `STRATA_PCIE_K_RULE`, `STRATA_PCIE_SHARE_MAX`,
+    `STRATA_PCIE_AUTO_SPLIT` (here 0 / 0.60 / 0);
+  - the pool-sized start of the PCIe share: `STRATA_PCIE_START` (here `old`);
+  - the server's wider verify window: `STRATA_LOOKUP_MAX_T` (here 0);
+  - the async adaptive tier that turns itself on: `STRATA_ADAPT_ASYNC` (here off when unset; `auto` = upstream's rule).
+    Upstream says it is not bit-exact from run to run.
+
+  Taken as they are: penalties count only the reply's tokens (#4590, a fix; `STRATA_PENALTY_PROMPT=1` is the old way),
+  and tool-call recovery (it changes how a reply is parsed, not its tokens). Upstream's GR v3, IMMA prompt attention
+  and the 32,768 prompt chunk were already this fork's defaults. Drafting `auto` picks DFlash2 only for upstream's GGUF
+  names, so this fork's NVFP4 configs keep `--mtp`.
+- **Taken from upstream, ours dropped:**
+  - the conversation-cache id order (#1503's equivalent), the hyper-connection and prompt-attention kernels, and the
+    element-wise copies;
+  - the graph-OOM retry in verify (#3702). This fork's batch-OOM relief now sits inside it;
+  - the arena thread now uses upstream's fallback loop when RAM runs short (#4846, #5327). This fork's adaptive-tier
+    defaults (2 / 0.92 / 192) stay;
+  - tool names: this fork's opt-in `tool_name_repair` is gone. Upstream matches names through its own alias table
+    (namespaced forms, `__`, the `tools.` / `functions.` prefixes). The old key is still accepted and ignored.
+    **Behaviour change:** a well-formed call to a tool the request did not declare now arrives as text (upstream's
+    #804). `"undeclared_tool_calls": "call"` restores the old behaviour. Deferred tools (Claude Code's tool search) are
+    calls either way. Python `True`/`False` in a call's arguments still become booleans.
+- **Fixed in this fork:**
+  - **#20:** a 64 GiB Mix copy failed with `adaptive swap copy failed ... invalid argument`. Path 2 of the RAM copy
+    page-locks the copy slice by slice, so a few experts start in one registration and end in the next, and CUDA
+    refuses a single copy that spans two registrations. Each such expert now gets its own page-locked copy, made once
+    at load and logged on one line. Its numbers stay the same, and the pinned count does not change.
+  - **#15 / #16:** the new interface in attach mode now shows the server's tools and the Monitor's live numbers. Those
+    numbers come from the server only while the Monitor tab is open. The interface first asks the server's keyless
+    `/health`, and sends the keyed `/metrics` only if a model is loaded. An idle page sends the server nothing, so a
+    tray's idle unload is never undone by the page.
+- **Setup:** this fork's families and NVFP4 packs as before. Upstream's UD-Q3_K_XL (4 shards, v3.1) replaced this fork's
+  3-shard file; installing it again downloads 89.5 GB. Upstream's new families are offered as upstream offers them.
+- **The update guard.** `strata update`, upstream's daily engine check (it no longer runs without a feed named) and the
+  interface's "Check for updates" use this fork's releases; upstream's feed is used only when it is named.
+- **Checks** (RTX 5090 + Ryzen 9 9950X3D, 128 GB; release build f5537be6, portable 75/86/89/120, CUDA 13.3):
+  - the port check's identity form (`--expert-cache 6000`, CPU share 0.5, PCIe share 0.25, qwen-nvfp4-gptq): the 2K and
+    32K prompts give logits and 32 greedy tokens bit-identical to 0.2.0-beta-nvfp4.3's engine;
+  - with this fork's defaults off (`STRATA_GDN_CHUNKED=0 STRATA_PREFILL_NVFP4=w4a8 STRATA_KV_ROT=0
+    STRATA_ROPE_TABLE=0 STRATA_PREFILL_BF16X2=0`, the fork-only switches off, the pinned variables at upstream's
+    values and `--adapt-every 4 --adapt-swaps 96 --adapt-decay 0.7`), the engine gives upstream 0.2.13's own build's
+    bits at 2K and 32K;
+  - decode against 0.2.0-beta-nvfp4.3's engine (the tray's, 56042c6e), 5 interleaved pairs of 1,000 tokens, the expert
+    cache sized by itself: 12.24 against 12.18 ms a round, 194.7 against 195.9 tokens/s (medians; per pair 0.85-1.02x,
+    median 0.99x: the same within the noise; one slow pair had a slow CPU pool), cache hits 92.7 / 92.8%. The 32K
+    prompt: 3,730 ms both (8,589 tokens/s);
+  - the engine tests: 280 of 284 pass or skip. flag_order_test and gemm_w16_parity are upstream's own and do not
+    compile with MSVC; ple_parity needs model files. cuda_spill_guard (new upstream, a stack-use allowlist) fails on
+    clean upstream's own sm_120 kernels on this compiler as well, and in addition on 12 of this fork's kernels
+    (8-80 bytes of stack). The server's tests: 1,637 OK. The interface's tests: 1,654, one failure, which clean
+    upstream has too on a CRLF checkout (#4783's text test);
+  - the tray's GPTQ config starts through the server in 13 s and answers (57 tokens in 0.7 s); every expert in RAM,
+    PLE probe 823,340 rows/s, tail skip off, the censorship switch loaded (layers 8-33): 4 of 4 held-out prompts refused
+    with it off, 0 of 4 with it on.
+
 ### The new interface in the browser (2026-10-20, release 0.2.0-beta-nvfp4.3)
 
 Upstream 0.2.0 ships a new React app (`apps/host`) inside a desktop program (Tauri). This fork runs the same page in
