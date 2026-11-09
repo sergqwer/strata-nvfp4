@@ -67,7 +67,8 @@ files by hand.
   the 32K prompt 8,589 tokens/s both)
   ([the port and its checks](docs/NVFP4.md#upstream-0213-2026-11-09-release-0213-nvfp41)). New in this fork:
   - **#20 fixed:** a model copy that is page-locked slice by slice (a 64 GiB Mix, for example) no longer stops with
-    "adaptive swap copy failed ... invalid argument". Each expert that spans two slices gets its own page-locked copy.
+    "adaptive swap copy failed ... invalid argument". Each place in the copy that crosses a slice's edge gets its own
+    page-locked copy, kept up to date as the adaptive tier moves experts in and out of it.
   - **#15 / #16:** the browser interface attached to a server (a tray's, for example) shows the server's tools. Its
     Monitor shows the server's live numbers, but asks for them only while the Monitor tab is open, and first asks the
     keyless `/health`. An idle page never wakes a sleeping model.
