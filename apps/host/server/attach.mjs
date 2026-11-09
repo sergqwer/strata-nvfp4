@@ -16,6 +16,10 @@
  *   - keyed requests (GET /metrics for the Monitor, GET /v1/models when /health does not name the model) only within
  *     30 s of the server answering /health or of a chat that finished, and the Monitor's /metrics (while a chat runs
  *     and 30 s after it) each time right after /health answered: never while the server is not known to be up;
+ *   - while the Monitor screen is open (its own GET /api/monitor?drives=1, every 10 s while visible: watchMonitor), the
+ *     keyless /health every 2 s, and the keyed /metrics right after it answered - but only while it says the model is
+ *     loaded: a model the tray has unloaded (or a server that does not answer) gets no keyed request (fork #16, so
+ *     requests from other clients show in the Monitor);
  *   - nothing at all while the page sits idle. Only the person's chat (the native chat path, index.mjs) wakes a model.
  * Unload detaches (the host stops using the server; choosing the model again re-attaches it); the server keeps running.
  */
@@ -24,6 +28,7 @@ import { join } from 'node:path';
 
 export const ATTACHED_ID = 'attached';
 export const UP_WINDOW_MS = 30_000;
+export const MONITOR_WINDOW_MS = 15_000;   // the Monitor screen asks every 10 s while it is open and visible
 const TICK_MS = 2000;
 const PROBE_MIN_MS = 2000;
 const PROBE_MAX_MS = 300_000;
@@ -68,7 +73,8 @@ export function createAttach({ env = process.env, dataDir, requests = () => [], 
   const sent = { keyless: 0, keyed: 0 };
   const logs = [];
   let chatActive = false, upUntil = 0, everUp = false, lastHealth = 0, nextProbe = 0, probeDelay = PROBE_MIN_MS, lastMetrics = 0, lastChatEnd = 0;
-  let metrics = null, detached = false, health = 'unknown', closing = false, error = null;
+  let metrics = null, detached = false, health = 'unknown', closing = false, error = null, monitorUntil = 0, mcp = null, lastMcp = -Infinity;
+  const watching = () => now() < monitorUntil;
   const note = line => { logs.push({ at: new Date(now()).toISOString(), instanceId: ATTACHED_ID, line: String(line).slice(0, 500) }); if (logs.length > 200) logs.shift(); log(`[attach] ${line}`); };
 
   function saveSeen() {
@@ -122,11 +128,20 @@ export function createAttach({ env = process.env, dataDir, requests = () => [], 
 
   async function poll(force = false) {
     // the Monitor's numbers: while a chat runs and for 30 s after it ended (and once when the server first answers)
-    if (!force && (now() - lastMetrics < TICK_MS || !(chatActive || now() < lastChatEnd + UP_WINDOW_MS))) return;
+    if (!force && (now() - lastMetrics < TICK_MS || !(chatActive || now() < lastChatEnd + UP_WINDOW_MS || watching()))) return;
     if (!keyedAllowed()) return;
+    // the Monitor alone (no chat of the person's): never a keyed request to a model the server says is not loaded (#16)
+    if (!chatActive && !(now() < lastChatEnd + UP_WINDOW_MS) && seen.loaded === false) return;
     lastMetrics = now();
     try {
       metrics = await get('/metrics', { keyed: true });
+      // fork #15: the chat's Tools switch reads metrics.mcp, which native-control.mjs fills from GET /mcp; the same
+      // splice here (a server without a hub answers 404 and keeps none), the list read again every 30 s at most
+      if (now() - lastMcp >= UP_WINDOW_MS) {
+        lastMcp = now();
+        try { mcp = await get('/mcp', { keyed: true }) ?? null; } catch { mcp = null; }
+      }
+      if (mcp) metrics = { ...metrics, mcp };
       if (Number(metrics?.engine?.max_context) > 0) seen.context = Number(metrics.engine.max_context);
       emit();
     } catch (e) { if (e.status === 401 || e.status === 403) error = 'The model server refused the API key. Check the key this interface was started with.'; }
@@ -153,7 +168,7 @@ export function createAttach({ env = process.env, dataDir, requests = () => [], 
       const { active, lastOk } = chatActivity();
       chatActive = active;
       if (lastOk > lastChatEnd) { lastChatEnd = lastOk; upUntil = Math.max(upUntil, lastOk + UP_WINDOW_MS); }
-      if (active || now() < lastChatEnd + UP_WINDOW_MS) {
+      if (active || now() < lastChatEnd + UP_WINDOW_MS || watching()) {
         // the key only right after the server answered the keyless /health: a model stopped or unloaded since the chat
         // (a tray's Stop, its idle unload) is never woken by the Monitor
         if (now() - lastHealth >= TICK_MS) { if (await probe()) await poll(); else upUntil = 0; }
@@ -189,6 +204,10 @@ export function createAttach({ env = process.env, dataDir, requests = () => [], 
   const refuse = async () => { throw new Error(NOT_HERE); };
   return {
     state, refresh: async () => state(), tick, probe,
+    /** The Monitor screen is open (fork #16): read the server's state for MONITOR_WINDOW_MS (see the doorbell rule above). */
+    watchMonitor() { if (detached || closing) return; const was = watching(); monitorUntil = now() + MONITOR_WINDOW_MS; if (!was) void tick(); },
+    /** The attached server's live state for the Monitor (its /metrics "live"), or null when it is not being read. */
+    live: () => (!detached && metrics?.live && (watching() || chatActive || now() < lastChatEnd + UP_WINDOW_MS) ? { ...metrics.live } : null),
     resolveInstance(id) {
       if (detached) throw new Error('The model is detached. Choose it again in the chat header to use it.');
       if (id && ![ATTACHED_ID, seen.model].includes(id)) throw new Error('Choose a loaded model ID.');
@@ -197,6 +216,10 @@ export function createAttach({ env = process.env, dataDir, requests = () => [], 
     hasLive: () => !detached, readyInstances: () => detached ? [] : [{ ...instance(), baseUrl: settings.url, key: settings.key }],
     async unload() { detached = true; metrics = null; note('detached (the server keeps running)'); emit(); return state(); },
     setDefault() { if (detached) { detached = false; note('attached again'); } emit(); return state(); },
+    // upstream 0.2.x calls these on the model control too (the default model, the engine-restart notice, moving the models
+    // folder): the attached model is the default; nothing to restart or move here
+    defaultInstanceId: () => (detached ? null : ATTACHED_ID), dismissRestart: () => state(), interruptedMove: async () => null,
+    finishInterruptedMove: refuse, leaveInterruptedMove: refuse, planModelsFolder: refuse, startModelsFolder: refuse,
     operation: () => { throw new Error(NOT_HERE); }, cancel: refuse, plan: refuse, configure: refuse, setDownloadDirectory: () => { throw new Error(NOT_HERE); },
     settings: () => { throw new Error(NOT_HERE); }, save: () => { throw new Error(NOT_HERE); }, settingsFile: () => { throw new Error(NOT_HERE); }, openSettingsFile: refuse, localPreview: refuse,
     tuneStatus: refuse, tuneEffective: async () => ({ applied: false, preset: null, changed: {} }), tuneOff: refuse,

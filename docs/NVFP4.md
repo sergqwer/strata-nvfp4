@@ -290,6 +290,10 @@ the difference; a ballast process instead does not work under WDDM, which moves 
 Decode falls toward what the CPU pool alone carries (~57 tok/s on this CPU and DDR5-5600); a real card's own speed
 and PCIe generation come on top.
 
+262K does fit a 12 GB card with `--kv-resident 32768`: the whole K/V sits in pinned RAM (3.09 GiB at 262K), each
+layer keeps 32,768 cells of it in VRAM, and the freed VRAM goes to expert slots; decode stays at ~42-44 tok/s. A community measurement (an RTX 4070 SUPER 12 GB on
+Windows 11 with 0.2.0-beta-nvfp4.3, issue #19), not repeated here.
+
 ### Images (2026-09-30)
 
 Upstream's vision path (`--vision`, the `strata-vision` helper on llama.cpp's mtmd, M-RoPE positions for image

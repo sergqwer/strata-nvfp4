@@ -10,6 +10,7 @@ used from the next start on.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 
@@ -18,8 +19,8 @@ from strata_control import atomic as _atomic_mod
 
 # (key, kind, help).  kind: "bool", "int>=0", "num>=0", ("enum", values), "names", or ("sampling", check) for a key
 # of the "sampling" block, ("arg", flag) for an engine option kept in "args" (a whole number; ("arg", flag, "text"): a
-# string, ("arg", flag, "flag"): an option without a value, on or absent), ("count", lo, hi) for a whole number the
-# page offers as a list.
+# string, ("arg", flag, "flag"): an option without a value, on or absent; "context" and "rope": --max-context and
+# --rope-scaling, kept together with --rope-scale), ("count", lo, hi) for a whole number the page offers as a list.
 EDITABLE = [
     ("sampling.temperature", ("sampling", "num>=0"),
      "Default temperature for requests that send none (0 = greedy; without it the model card's: 1.0 thinking, 0.7 not)"),
@@ -45,6 +46,10 @@ EDITABLE = [
     ("engine_silence_s", "num>=0", "End a request when the engine says nothing for this long (default 300 s, 0 = wait)"),
     ("api_monitor", "bool", "Keep the last 100 requests' prompts and answers in memory for /api-monitor"),
     ("open_browser", "bool", "Open the chat page in the browser when the model is ready"),
+    # this fork: the start's update notice (serve/server.py start_update_check)
+    ("update_check", "bool",
+     "Say when a newer strata-nvfp4 release is published (GitHub is asked at most once a day; on by default; nothing "
+     "is downloaded or installed)"),
     ("vram_reserve_mib", ("arg", "--vram-reserve-mib"),
      "VRAM in MiB the engine leaves free for other programs (engine default 700)"),
     # this fork: dialogs at once (server.parallel_args: "parallel": N -> --batch N; 1 or absent: one at a time)
@@ -67,14 +72,26 @@ EDITABLE = [
     ("conversation_disk_persist", ("arg", "--conversation-disk-persist", "flag"),
      "Keep the dialogs on the disk for the next start (off: removed when the model stops, and after 30 minutes). "
      "Saved after 60 s without requests, so closing Strata's window loses at most what came after"),
+    # the context, and past the trained one the RoPE extension setup writes there (setup.py resolve_rope)
+    ("max_context", ("arg", "--max-context", "context"),
+     "Context size in tokens: the longest dialog. More takes more VRAM for its K/V, taken from the expert cache "
+     "(3.35 GiB at 262,144, 6.7 GiB at 524,288). Past the model's trained 262,144 it needs the RoPE extension below"),
+    ("rope_scaling", ("arg", "--rope-scaling", "rope"),
+     "RoPE extension past the trained 262,144 tokens: dynamic (the trained angles until a dialog passes 262,144, then "
+     "yarn with the factor its length needs; one GPU, one dialog at a time), yarn (every dialog rescaled, short ones "
+     "too) or linear. Empty: dynamic where it runs, else yarn. The factor is the context over 262,144 (2 at 524,288; "
+     "for dynamic the largest), as setup writes it; within 262,144 none is used"),
 ]
 SPEC = {k: kind for k, kind, _ in EDITABLE}
 # the view's headings: the first key of each group -> its title
 SECTIONS = {"sampling.temperature": "Sampling defaults", "reasoning_budget_tokens": "Requests",
-            "idle_unload_s": "Loading and the engine", "parallel": "Dialogs"}
+            "idle_unload_s": "Loading and the engine", "parallel": "Dialogs", "max_context": "Context"}
 # what an empty field means, where "default" says too little (the page's placeholder / first choice)
 DEFAULTS = {"conversation_cache_slots": "default: 4", "conversation_cache_mib": "off", "conversation_disk_dir": "off",
-            "conversation_disk_mib": "default: 32768", "conversation_disk_persist": "default: off"}
+            "conversation_disk_mib": "default: 32768", "conversation_disk_persist": "default: off",
+            "update_check": "default: on"}
+TRAINED_CTX = 262144      # the model's trained context (Qwen3.8-Flash-Next: every family setup installs)
+CONTEXTS = [8192, 32768, 65536, 131072, 204800, 262144, 393216, 524288]   # setup.py's CONTEXTS
 DIALOG_KEYS = ("conversation_cache_slots", "conversation_cache_mib", "conversation_disk_dir", "conversation_disk_mib",
                "conversation_disk_persist")
 NO_PROJECTION = ("this model loads no refusal projection (--control-vector-scaled): setup loads it for the original "
@@ -94,16 +111,18 @@ def _arg(cfg: dict, flag: str, sub: str = "int>=0"):
         return True if flag in a else None
     if flag in a[:-1]:
         v = str(a[a.index(flag) + 1])
-        return int(v) if v.isdigit() and sub != "text" else v
+        return int(v) if v.isdigit() and sub in ("int>=0", "context") else v
     return None
 
 
 def _sub(kind) -> str:
-    """An "arg" key's value kind: "int>=0" (the default), "text" or "flag"."""
+    """An "arg" key's value kind: "int>=0" (the default), "text", "flag", "context" or "rope"."""
     return kind[2] if len(kind) > 2 else "int>=0"
 
 
 def value_of(cfg: dict, key: str):
+    if key == "rope_scaling" and cfg.get("rope_auto") is True:
+        return None                                    # setup's (or the page's) own choice: the empty field
     kind = SPEC[key]
     if isinstance(kind, tuple) and kind[0] == "sampling":
         s = cfg.get("sampling")
@@ -136,15 +155,64 @@ def _count_view(cfg: dict, key: str, kind) -> dict:
     return out
 
 
+def _context_view(cfg: dict, key: str) -> dict:
+    """--max-context as setup's sizes (and the file's own); never empty: without it the engine runs 4096 tokens.
+    --rope-scaling: dynamic, yarn or linear (empty: dynamic where it runs, else yarn), the method and factor in force
+    said in its help."""
+    v = value_of(cfg, key)
+    if key == "max_context":
+        ns = sorted(set(CONTEXTS + ([v] if isinstance(v, int) else [])))
+        return {"kind": "choice", "required": True, "default": "not set: the engine's 4096",
+                "choices": [[n, f"{n // 1024}K - {n:,}" + (" (the trained context)" if n == TRAINED_CTX else
+                                                          " (RoPE extension)" if n > TRAINED_CTX else "")] for n in ns]}
+    scale, now = _arg(cfg, "--rope-scale", "text"), _arg(cfg, "--rope-scaling", "text")
+    why = dynamic_blocker(cfg) or dynamic_untested(cfg)
+    return {"kind": "enum", "default": f"default: {'yarn' if why else 'dynamic'} past {TRAINED_CTX:,}",
+            "choices": list(ROPE_METHODS) + ([v] if v not in (None, *ROPE_METHODS) else []),
+            "note": (f" - now: {now}, factor {scale}" if now is not None and scale is not None else "") +
+                    (f"; dynamic {why}" if why and now is not None and v is None else "")}
+
+
+ROPE_METHODS = ("dynamic", "yarn", "linear")
+
+
+def dynamic_blocker(cfg: dict, args: list | None = None) -> str | None:
+    """Why the engine would refuse --rope-scaling dynamic for this config (or these final engine `args`), or None.  It
+    rotates the cached keys of one session: one GPU, one dialog at a time (no --batch slots), 8-bit or fp16 K/V."""
+    a = [str(x) for x in (args if args is not None else cfg.get("args") if isinstance(cfg.get("args"), list) else [])]
+    n = gpu_count(cfg)
+    if n > 1 or "--layer-split" in a:
+        return f"needs one GPU for now (this config: {n})"
+    flag = next((f for f in ("--batch", "--slots") if f in a[:-1]), None)
+    slots = int(a[a.index(flag) + 1]) if flag and a[a.index(flag) + 1].isdigit() else \
+        cfg.get("parallel") if args is None else None
+    if isinstance(slots, int) and not isinstance(slots, bool) and slots > 1:
+        return f"needs one dialog at a time for now (parallel {slots})"
+    kv = a[a.index("--kv") + 1] if "--kv" in a[:-1] else None
+    if kv not in (None, "int8", "fp16"):
+        return f"needs 8-bit or fp16 K/V (--kv {kv})"
+    env = cfg.get("env") if isinstance(cfg.get("env"), dict) else {}
+    if str(env.get("STRATA_ROPE_TABLE", os.environ.get("STRATA_ROPE_TABLE", ""))).startswith("0"):
+        return "needs the rope table (STRATA_ROPE_TABLE=0 is set)"
+    return None
+
+
+def dynamic_untested(cfg: dict) -> str | None:
+    """Why the rule leaves dynamic RoPE out where the engine would run it: AMD (a HIP build), not measured there.  A
+    dynamic picked on the page is kept."""
+    return "is measured on NVIDIA only so far" if cfg.get("backend") == "hip" else None
+
+
 def view(cfg: dict, path: str | Path) -> dict:
     """GET /config: the editable keys with their values (None: not set, the default applies)."""
     out = []
     for key, kind, help_ in EDITABLE:
         k = kind[0] if isinstance(kind, tuple) else kind
-        if k == "arg" and _sub(kind) != "int>=0":
+        if k == "arg" and _sub(kind) in ("text", "flag"):
             k = {"text": "text", "flag": "bool"}[_sub(kind)]
         off = key == "uncensored" and not has_projection(cfg)   # nothing to switch: shown, not settable
-        extra = _count_view(cfg, key, kind) if k == "count" else {}
+        extra = _count_view(cfg, key, kind) if k == "count" else \
+            _context_view(cfg, key) if k == "arg" and _sub(kind) in ("context", "rope") else {}
         out.append({"key": key, "value": value_of(cfg, key), "help": help_ + (f" - not available: {NO_PROJECTION}"
                                                                                  if off else extra.pop("note", "")),
                     "kind": "number" if k in ("sampling", "arg", "int>=0", "num>=0") else k,
@@ -158,7 +226,7 @@ def view(cfg: dict, path: str | Path) -> dict:
 def _number(key, v, whole=False, lo=0.0, hi=None, lo_open=False):
     if isinstance(v, bool) or not isinstance(v, (int, float)) or (whole and v != int(v)) or \
             (v <= lo if lo_open else v < lo) or (hi is not None and v > hi):
-        rng = f"{'more than' if lo_open else 'at least'} {lo:g}" + (f" and at most {hi:g}" if hi is not None else "")
+        rng = f"{'more than' if lo_open else 'at least'} {lo:g}" + (f" and at most {hi:.10g}" if hi is not None else "")
         raise ValueError(f"{key}: expected a {'whole ' if whole else ''}number, {rng}, not {v!r}")
     return int(v) if whole else v
 
@@ -167,6 +235,8 @@ def check(key: str, v, cfg: dict):
     """The value to store for `key`, or a ValueError naming what is expected.  None removes the key (its default)."""
     if key not in SPEC:
         raise ValueError(f"{key!r} cannot be changed here (only the keys the Settings view lists)")
+    if key == "max_context" and v is None:
+        raise ValueError("max_context: pick a size (without --max-context the engine runs 4096 tokens)")
     if v is None:
         return None
     kind = SPEC[key]
@@ -201,6 +271,12 @@ def check(key: str, v, cfg: dict):
         if not isinstance(v, str) or not v.strip() or len(v) > 1024 or any(ord(c) < 32 for c in v):
             raise ValueError(f"{key}: expected a folder (one line of text), not {v!r}")
         return v.strip()
+    if k == "arg" and _sub(kind) == "context":
+        return _number(key, v, whole=True, lo=1024, hi=4 * TRAINED_CTX)
+    if k == "arg" and _sub(kind) == "rope":
+        if v not in ROPE_METHODS:
+            raise ValueError(f"{key}: expected dynamic, yarn or linear, not {v!r}")
+        return v
     if k == "arg":
         return _number(key, v, whole=True)
     if k == "count":
@@ -242,16 +318,8 @@ def apply(cfg: dict, changes: dict) -> tuple[dict, list[str]]:
             a = [x for x in (new.get("args") or []) if x != kind[1]]
             new["args"] = a + [kind[1]] if v else a
         elif isinstance(kind, tuple) and kind[0] == "arg":
-            a = list(new.get("args") or [])
+            a = _put(list(new.get("args") or []), kind[1], v)
             flag = kind[1]
-            if flag in a[:-1]:
-                i = a.index(flag)
-                if v is None:
-                    del a[i:i + 2]
-                else:
-                    a[i + 1] = str(v)
-            elif v is not None:
-                a += [flag, str(v)]
             new["args"] = a
             mine = user_args.set_flag(user_args.capture(new), flag, v)   # a value set here is the person's: it survives setup and the app
             if mine:
@@ -260,14 +328,68 @@ def apply(cfg: dict, changes: dict) -> tuple[dict, list[str]]:
                 new.pop(user_args.USER_KEY, None)
             if user_args.WRITTEN_KEY in new:
                 new[user_args.WRITTEN_KEY] = list(a)
+            if key == "rope_scaling":                  # strata-nvfp4: a method picked here is the user's; empty: the rule's
+                new.pop("rope_auto", None)
         elif v is None:
             new.pop(key, None)
         else:
             new[key] = v
         changed.append(key)
+    # the rope follows the context, and an empty (automatic) or dynamic method the dialogs at once too
+    ctx = value_of(new, "max_context")
+    if "max_context" in changed or "rope_scaling" in changed or "parallel" in changed and isinstance(ctx, int) and \
+            ctx > TRAINED_CTX and (new.get("rope_auto") is True or value_of(new, "rope_scaling") == "dynamic"):
+        _fit_rope(new, "rope_scaling" in changed and checked["rope_scaling"] is not None)
+        rope = lambda c: (value_of(c, "rope_scaling"), _arg(c, "--rope-scaling", "text"))   # noqa: E731
+        changed = [k for k in changed if (rope(new) != rope(cfg) if k == "rope_scaling" else
+                                          value_of(new, k) != value_of(cfg, k))] + \
+            [k for k in ("rope_scaling",) if k not in changed and rope(new) != rope(cfg)]
     if any(k in changed for k in DIALOG_KEYS):
         _check_dialogs(new)
     return new, changed
+
+
+def _put(a: list, flag: str, v) -> list:
+    """`a` with `flag`'s value set to `v`, or the flag and its value left out (None)."""
+    if flag in a[:-1]:
+        i = a.index(flag)
+        if v is None:
+            del a[i:i + 2]
+        else:
+            a[i + 1] = str(v)
+    elif v is not None:
+        a += [flag, str(v)]
+    return a
+
+
+def _fit_rope(cfg: dict, explicit: bool):
+    """setup's rule (resolve_rope) for a context the page changed: past the trained context the extension is on with
+    the factor context / trained - the picked method, or, empty, dynamic where the engine runs it (one GPU, one dialog
+    at a time, 8-bit K/V, NVIDIA) and yarn elsewhere ("rope_auto": true keeps it in step with "parallel"); within it
+    --rope-scaling and --rope-scale go.  none past it is refused, as setup refuses it: positions the model never saw,
+    rotated as if it had - and so is a picked dynamic the engine would refuse."""
+    ctx, method = value_of(cfg, "max_context"), value_of(cfg, "rope_scaling")
+    a = list(cfg.get("args") or [])
+    if isinstance(ctx, int) and ctx > TRAINED_CTX:
+        if method not in (None, *ROPE_METHODS):
+            raise ValueError(f"rope_scaling: a context of {ctx:,} is past the model's trained {TRAINED_CTX:,}, and "
+                             f"{method} keeps the trained angles there: pick dynamic, yarn or linear, or a context of "
+                             f"{TRAINED_CTX:,} or less")
+        why = dynamic_blocker(cfg)
+        if method == "dynamic" and why:
+            raise ValueError(f"rope_scaling: dynamic {why} - pick yarn or linear, or leave it empty (dynamic where "
+                             "it runs, else yarn)")
+        auto = "yarn" if why or dynamic_untested(cfg) else "dynamic"
+        a = _put(_put(a, "--rope-scaling", method or auto), "--rope-scale",
+                 f"{ctx / TRAINED_CTX:g}")
+        cfg["rope_auto"] = method is None
+    elif explicit:
+        raise ValueError(f"rope_scaling: a context of {ctx or 4096:,} fits the model's trained {TRAINED_CTX:,} - there "
+                         "is nothing to extend (pick a larger context first)")
+    else:
+        a = _put(_put(a, "--rope-scaling", None), "--rope-scale", None)
+        cfg.pop("rope_auto", None)
+    cfg["args"] = a
 
 
 def _check_dialogs(cfg: dict):

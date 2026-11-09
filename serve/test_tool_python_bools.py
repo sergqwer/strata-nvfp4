@@ -71,7 +71,7 @@ class PythonBooleans(unittest.TestCase):
 
     def test_an_undeclared_tool_decodes_them_too(self):
         text = "<tool_call>\n<function=other>\n<parameter=flag>\nTrue\n</parameter>\n</function>\n</tool_call>"
-        p = OutputParser(thinking=False, tools=[TOOL], stream_tools=True)
+        p = OutputParser(thinking=False, tools=[TOOL], stream_tools=True, deferred=True)   # #804: undeclared = call only with deferred tools
         evs = p.feed(text) + p.finish("stop")
         self.assertEqual([e.call.arguments for e in evs if e.kind == "tool_call"], [{"flag": True}])
         self.assertEqual(json.loads("".join(e.text for e in evs if e.kind == "tool_args")), {"flag": True})

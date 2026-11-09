@@ -74,6 +74,10 @@ export function watch() {
   if (wasIdle) sensorsAt = 0;                                    // opening the Monitor after a quiet spell reads the card at once
 }
 export function setLiveProbe(probe) { liveProbe = typeof probe === 'function' ? probe : () => false; }
+/* strata-nvfp4 #16: attach mode runs no engine of its own; the attached server's /metrics "live" (attach.mjs live(), read
+   while the Monitor is open or a chat runs) is what the Monitor shows then: its phase, rates and queue, from any client. */
+let attachedLive = () => null, attachedBusy = false;
+export function setAttachedLive(feed) { attachedLive = typeof feed === 'function' ? feed : () => null; }
 let systemReading=null;
 /* CPU and SSD temperatures (null where this PC cannot give one) and the GPU energy used since the host started (#3628). */
 let temperatures={cpuTempC:null,ssdTempC:null};
@@ -152,7 +156,19 @@ function tick() {
     memoryWarningShown = true;
   }
   if(state.hardware.ramUsedGb <= state.hardware.ramTotalGb) memoryWarningShown = false;
-  if (engine.running && engineMetrics.source === 'engine') {
+  const al = engine.running ? null : attachedLive();   // strata-nvfp4 #16
+  if (!engine.running && al) {
+    state.telemetry.throughput = 'engine';
+    const st = al.state;
+    if (st === 'reading') { if (state.phase !== 'reading') { state.phase = 'reading'; state.phaseLabel = 'Reading prompt'; } attachedBusy = true; }
+    else if (st === 'generating') { if (state.phase !== 'generating' && state.phase !== 'thinking') { state.phase = 'generating'; state.phaseLabel = 'Generating response'; } attachedBusy = true; }
+    else if (attachedBusy) { attachedBusy = false; state.phase = 'idle'; state.phaseLabel = 'Waiting for a request'; state.target.outputTps = 0; state.target.promptTps = 0; }
+    if (Number(al.tok_s) > 0) state.target.outputTps = Number(al.tok_s);
+    if (Number(al.prefill_tok_s_mean) > 0) state.target.promptTps = Number(al.prefill_tok_s_mean);
+    if (Number(al.prompt_total) > 0) state.prompt = { done: Number(al.prompt_read) || 0, total: Number(al.prompt_total), pct: Math.min(100, (Number(al.prompt_read) || 0) / Number(al.prompt_total) * 100) };
+    state.queue.running = Number(al.running) || (st === 'reading' || st === 'generating' ? 1 : 0);
+    state.queue.waiting = Number(al.queued) || 0;
+  } else if (engine.running && engineMetrics.source === 'engine') {
     state.telemetry.throughput = 'engine';
     state.telemetry.memory = 'estimated';
     if (state.phase === 'generating' && engineMetrics.outputTps > 0) state.target.outputTps = engineMetrics.outputTps;
@@ -206,7 +222,7 @@ function tick() {
     },
   ];
 
-  if (!engine.running) state.queue.running = busy ? 1 : 0;
+  if (!engine.running && !al) state.queue.running = busy ? 1 : 0;
   state.context.pct = clamp((state.context.usedTokens / Math.max(state.context.maxTokens, 1)) * 100, 0, 100);
   hubRef?.send('monitor', snapshot());
 }

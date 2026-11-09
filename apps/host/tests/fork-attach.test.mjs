@@ -7,7 +7,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { attachSettings, createAttach, samplingSetByPerson, ATTACHED_ID, UP_WINDOW_MS } from '../server/attach.mjs';
+import { attachSettings, createAttach, samplingSetByPerson, ATTACHED_ID, UP_WINDOW_MS, MONITOR_WINDOW_MS } from '../server/attach.mjs';
 import { allowedHosts, forkBindCheck, forkUpdateCheck, runForkCheck } from '../server/fork.mjs';
 
 const root = join(import.meta.dirname, '..');
@@ -37,14 +37,16 @@ test('sampling: only what the person set is sent, and never the projection switc
 });
 
 /** A fake clock and a fake model server for createAttach: every request is recorded with whether it carried the key. */
-function harness({ up = true, health = { status: 'ok', service: 'strata', model: 'qwen3.8-flash-next-gptq-nvfp4', max_context: 262144, images: true, loaded: true } } = {}) {
+function harness({ up = true, health = { status: 'ok', service: 'strata', model: 'qwen3.8-flash-next-gptq-nvfp4', max_context: 262144, images: true, loaded: true }, mcp = null, live = { state: 'idle', slots: [{}] } } = {}) {
   let t = 1_000_000;
   const calls = [];
-  const server = { up };
+  const server = { up, live };
   const fetchImpl = async (url, { headers = {} } = {}) => {
     calls.push({ at: t, path: new URL(url).pathname, keyed: !!headers.authorization });
     if (!server.up) throw new Error('connect ECONNREFUSED');
-    const body = new URL(url).pathname === '/health' ? health : { engine: { version: '0.2.0-beta-nvfp4.2', max_context: 262144 }, live: { state: 'idle', slots: [{}] }, requests: [] };
+    const path = new URL(url).pathname;
+    if (path === '/mcp' && !mcp) return { ok: false, status: 404, body: null, json: async () => ({}) };   // a server without a hub
+    const body = path === '/health' ? health : path === '/mcp' ? mcp : { engine: { version: '0.2.0-beta-nvfp4.2', max_context: 262144 }, live: server.live, requests: [] };
     return { ok: true, status: 200, json: async () => body };
   };
   let requests = [];
@@ -68,7 +70,7 @@ test('doorbell: once up, one keyed /metrics, then nothing at all while the page 
   const h = harness();
   await h.a.tick();
   const first = h.calls.slice();
-  assert.deepEqual(first.map(c => [c.path, c.keyed]), [['/health', false], ['/metrics', true]]);
+  assert.deepEqual(first.map(c => [c.path, c.keyed]), [['/health', false], ['/metrics', true], ['/mcp', true]]);
   await h.advance(60 * 60_000);                       // an hour idle: no request, so a tray can unload its model
   assert.equal(h.calls.length, first.length, `no requests while idle (${h.calls.length - first.length} sent)`);
   const st = h.a.state();
@@ -219,7 +221,7 @@ test('host over HTTP, attached: the serve is the loaded model, chat goes there w
     assert.equal((await (await fetch(`${base}/api/setup`)).json()).complete, true);
     // idle page: the UI polls /api/native; the serve sees nothing keyed beyond the first /metrics
     for (let i = 0; i < 10; i++) { await fetch(`${base}/api/native`); await delay(100); }
-    assert.ok(serve.seen.filter(s => s.keyed).every(s => s.path.startsWith('/metrics')));
+    assert.ok(serve.seen.filter(s => s.keyed).every(s => s.path.startsWith('/metrics') || s.path === '/mcp'));
     // a chat
     const reply = await fetch(`${base}/api/chat/stream`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ message: 'capital of Ukraine?', history: [], nativeModelId: ATTACHED_ID }) });
     const text = await reply.text();
@@ -265,4 +267,66 @@ test('host refuses a non-loopback bind unless opted in', async () => {
     if (code === 'running') child.kill();
     assert.equal(code, 2);
   } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+// fork #15: the chat's Tools switch reads metrics.mcp - attach mode splices GET /mcp in as native-control.mjs does
+test('#15 attach: the hub\'s tools reach the instance\'s metrics (GET /mcp, keyed, beside /metrics); a server without a hub keeps none', async () => {
+  const hub = { status: 'ready', servers: [{ name: 'ddg', tools: [{ name: 'ddg__search' }] }] };
+  const h = harness({ mcp: hub });
+  await h.a.tick();
+  assert.deepEqual(h.a.state().instances[0].metrics.mcp, hub);
+  assert.ok(h.calls.some(c => c.path === '/mcp' && c.keyed));
+  const none = harness();
+  await none.a.tick();
+  assert.equal(none.a.state().instances[0].metrics.mcp, undefined);
+  // the list is read again at most every 30 s, inside the keyed window only
+  const n0 = h.calls.filter(c => c.path === '/mcp').length;
+  h.setRequests([{ instanceId: ATTACHED_ID, state: 'generating', at: new Date(h.now()).toISOString() }]);
+  await h.advance(10_000);
+  assert.equal(h.calls.filter(c => c.path === '/mcp').length, n0, 'not on every poll');
+});
+
+// fork #16: the Monitor shows requests from any client while it is open; an idle page still sends nothing
+test('#16 attach: while the Monitor is open, keyless /health then keyed /metrics every 2 s; it ends 15 s after the last ask', async () => {
+  const h = harness();
+  await h.a.tick();
+  const idle0 = h.calls.length;
+  await h.advance(5 * 60_000);
+  assert.equal(h.calls.length, idle0, 'nothing while the page sits idle');
+  h.server.live = { state: 'generating', tok_s: 101.4, running: 1, queued: 0, slots: [{}] };   // another client's request
+  h.a.watchMonitor();
+  await h.advance(6_000);
+  const during = h.calls.slice(idle0);
+  assert.ok(during.some(c => c.path === '/health' && !c.keyed));
+  assert.ok(during.some(c => c.path === '/metrics' && c.keyed));
+  for (let i = 0; i < during.length; i++)
+    if (during[i].keyed && during[i].path === '/metrics') assert.ok(during.slice(0, i).some(c => c.path === '/health' && c.at >= during[i].at - 2000), 'each keyed read right after /health answered');
+  assert.equal(h.a.live().state, 'generating');
+  assert.equal(h.a.state().instances[0].phase, 'generating');
+  await h.advance(MONITOR_WINDOW_MS + UP_WINDOW_MS + 4000);   // the Monitor closed: no more asks
+  const after = h.calls.length;
+  await h.advance(10 * 60_000);
+  assert.equal(h.calls.length, after, 'silence again once the Monitor is closed');
+  assert.equal(h.a.live(), null);
+});
+
+test('#16 attach: the Monitor open on a model the server says is not loaded (a tray\'s idle unload) sends only keyless /health', async () => {
+  const h = harness({ health: { status: 'ok', service: 'strata', model: 'qwen3.8-flash-next-gptq-nvfp4', max_context: 262144, images: true, loaded: false } });
+  await h.a.tick();
+  const k0 = h.calls.filter(c => c.keyed).length;
+  await h.advance(3 * 60_000);
+  for (let i = 0; i < 6; i++) { h.a.watchMonitor(); await h.advance(10_000); }
+  assert.equal(h.calls.filter(c => c.keyed).length, k0, 'no keyed request while the model is not loaded');
+  assert.ok(h.calls.filter(c => c.path === '/health').length > 10, 'the keyless /health is read');
+});
+
+test('#16 attach: the Monitor open while the server does not answer: keyless /health only, never the key', async () => {
+  const h = harness();
+  await h.a.tick();
+  h.server.up = false;
+  await h.advance(3 * 60_000);
+  const k0 = h.calls.filter(c => c.keyed).length;
+  for (let i = 0; i < 6; i++) { h.a.watchMonitor(); await h.advance(10_000); }
+  assert.equal(h.calls.filter(c => c.keyed).length, k0);
+  assert.ok(h.calls.slice(-5).every(c => c.path === '/health' && !c.keyed));
 });

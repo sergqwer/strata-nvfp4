@@ -49,6 +49,9 @@ class FakeGGUF:
         self.tensors = [types.SimpleNamespace(name=n) for n in names]
 
 
+REPO = Path(setup.__file__).resolve().parent     # where setup's own data lives (not the mocked ROOT)
+
+
 def normalize(v, t: Path):
     """The config with the temp folder and the platform's names taken out (it compares on Windows and Linux)."""
     if isinstance(v, dict):
@@ -56,7 +59,7 @@ def normalize(v, t: Path):
     if isinstance(v, list):
         return [normalize(x, t) for x in v]
     if isinstance(v, str):
-        v = v.replace(str(t), "<T>").replace("\\", "/")
+        v = v.replace(str(t), "<T>").replace(str(REPO), "<REPO>").replace("\\", "/")   # <REPO>: the repository's data/ (the uncensor vector)
         # the platform's own names of the programs (strata.exe or strata, strata-vision.exe or strata-vision, ...) so the baseline compares on Windows and Linux (#3325)
         for name, label in ((setup.HVEXE, "<HVEXE>"), (setup.VEXE, "<VEXE>"), (setup.EXE, "<EXE>")):
             v = re.sub(rf"(?<![w.-]){re.escape(name)}(?![w.-])", label, v)   # #973: only the whole name, not "strata-x.log" on Linux
@@ -108,7 +111,7 @@ def install(ram, found, argv, answers=None, extra=(), avx512=False, configs=()):
             mock.patch.object(setup, "cpu_info", lambda: ("Test CPU", True, avx512)),
             mock.patch.object(setup, "cpu_cores", lambda: None),   # #642: not a hybrid CPU
             mock.patch.object(setup, "vision_threads", lambda logical=None: 6),   # the baseline PC has 12 logical CPUs; the runner's own count must not change the golden config
-            mock.patch.object(setup, "page_file_gb", lambda: 16.0),
+            mock.patch.object(setup, "page_files", lambda: (128000, "C: 64000 MB, D: 64000 MB", False)),   # no warning
             mock.patch.object(setup, "is_wsl", lambda: False),
             mock.patch.object(setup, "rotational_disk", lambda p: None),   # #605: the test PC's own disk
             mock.patch.object(setup, "ple_ram_platform_ok", lambda: False),   # 147-verify: the golden configs as on Windows

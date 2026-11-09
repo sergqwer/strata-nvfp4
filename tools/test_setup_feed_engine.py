@@ -68,9 +68,9 @@ class FeedEngine(unittest.TestCase):
         (self.eng / "BUILD.json").write_text(json.dumps({"version": "0.1.45", "source": "prebuilt", "archs": [89]}), encoding="utf-8")
         with mock.patch.object(setup, "engine_dir", lambda toolkit=13: self.eng),                 mock.patch.object(setup, "_urlopen", side_effect=OSError("HTTP Error 404")),                 mock.patch.object(setup, "engine_from_feed", return_value=self.eng) as feed:
             got = setup.get_prebuilt(setup.PREBUILT_URL, gpu, "none", updating=True)
-            self.assertEqual(got, self.eng)
-            feed.assert_called_once()
-            feed.reset_mock()
+            # strata-nvfp4: the NVIDIA engine comes from this fork's release only, never from upstream's signed feed
+            self.assertIsNone(got)
+            feed.assert_not_called()
             setup.get_prebuilt(setup.PREBUILT_URL, gpu, "none", updating=True, toolkit=12)
             feed.assert_not_called()                      # the experimental CUDA 12 engine has no feed package here
 

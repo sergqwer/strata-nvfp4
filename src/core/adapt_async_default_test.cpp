@@ -18,6 +18,7 @@ using Phase = AdaptAsyncSelf::Phase;
 static AdaptAsyncAuto good() {
     AdaptAsyncAuto a;
     a.cuda = a.serve = a.adaptive = a.arena = true;
+    a.env = -2;   // strata-nvfp4: STRATA_ADAPT_ASYNC=auto (unset keeps the blocking tier in this fork)
     return a;
 }
 
@@ -45,7 +46,7 @@ int main() {
     { AdaptAsyncAuto a = good(); a.flag = 1; CHECK(!strata::core::adapt_async_self_decides(a)); }
     { AdaptAsyncAuto a = good(); a.env = 0; CHECK(!strata::core::adapt_async_self_decides(a, &why)); CHECK(why && std::strstr(why, "STRATA_ADAPT_ASYNC")); }
     { AdaptAsyncAuto a = good(); a.env = 1; CHECK(strata::core::adapt_async_self_decides(a)); }
-    { AdaptAsyncAuto a = good(); a.env = -1; CHECK(strata::core::adapt_async_self_decides(a)); }
+    { AdaptAsyncAuto a = good(); a.env = -1; CHECK(!strata::core::adapt_async_self_decides(a)); }   // strata-nvfp4: unset = off
     { AdaptAsyncAuto a = good(); a.cuda = false; CHECK(!strata::core::adapt_async_self_decides(a)); }
     { AdaptAsyncAuto a = good(); a.serve = false; CHECK(!strata::core::adapt_async_self_decides(a)); }
     { AdaptAsyncAuto a = good(); a.adaptive = false; CHECK(!strata::core::adapt_async_self_decides(a)); }   // --adapt-every 100000 gates

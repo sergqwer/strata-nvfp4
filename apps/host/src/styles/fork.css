@@ -9,6 +9,7 @@
 [data-strata-attach] a.navitem[href="#/models"],
 [data-strata-attach] a.menu__item[href="#/serving"],
 [data-strata-attach] #settings-tab-Engine,
+[data-strata-attach] #settings-tab-Models,
 [data-strata-attach] #settings-tab-Storage { display: none !important; }
 
 /* no agent component: no subagents, permission modes or tool settings */

@@ -17,6 +17,19 @@
 #
 #   strata_ggml_tq_overlay(<llama.cpp dir> <out dir>)  ->  STRATA_TQ_OVERLAY_OK (parent scope)
 
+# strata-nvfp4: a generated file is written only when its text changed.  release/build-release.cmd configures on every
+# run, and a rewrite on every configure rebuilt the trellis MMQ objects and relinked strata.exe (a new PE timestamp), so a
+# bundle's engine never hashed equal to the build that was checked (bench-tools port_release.sh).
+function(_strata_tq_write PATH TEXT)
+  if(EXISTS "${PATH}")
+    file(READ "${PATH}" _old)
+    if("${_old}" STREQUAL "${TEXT}")
+      return()
+    endif()
+  endif()
+  file(WRITE "${PATH}" "${TEXT}")
+endfunction()
+
 function(strata_ggml_tq_overlay LLAMA OUT)
   set(STRATA_TQ_OVERLAY_OK OFF PARENT_SCOPE)
   set(_cu "${LLAMA}/ggml/src/ggml-cuda")
@@ -65,6 +78,9 @@ function(strata_ggml_tq_overlay LLAMA OUT)
   file(GLOB _all_cu "${_cu}/*.cuh" "${_cu}/*.h")
   foreach(_f IN LISTS _all_cu)
     get_filename_component(_n "${_f}" NAME)
+    if(_n STREQUAL "mmq.cuh" OR _n STREQUAL "mmq-load-tiles.cuh" OR _n MATCHES "^mmq-config-")
+      continue()   # strata-nvfp4: written patched below (a pinned copy first would rewrite them on every configure)
+    endif()
     configure_file("${_f}" "${OUT}/${_n}" COPYONLY)
   endforeach()
   configure_file("${_cu}/quantize.cu" "${OUT}/quantize.cu" COPYONLY)   # compiled from here: it includes mmq.cuh
@@ -74,6 +90,9 @@ function(strata_ggml_tq_overlay LLAMA OUT)
   file(GLOB _all_inc "${_inc}/*.h")
   foreach(_f IN LISTS _all_inc)
     get_filename_component(_n "${_f}" NAME)
+    if(_n STREQUAL "ggml.h")
+      continue()   # strata-nvfp4: written patched below
+    endif()
     configure_file("${_f}" "${OUT}/include/${_n}" COPYONLY)
   endforeach()
 
@@ -87,7 +106,7 @@ function(strata_ggml_tq_overlay LLAMA OUT)
         GGML_TYPE_TQP6    = 148,
         GGML_TYPE_TQP7    = 149,
 ")
-  file(WRITE "${OUT}/include/ggml.h" "${_h}")
+  _strata_tq_write("${OUT}/include/ggml.h" "${_h}")
 
   # ---- mmq.cuh: routing of the trellis types as IQ2_XS ----------------------------------------------------------------
   _tq_read(_m "${_cu}/mmq.cuh")
@@ -150,13 +169,13 @@ function(strata_ggml_tq_overlay LLAMA OUT)
       _tq_edit(_t AFTER "${_ln}" "${_add}")
     endforeach()
     string(REPLACE "<SEMI>" ";" _t "${_t}")
-    file(WRITE "${OUT}/${_cn}" "${_t}")
+    _strata_tq_write("${OUT}/${_cn}" "${_t}")
   endforeach()
 
   # ---- template instances -------------------------------------------------------------------------------------------
   foreach(_ty tq2_t tqk6 tqk7 tqp5 tqp6 tqp7)
     string(TOUPPER "${_ty}" _TY)
-    file(WRITE "${OUT}/template-instances/mmq-instance-${_ty}.cu"
+    _strata_tq_write("${OUT}/template-instances/mmq-instance-${_ty}.cu"
          "// Strata trellis overlay (cmake/strata_ggml_tq_overlay.cmake)\n\n#include \"../mmq.cuh\"\n\nDECL_MMQ_CASE(GGML_TYPE_${_TY});\n")
   endforeach()
 

@@ -248,7 +248,7 @@ int main() {
     int fails = 0;
     try {
         for (ggml_type t : {GGML_TYPE_Q8_0, GGML_TYPE_NVFP4}) {
-            if (!mmq::swiglu_quant_ok((int) t)) { std::printf("  %s: not on the fused path here\n", ggml_type_name(t)); continue; }
+            if (!mmq::swiglu_quant_scaled_ok((int) t)) { std::printf("  %s: not on the fused path here\n", ggml_type_name(t)); continue; }
             fails += swiglu_quant_case(t, {37, 0, 1, 200, 5, 0, 64, 129}, 0, 1);
             fails += swiglu_quant_case(t, {700, 3, 0, 1251, 90, 626, 1, 2, 0, 400, 333, 17, 8, 1000, 64, 9}, 4113, 2);
             fails += swiglu_quant_case(t, {1}, 77, 3);

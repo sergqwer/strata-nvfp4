@@ -154,9 +154,9 @@ void swiglu_scaled(const float* gu, float* h, int64_t rows, int64_t n_ff, const 
 /// sd[r] = the s_down of row r's expert (group-local bounds): the combine applies it as it reads the row.
 void down_row_scales(float* sd, const int32_t* bounds, int n, const float* tails, int64_t nrows, void* stream);
 /// swiglu_scaled (n_ff 640), then quantize() of its rows for a down product of `ggml_type`, then down_row_scales into
-/// sd (null: none) - in one pass, H never stored; the same bytes in hq and sd.  Only where swiglu_quant_ok.  tails:
+/// sd (null: none) - in one pass, H never stored; the same bytes in hq and sd.  Only where swiglu_quant_scaled_ok.  tails:
 /// n device pointers (host array, n <= kGatherGroupMax), expert q's {s_gate, s_up, s_down, 0}.
-bool swiglu_quant_ok(int ggml_type);
+bool swiglu_quant_scaled_ok(int ggml_type);
 void swiglu_quant(const float* gu, void* hq, int64_t rows, const int32_t* bounds, int n, const float* const* tails,
                   int64_t row0, float* sd, void* stream);
 
