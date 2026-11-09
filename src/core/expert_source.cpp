@@ -1580,11 +1580,42 @@ bool FileExpertSource::open(const std::string& pack_dir, int64_t n_layers, int64
     return true;
 }
 
+namespace {
+// STRATA_TEST_COMPLEMENT_REFUSE=1 is a TEST knob (fork #20): path 1's one page-locked allocation of the RAM copy is
+// treated as refused, so path 2's slices run on a PC whose driver would grant it, and each slice is cut one page into
+// an expert, so places straddle even in a pack whose blobs are whole pages; close() then checks that each place's own
+// copy still equals the RAM copy (a write that missed the mirror would show).  =2 also skips the own copies: the
+// behaviour before the fix (an adaptive swap of such a place fails with "invalid argument").
+int test_complement_refuse() {
+    static const int level = [] {
+        const char* v = std::getenv("STRATA_TEST_COMPLEMENT_REFUSE");
+        return v != nullptr ? std::max(0, std::atoi(v)) : 0;
+    }();
+    return level;
+}
+}  // namespace
+
 void FileExpertSource::close() {
     prefetch_end();
     ram_stop();
     io_stop();
     inputs_.clear();
+    if (test_complement_refuse() != 0 && !straddle_copies_.empty() && complement_host_ != nullptr) {
+        size_t owned = 0, same = 0;
+        for (size_t i = 0; i < complement_offsets_.size(); ++i) {
+            const uint64_t at = complement_offsets_[i];
+            if (at == kNoComplement) continue;
+            const uint8_t* c = straddle_copy_at(straddle_copies_, at);
+            if (c == nullptr) continue;
+            ++owned;
+            if (std::memcmp(c, complement_host_ + (size_t) at, (size_t) layer_blob_bytes_[i / (size_t) n_expert_]) == 0)
+                ++same;
+        }
+        std::fprintf(stderr, "FileExpertSource: STRATA_TEST_COMPLEMENT_REFUSE: %zu of %zu places with their own copy "
+                             "match the RAM copy (%zu places; %lld exchanges, %llu writes into such a place)\n",
+                     same, owned, straddle_copies_.size(), (long long) exchanges_,
+                     (unsigned long long) straddle_mirrored_.load());
+    }
     if (complement_arena_ != nullptr) {
         if (complement_pinned_ && !complement_registered_) (void) cudaFreeHost(complement_arena_);
         else {
@@ -1627,12 +1658,12 @@ void FileExpertSource::close() {
     complement_locked_ = 0;
     complement_lent_slots_ = 0;
     complement_slices_.clear();
-    for (auto& [i, p] : straddle_copies_) {
-        (void) i;
-        if (straddle_pinned_) (void) cudaFreeHost(p);
-        else std::free(p);
+    for (size_t k = 0; k < straddle_copies_.size(); ++k) {
+        if (k < straddle_pinned_n_) (void) cudaFreeHost(straddle_copies_[k].second);
+        else std::free(straddle_copies_[k].second);
     }
     straddle_copies_.clear();
+    straddle_pinned_n_ = 0;
     complement_vmem_ = false;
     if (!maps_.empty()) {
         for (Map& m : maps_) {
@@ -3895,8 +3926,10 @@ bool FileExpertSource::pin_cache_complement(
             return std::max(0.0, std::atof(v));
         }();
         if (pin && !paced) {
-            const cudaError_t allocated = cudaHostAlloc(&arena, (size_t) bytes,
-                                                         cudaHostAllocMapped | cudaHostAllocPortable);
+            const cudaError_t allocated = test_complement_refuse() != 0   // a TEST knob (fork #20), see close()
+                                              ? cudaErrorMemoryAllocation
+                                              : cudaHostAlloc(&arena, (size_t) bytes,
+                                                              cudaHostAllocMapped | cudaHostAllocPortable);
             if (allocated == cudaSuccess) {
                 void* alias = nullptr;
                 const cudaError_t aliased = cudaHostGetDevicePointer(&alias, arena, 0);
@@ -4032,8 +4065,10 @@ bool FileExpertSource::pin_cache_complement(
                     }
                     std::string stop;
                     for (size_t i = 0; i < cut.size(); ++i) {
-                        const uint64_t a = cut[i] / kPage * kPage;
-                        const uint64_t e = i + 1 < cut.size() ? cut[i + 1] / kPage * kPage : span;
+                        // the TEST knob (fork #20) cuts one page into the expert at each cut, so that expert straddles
+                        const uint64_t shift = test_complement_refuse() != 0 ? kPage : 0;
+                        const uint64_t a = i == 0 ? 0 : std::min(cut[i] / kPage * kPage + shift, span);
+                        const uint64_t e = i + 1 < cut.size() ? std::min(cut[i + 1] / kPage * kPage + shift, span) : span;
                         if (e <= a) continue;
                         if (e > cap) { stop = cap_why; break; }
                         uint8_t* p = (uint8_t*) arena + a;
@@ -4405,11 +4440,9 @@ bool FileExpertSource::pin_cache_complement(
 
 const uint8_t* FileExpertSource::resident_blob(size_t index) const {
     if (exchange_storage_.active()) return exchange_storage_.resident(index).host;
-    if (!straddle_copies_.empty()) {   // strata-nvfp4 #20: a blob no registration holds whole: its own copy
-        auto it = std::lower_bound(straddle_copies_.begin(), straddle_copies_.end(), index,
-                                   [](const std::pair<size_t, uint8_t*>& e, size_t v) { return e.first < v; });
-        if (it != straddle_copies_.end() && it->first == index) return it->second;
-    }
+    // strata-nvfp4 #20: a place across a registration's edge: its own copy (by the expert's current offset)
+    if (!straddle_copies_.empty() && index < complement_offsets_.size() && complement_offsets_[index] != kNoComplement)
+        if (uint8_t* c = straddle_copy_at(straddle_copies_, complement_offsets_[index])) return c;
     return detail::cache_complement_blob_or_fallback(index, complement_offsets_, complement_host_, nullptr);
 }
 
@@ -4557,6 +4590,8 @@ int64_t FileExpertSource::commit_exchanges() {
         if (src != nullptr && at != kNoComplement && at <= complement_bytes_ && x.bytes <= complement_bytes_ - at &&
             complement_host_ != nullptr) {
             std::memcpy((uint8_t*) complement_host_ + (size_t) at, src, (size_t) x.bytes);
+            if (straddle_mirror(straddle_copies_, at, src, (size_t) x.bytes))   // fork #20
+                straddle_mirrored_.fetch_add(1, std::memory_order_relaxed);
             if (detail::exchange_cache_complement(complement_offsets_, x.in, x.out)) ++n;
         }
         override_[x.out] = nullptr;
@@ -4609,6 +4644,8 @@ bool FileExpertSource::replace_resident_staged(int64_t layer, int64_t in, int64_
         if (it == stage_of_.end() || stage_busy_[it->second] || stage_key_[it->second] != (int64_t) i_in) return false;
         if (fs != nullptr) fs->hold(layer, (int32_t) out);
         std::memcpy((uint8_t*) complement_host_ + (size_t) at, stage_buf_[it->second].get(), (size_t) bytes);
+        if (straddle_mirror(straddle_copies_, at, stage_buf_[it->second].get(), (size_t) bytes))   // fork #20
+            straddle_mirrored_.fetch_add(1, std::memory_order_relaxed);
         moved = detail::exchange_cache_complement(complement_offsets_, i_out, i_in);
         if (fs != nullptr) fs->unhold(layer, (int32_t) out);
     }
@@ -4633,6 +4670,8 @@ bool FileExpertSource::install_resident(int64_t layer, int64_t in, int64_t out, 
     ForesightSwap* fs = fs_swap_.load(std::memory_order_acquire);
     if (fs != nullptr) fs->hold(layer, (int32_t) out);
     std::memcpy((uint8_t*) complement_host_ + (size_t) at, src, (size_t) bytes);
+    if (straddle_mirror(straddle_copies_, at, src, (size_t) bytes))   // fork #20
+        straddle_mirrored_.fetch_add(1, std::memory_order_relaxed);
     const bool moved = detail::exchange_cache_complement(complement_offsets_, i_out, i_in);
     if (fs != nullptr) fs->unhold(layer, (int32_t) out);
     if (!moved) return false;
@@ -4761,8 +4800,11 @@ void FileExpertSource::commit_copies() {
         const uint8_t* src = override_.empty() ? nullptr : override_[x.out];
         const uint64_t at = complement_offsets_[x.in];
         if (src != nullptr && at != kNoComplement && at <= complement_bytes_ && x.bytes <= complement_bytes_ - at &&
-            complement_host_ != nullptr)
+            complement_host_ != nullptr) {
             std::memcpy((uint8_t*) complement_host_ + (size_t) at, src, (size_t) x.bytes);
+            if (straddle_mirror(straddle_copies_, at, src, (size_t) x.bytes))   // fork #20
+                straddle_mirrored_.fetch_add(1, std::memory_order_relaxed);
+        }
     }
 }
 
@@ -4891,10 +4933,13 @@ bool FileExpertSource::pinned(int64_t layer, int64_t expert) const {
 }
 
 // strata-nvfp4 #20: path 2 registers the RAM copy in page-aligned slices, so a blob may start in one registration and end
-// in the next.  pinned() says no for it (the PCIe share and the device aliases leave it alone), but the copies into the
-// GPU cache (the adaptive tier, refills, a lent slot's refill) took blob_stable()'s pointer into the copy, and one
-// cudaMemcpyAsync over two registrations is refused (cudaErrorInvalidValue, "an adaptive refill failed").  Each such
-// blob gets its own page-locked copy here, which resident_blob() hands out instead: the same bytes, one registration.
+// in the next (or past the last one).  pinned() says no for it (the PCIe share and the device aliases leave it alone),
+// but the copies into the GPU cache (the adaptive tier, refills, a lent slot's refill) took blob_stable()'s pointer into
+// the copy, and one cudaMemcpyAsync across a registration's edge is refused (cudaErrorInvalidValue, "an adaptive refill
+// failed").  Each such place gets its own page-locked copy here, which resident_blob() hands out instead: the same
+// bytes, one registration.  The copies are keyed by the place's offset: the adaptive tier gives a place to another expert
+// of its layer (same size), and every write into a place (commit_exchanges, commit_copies, install_resident,
+// replace_resident_staged) is mirrored into its copy.
 void FileExpertSource::copy_straddling_blobs() {
     straddle_copies_.clear();
     if (complement_slices_.empty() || complement_host_ == nullptr || exchange_storage_.active()) return;
@@ -4905,33 +4950,40 @@ void FileExpertSource::copy_straddling_blobs() {
         return layer_blob_bytes_[i / (size_t) n_expert_];
     });
     if (idx.empty()) return;
-    straddle_pinned_ = true;   // all page-locked, or (the driver refused one) all plain memory: a pageable copy is legal
+    if (test_complement_refuse() == 2) {   // the TEST knob: the behaviour before the fix
+        std::fprintf(stderr, "FileExpertSource: STRATA_TEST_COMPLEMENT_REFUSE=2: %zu experts cross the edge of a "
+                             "page-locked slice; no own copies (the behaviour before fork #20's fix)\n", idx.size());
+        return;
+    }
+    std::vector<std::pair<uint64_t, size_t>> places;   // (offset, the expert there now), by offset
+    places.reserve(idx.size());
+    for (size_t i : idx) places.emplace_back(complement_offsets_[i], i);
+    std::sort(places.begin(), places.end());
+    // page-locked while the driver gives it, then plain memory (a pageable source is legal for a copy to the GPU): the
+    // page-locked copies are the first straddle_pinned_n_, which is how close() frees each one the right way
+    straddle_pinned_n_ = 0;
+    bool try_pin = true;
     uint64_t total = 0;
-    for (size_t i : idx) {
+    for (const auto& [at, i] : places) {
         const uint64_t n = layer_blob_bytes_[i / (size_t) n_expert_];
         void* p = nullptr;
-        if (straddle_pinned_ && cudaHostAlloc(&p, (size_t) n, cudaHostAllocPortable) != cudaSuccess) {
+        if (try_pin && cudaHostAlloc(&p, (size_t) n, cudaHostAllocPortable) != cudaSuccess) {
             (void) cudaGetLastError();
             p = nullptr;
-            for (auto& e : straddle_copies_) {   // back to plain memory for every copy made so far
-                void* q = std::malloc((size_t) layer_blob_bytes_[e.first / (size_t) n_expert_]);
-                if (q == nullptr) break;
-                std::memcpy(q, e.second, (size_t) layer_blob_bytes_[e.first / (size_t) n_expert_]);
-                (void) cudaFreeHost(e.second);
-                e.second = (uint8_t*) q;
-            }
-            straddle_pinned_ = false;
+            try_pin = false;
         }
+        const bool pinned = p != nullptr;
         if (p == nullptr) p = std::malloc((size_t) n);
         if (p == nullptr) break;   // (the rest keep the slice copy: as before this fix)
-        std::memcpy(p, complement_host_ + (size_t) complement_offsets_[i], (size_t) n);
-        straddle_copies_.emplace_back(i, (uint8_t*) p);
+        std::memcpy(p, complement_host_ + (size_t) at, (size_t) n);
+        straddle_copies_.emplace_back(at, (uint8_t*) p);
+        if (pinned) ++straddle_pinned_n_;
         total += n;
     }
-    std::fprintf(stderr, "FileExpertSource: %zu experts straddle two page-locked slices: %zu copied to their own %s "
-                         "buffers (%.1f MiB), so their copies to the GPU never span two registrations (fork #20)\n",
-                 idx.size(), straddle_copies_.size(), straddle_pinned_ ? "page-locked" : "pageable",
-                 (double) total / 1048576.0);
+    std::fprintf(stderr, "FileExpertSource: %zu experts cross the edge of a page-locked slice: their %zu places copied to "
+                         "their own buffers (%zu page-locked, %.1f MiB), so a copy to the GPU never spans a registration's "
+                         "edge (fork #20)\n",
+                 idx.size(), straddle_copies_.size(), straddle_pinned_n_, (double) total / 1048576.0);
 }
 
 const FileExpertSource::ComplementSlice* FileExpertSource::complement_slice(uint64_t offset, uint64_t bytes) const {

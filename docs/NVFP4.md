@@ -413,9 +413,17 @@ commits; 22 were already in upstream and came out empty. 58 files that both side
     calls either way. Python `True`/`False` in a call's arguments still become booleans.
 - **Fixed in this fork:**
   - **#20:** a 64 GiB Mix copy failed with `adaptive swap copy failed ... invalid argument`. Path 2 of the RAM copy
-    page-locks the copy slice by slice, so a few experts start in one registration and end in the next, and CUDA
-    refuses a single copy that spans two registrations. Each such expert now gets its own page-locked copy, made once
-    at load and logged on one line. Its numbers stay the same, and the pinned count does not change.
+    page-locks the copy slice by slice, so a few experts start in one registration and end in the next (or past the
+    last one), and CUDA refuses a single copy across a registration's edge. Each such place in the copy now gets its
+    own page-locked copy, made once at load and logged on one line. The copy belongs to the place, not to the expert:
+    the adaptive tier hands a place to another expert of its layer, so a lookup goes through the expert's current
+    place and every write into the place goes into its copy too. Experts wholly outside the slices (the unpinned rest
+    of a capped path 2) need no copy: a copy from plain memory is legal. The numbers stay the same, and the pinned
+    count does not change. Checked on the 5090 with a test switch, `STRATA_TEST_COMPLEMENT_REFUSE` (path 1 treated as
+    refused, each slice cut one page into an expert; `--resident-budget-gib 62 --expert-cache 1500`, 48 slices, 47
+    experts across an edge): `=2` (no own copies, the old behaviour) stops with "an adaptive refill failed" at the
+    first decode step; `=1` (the fix) decodes 464 tokens with 4,512 swaps and 1,322 exchanges, 2 of them into such a
+    place, and at the end all 47 own copies equal the RAM copy.
   - **#15 / #16:** the new interface in attach mode now shows the server's tools and the Monitor's live numbers. Those
     numbers come from the server only while the Monitor tab is open. The interface first asks the server's keyless
     `/health`, and sends the keyed `/metrics` only if a model is loaded. An idle page sends the server nothing, so a
@@ -424,9 +432,13 @@ commits; 22 were already in upstream and came out empty. 58 files that both side
   3-shard file; installing it again downloads 89.5 GB. Upstream's new families are offered as upstream offers them.
 - **The update guard.** `strata update`, upstream's daily engine check (it no longer runs without a feed named) and the
   interface's "Check for updates" use this fork's releases; upstream's feed is used only when it is named.
-- **Checks** (RTX 5090 + Ryzen 9 9950X3D, 128 GB; release build f5537be6, portable 75/86/89/120, CUDA 13.3):
+- **Checks** (RTX 5090 + Ryzen 9 9950X3D, 128 GB; release build f5537be6, the final one 48cf2115, portable
+  75/86/89/120, CUDA 13.3):
   - the port check's identity form (`--expert-cache 6000`, CPU share 0.5, PCIe share 0.25, qwen-nvfp4-gptq): the 2K and
-    32K prompts give logits and 32 greedy tokens bit-identical to 0.2.0-beta-nvfp4.3's engine;
+    32K prompts give logits and 32 greedy tokens bit-identical to 0.2.0-beta-nvfp4.3's engine. The final build
+    (48cf2115, after the #20 rework) was checked the next day against the tray's 0.2.0-beta-nvfp4.3 engine run the same
+    hour: the same bits at 2K and 32K. Both had moved together from the day before (KL 0.000000, the same tokens),
+    so a run compares with its own day's reference;
   - with this fork's defaults off (`STRATA_GDN_CHUNKED=0 STRATA_PREFILL_NVFP4=w4a8 STRATA_KV_ROT=0
     STRATA_ROPE_TABLE=0 STRATA_PREFILL_BF16X2=0`, the fork-only switches off, the pinned variables at upstream's
     values and `--adapt-every 4 --adapt-swaps 96 --adapt-decay 0.7`), the engine gives upstream 0.2.13's own build's
