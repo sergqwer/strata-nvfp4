@@ -1,0 +1,487 @@
+{
+ "when": "2026-10-20T16:35:20+0800",
+ "model": "qwen3.8-flash-next-gptq-nvfp4",
+ "runs": 3,
+ "engine_decode": {
+  "n": 15,
+  "median": 136.5,
+  "min": 111.7,
+  "max": 260.7
+ },
+ "client_decode": {
+  "n": 15,
+  "median": 136.6,
+  "min": 111.8,
+  "max": 261.3
+ },
+ "accept": {
+  "n": 15,
+  "median": 44.8,
+  "min": 35.2,
+  "max": 88.9
+ },
+ "by_shape": {
+  "A_long_summary": {
+   "decode": {
+    "n": 3,
+    "median": 112.1,
+    "min": 111.7,
+    "max": 112.4
+   },
+   "client_decode": {
+    "n": 3,
+    "median": 112.2,
+    "min": 111.8,
+    "max": 112.5
+   },
+   "prefill": {
+    "n": 3,
+    "median": 5627.1,
+    "min": 5612.3,
+    "max": 5675.5
+   },
+   "accept": {
+    "n": 3,
+    "median": 41.9,
+    "min": 41.0,
+    "max": 44.8
+   },
+   "ttft": {
+    "n": 3,
+    "median": 7.2,
+    "min": 7.1,
+    "max": 7.2
+   },
+   "gen": {
+    "n": 3,
+    "median": 57,
+    "min": 57,
+    "max": 64
+   },
+   "prompt": {
+    "n": 3,
+    "median": 40403,
+    "min": 40403,
+    "max": 40403
+   }
+  },
+  "B_600w_plan": {
+   "decode": {
+    "n": 3,
+    "median": 125.1,
+    "min": 122.5,
+    "max": 128.5
+   },
+   "client_decode": {
+    "n": 3,
+    "median": 125.1,
+    "min": 122.5,
+    "max": 128.5
+   },
+   "prefill": {
+    "n": 3,
+    "median": 247.5,
+    "min": 232.5,
+    "max": 278.9
+   },
+   "accept": {
+    "n": 3,
+    "median": 42.6,
+    "min": 35.2,
+    "max": 44.3
+   },
+   "ttft": {
+    "n": 3,
+    "median": 0.3,
+    "min": 0.3,
+    "max": 0.3
+   },
+   "gen": {
+    "n": 3,
+    "median": 443,
+    "min": 437,
+    "max": 504
+   },
+   "prompt": {
+    "n": 3,
+    "median": 73,
+    "min": 73,
+    "max": 73
+   }
+  },
+  "C_python_script": {
+   "decode": {
+    "n": 3,
+    "median": 253.5,
+    "min": 250.4,
+    "max": 260.7
+   },
+   "client_decode": {
+    "n": 3,
+    "median": 254.1,
+    "min": 250.9,
+    "max": 261.3
+   },
+   "prefill": {
+    "n": 3,
+    "median": 450.0,
+    "min": 410.2,
+    "max": 557.4
+   },
+   "accept": {
+    "n": 3,
+    "median": 79.1,
+    "min": 77.8,
+    "max": 79.6
+   },
+   "ttft": {
+    "n": 3,
+    "median": 0.2,
+    "min": 0.2,
+    "max": 0.2
+   },
+   "gen": {
+    "n": 3,
+    "median": 512,
+    "min": 512,
+    "max": 512
+   },
+   "prompt": {
+    "n": 3,
+    "median": 86,
+    "min": 86,
+    "max": 86
+   }
+  },
+  "D_json_classify": {
+   "decode": {
+    "n": 3,
+    "median": 195.9,
+    "min": 190.5,
+    "max": 209.1
+   },
+   "client_decode": {
+    "n": 3,
+    "median": 202.1,
+    "min": 195.8,
+    "max": 216.4
+   },
+   "prefill": {
+    "n": 3,
+    "median": 538.6,
+    "min": 463.9,
+    "max": 597.6
+   },
+   "accept": {
+    "n": 3,
+    "median": 87.5,
+    "min": 72.7,
+    "max": 88.9
+   },
+   "ttft": {
+    "n": 3,
+    "median": 0.2,
+    "min": 0.2,
+    "max": 0.2
+   },
+   "gen": {
+    "n": 3,
+    "median": 24,
+    "min": 24,
+    "max": 24
+   },
+   "prompt": {
+    "n": 3,
+    "median": 101,
+    "min": 101,
+    "max": 101
+   }
+  },
+  "E_multi_turn_qa": {
+   "decode": {
+    "n": 3,
+    "median": 136.5,
+    "min": 135.3,
+    "max": 139.1
+   },
+   "client_decode": {
+    "n": 3,
+    "median": 136.6,
+    "min": 135.4,
+    "max": 139.3
+   },
+   "prefill": {
+    "n": 3,
+    "median": 478.5,
+    "min": 439.2,
+    "max": 496.6
+   },
+   "accept": {
+    "n": 3,
+    "median": 42.4,
+    "min": 39.8,
+    "max": 45.5
+   },
+   "ttft": {
+    "n": 3,
+    "median": 0.2,
+    "min": 0.2,
+    "max": 0.2
+   },
+   "gen": {
+    "n": 3,
+    "median": 160,
+    "min": 160,
+    "max": 160
+   },
+   "prompt": {
+    "n": 3,
+    "median": 80,
+    "min": 80,
+    "max": 80
+   }
+  }
+ },
+ "requests": [
+  {
+   "shape": "A_long_summary",
+   "run": 1,
+   "error": null,
+   "prompt_tokens": 40403,
+   "completion_tokens": 64,
+   "cap": 160,
+   "finish": "stop",
+   "ttft_s": 7.14,
+   "client_decode_tps": 112.2,
+   "engine_decode_tps": 112.1,
+   "engine_prefill_tps": 5675.5,
+   "accept_pct": 41.0,
+   "drafts": "16/39",
+   "text": "材料涵盖了本季度服务稳定性通过率的变化情况。\n材料记录了平均响应时间的波动数据。\n材料统计了告警数量的增减趋势。\n材料列出了节点扩缩容、限流策略及缓存命中率的技术调整记录。\n材料包含了数据库连接池配置的变更详情且未给出最终结论。"
+  },
+  {
+   "shape": "B_600w_plan",
+   "run": 1,
+   "error": null,
+   "prompt_tokens": 73,
+   "completion_tokens": 443,
+   "cap": 512,
+   "finish": "stop",
+   "ttft_s": 0.307,
+   "client_decode_tps": 122.5,
+   "engine_decode_tps": 122.5,
+   "engine_prefill_tps": 247.5,
+   "accept_pct": 35.2,
+   "drafts": "82/233",
+   "text": "**微服务拆分与发布风险控制技术方案**\n\n为有效降低现有单体服务的发布风险，提升系统可维护性与迭代效率，本方案计划将当前单体架构拆分为三个独立微服务：**用户中心服务**、**订单交易服务**及**商品库存服务**。此次重构的核心目标是通过解耦业务逻辑，实现故障隔离与独立部署。\n\n在拆分边界界定上，我们将严格遵循领域驱动设计（DDD）原则。**用户中心服务**负责账号体系、权限管理及基础资料维护；**订单交易服务**聚焦于下单流程、支付状态流转及订单生命周期管理；**商品库存服务**则处理商品元数据、SKU管理及实时库存扣减。各服务间通过定义清晰的 RESTful API 或 gRPC 接口进行通信，严禁跨库直接访问，确保业务逻辑的内聚性。\n\n针对分布式环境下的数据一致性挑战，我们将采用“最终一致性”策略。核心交易链路（如订单创建与库存扣减）引入基于本地消息表的事务消息机制，结合 RocketMQ 实现异步解耦与可靠投递。对于非强一致性的场景（如用户积分更新），采用定时任务对账补偿机制，确保数据在分钟级内达到一致状态，从而避免分布式事务带来的性能瓶颈。\n\n灰度发布将分四步执行：首先，在测试环境完成全链路集成测试；其次，在生产环境通过网关层配置流量权重，将 1% 的真实用户流量路由至新服务集群，并实时监控错误率与延迟指标；若指标正常，逐步扩大流量比例至 5%、20%，直至 100% 全量切换。在此过程中，旧单体服务保持运行以承接未迁移流量。\n\n回滚预案方面，我们设计了“一键切流”机制。一旦监控发现新服务出现严重异常（如错误率超过阈值或核心接口超时），运维平台将立即调整网关路由规则，在秒级内将流量全部切回至稳定的旧单体服务。同时，数据库层面保留双写兼容逻辑，确保回滚期间数据不丢失、业务不中断，从而最大程度保障线上稳定性。"
+  },
+  {
+   "shape": "C_python_script",
+   "run": 1,
+   "error": null,
+   "prompt_tokens": 86,
+   "completion_tokens": 512,
+   "cap": 512,
+   "finish": "length",
+   "ttft_s": 0.221,
+   "client_decode_tps": 250.9,
+   "engine_decode_tps": 250.4,
+   "engine_prefill_tps": 410.2,
+   "accept_pct": 77.8,
+   "drafts": "367/472",
+   "text": "```python\nimport json\nimport csv\nimport sys\nfrom collections import defaultdict\n\n\ndef process_jsonl(input_file, output_file):\n    # 检查文件是否存在\n    try:\n        with open(input_file, 'r', encoding='utf-8') as f:\n            pass\n    except FileNotFoundError:\n        print(\"错误：输入文件不存在。\", file=sys.stderr)\n        sys.exit(1)\n\n    # 按 status 分组统计 count 的总和与平均值\n    stats = defaultdict(lambda: {'sum': 0, 'count': 0})\n\n    with open(input_file, 'r', encoding='utf-8') as f:\n        for line_num, line in enumerate(f, start=1):\n            line = line.strip()\n            if not line:\n                continue\n            try:\n                data = json.loads(line)\n            except json.JSONDecodeError:\n                print(f\"错误：第 {line_num} 行 JSON 解析失败。\", file=sys.stderr)\n                continue\n\n            # 检查字段是否存在\n            if 'status' not in data or 'count' not in data:\n                print(f\"错误：第 {line_num} 行缺少 status 或 count 字段。\", file=sys.stderr)\n                continue\n\n            status = data['status']\n            try:\n                count_val = float(data['count'])\n            except (ValueError, TypeError):\n                print(f\"错误：第 {line_num} 行 count 字段值无效。\", file=sys.stderr)\n                continue\n\n            stats[status]['sum'] += count_val\n            stats[status]['count'] += 1\n\n    # 输出为 CSV\n    with open(output_file, 'w', encoding='utf-8', newline='') as f:\n        writer = csv.writer(f)\n        writer.writerow(['status', 'total_count', 'average_count'])\n        for status in sorted(stats.keys()):\n            total = stats[status]['sum']\n            cnt = stats[status]['count']\n            avg = total / cnt if cnt > 0 else 0\n            writer.writerow([status, total, round(avg, 2)])\n\n\nif __name__ == '__main__':\n    if len(sys.argv) != 3:\n        print(\"用法：python script.py <输入JSONL文件> <输出CSV文件>\", file=sys.stderr)\n        sys.exit"
+  },
+  {
+   "shape": "D_json_classify",
+   "run": 1,
+   "error": null,
+   "prompt_tokens": 101,
+   "completion_tokens": 24,
+   "cap": 320,
+   "finish": "stop",
+   "ttft_s": 0.229,
+   "client_decode_tps": 202.1,
+   "engine_decode_tps": 195.9,
+   "engine_prefill_tps": 463.9,
+   "accept_pct": 88.9,
+   "drafts": "16/18",
+   "text": "{\"intent\":\"account_login_issue\",\"sentiment\":\"anxious\",\"urgency\":5,\"need_human\":true}"
+  },
+  {
+   "shape": "E_multi_turn_qa",
+   "run": 1,
+   "error": null,
+   "prompt_tokens": 80,
+   "completion_tokens": 160,
+   "cap": 160,
+   "finish": "length",
+   "ttft_s": 0.194,
+   "client_decode_tps": 136.6,
+   "engine_decode_tps": 136.5,
+   "engine_prefill_tps": 439.2,
+   "accept_pct": 42.4,
+   "drafts": "53/125",
+   "text": "这是一个非常典型的**高并发下的资源竞争与级联故障**场景。P99 延迟飙升（120ms -> 900ms）且数据库连接池打满，说明瓶颈主要集中在**数据库交互层**或**应用层的线程/资源调度**。\n\n以下是三个最可能的根因、区分方法及临时缓解手段：\n\n---\n\n### 根因一：慢 SQL 导致数据库 CPU/IO 饱和（最常见）\n\n**现象描述：**\n高峰期流量激增，某些查询未命中索引、锁竞争严重或数据量过大，导致单条 SQL 执行时间变长。由于连接被长时间占用，连接池迅速耗尽，后续请求排队等待连接，导致 P99 延迟飙升。\n\n**如何用指标区分：**\n"
+  },
+  {
+   "shape": "A_long_summary",
+   "run": 2,
+   "error": null,
+   "prompt_tokens": 40403,
+   "completion_tokens": 57,
+   "cap": 160,
+   "finish": "stop",
+   "ttft_s": 7.201,
+   "client_decode_tps": 112.5,
+   "engine_decode_tps": 112.4,
+   "engine_prefill_tps": 5627.1,
+   "accept_pct": 44.8,
+   "drafts": "13/29",
+   "text": "材料涵盖了本季度服务稳定性通过率的变化情况。\n材料记录了平均响应时间的波动数据。\n材料统计了告警数量的增减变化。\n材料涉及节点扩缩容与限流策略的调整记录。\n材料包含缓存命中率与数据库连接池配置的调整信息。"
+  },
+  {
+   "shape": "B_600w_plan",
+   "run": 2,
+   "error": null,
+   "prompt_tokens": 73,
+   "completion_tokens": 437,
+   "cap": 512,
+   "finish": "stop",
+   "ttft_s": 0.325,
+   "client_decode_tps": 125.1,
+   "engine_decode_tps": 125.1,
+   "engine_prefill_tps": 232.5,
+   "accept_pct": 42.6,
+   "drafts": "80/188",
+   "text": "**微服务拆分与发布风险控制技术方案**\n\n为应对现有单体架构日益增长的发布风险与维护成本，本方案旨在将核心业务逻辑拆分为三个独立微服务：**用户中心服务**、**订单交易服务**及**商品库存服务**。此次重构的核心目标是通过解耦实现故障隔离，显著降低单次发布的爆炸半径。\n\n在拆分边界界定上，我们将严格遵循领域驱动设计（DDD）原则。**用户中心服务**负责身份认证、权限管理及基础资料维护；**订单交易服务**聚焦于下单流程、状态机流转及支付对接；**商品库存服务**则独立管理SKU信息、库存扣减与补货逻辑。三者之间通过定义清晰的API契约进行通信，严禁跨库直接查询，确保业务边界的物理隔离。\n\n针对分布式环境下的数据一致性挑战，我们将采用“最终一致性”策略。对于强一致性要求极高的场景（如库存扣减），引入基于Redis的分布式锁配合数据库乐观锁机制，防止超卖；对于异步场景（如订单创建后通知用户），采用本地消息表结合MQ（消息队列）实现可靠投递，确保数据在短暂延迟后达到一致状态。同时，建立全局事务监控看板，实时追踪跨服务调用链路，便于快速定位不一致源头。\n\n灰度发布将分四步执行：首先，在测试环境完成全量功能验证；其次，在生产环境通过网关层配置流量权重，将5%的真实用户流量路由至新版本服务，并实时监控错误率与延迟指标；若指标正常，逐步扩大至20%、50%，直至100%全量切换。在此过程中，新旧版本并行运行，确保兼容性。\n\n回滚预案方面，我们设计了“一键降级”机制。一旦监控发现新版本导致核心接口成功率低于99.9%或响应时间激增超过阈值，运维平台将自动触发流量切回旧版本服务。同时，数据库变更采用向后兼容策略（如新增字段而非修改原有结构），确保回滚时无需执行复杂的数据修复脚本，从而在分钟级内恢复系统稳定，最大程度保障业务连续性。"
+  },
+  {
+   "shape": "C_python_script",
+   "run": 2,
+   "error": null,
+   "prompt_tokens": 86,
+   "completion_tokens": 512,
+   "cap": 512,
+   "finish": "length",
+   "ttft_s": 0.202,
+   "client_decode_tps": 254.1,
+   "engine_decode_tps": 253.5,
+   "engine_prefill_tps": 450.0,
+   "accept_pct": 79.1,
+   "drafts": "368/465",
+   "text": "```python\nimport json\nimport csv\nimport sys\nfrom collections import defaultdict\n\n\ndef process_jsonl(input_file, output_file):\n    # 检查文件是否存在\n    try:\n        with open(input_file, 'r', encoding='utf-8') as f:\n            pass\n    except FileNotFoundError:\n        print(\"错误：输入文件不存在。\", file=sys.stderr)\n        sys.exit(1)\n\n    # 按 status 分组统计 count 的总和与平均值\n    stats = defaultdict(lambda: {'sum': 0, 'count': 0})\n\n    with open(input_file, 'r', encoding='utf-8') as f:\n        for line_num, line in enumerate(f, start=1):\n            line = line.strip()\n            if not line:\n                continue\n            try:\n                record = json.loads(line)\n            except json.JSONDecodeError:\n                print(f\"错误：第 {line_num} 行 JSON 解析失败。\", file=sys.stderr)\n                continue\n\n            # 检查字段是否存在\n            if 'status' not in record or 'count' not in record:\n                print(f\"错误：第 {line_num} 行缺少 status 或 count 字段。\", file=sys.stderr)\n                continue\n\n            status = record['status']\n            try:\n                count_value = float(record['count'])\n            except (ValueError, TypeError):\n                print(f\"错误：第 {line_num} 行 count 字段值无效。\", file=sys.stderr)\n                continue\n\n            stats[status]['sum'] += count_value\n            stats[status]['count'] += 1\n\n    # 输出为 CSV\n    with open(output_file, 'w', encoding='utf-8', newline='') as f:\n        writer = csv.writer(f)\n        writer.writerow(['status', 'total_count', 'average_count'])\n        for status in sorted(stats.keys()):\n            total = stats[status]['sum']\n            cnt = stats[status]['count']\n            avg = total / cnt if cnt > 0 else 0\n            writer.writerow([status, total, round(avg, 2)])\n\n\nif __name__ == '__main__':\n    if len(sys.argv) != 3:\n        print(\"用法：python script.py <输入JSONL文件> <输出CSV文件>\", file=sys.stderr)\n        sys.exit"
+  },
+  {
+   "shape": "D_json_classify",
+   "run": 2,
+   "error": null,
+   "prompt_tokens": 101,
+   "completion_tokens": 24,
+   "cap": 320,
+   "finish": "stop",
+   "ttft_s": 0.199,
+   "client_decode_tps": 195.8,
+   "engine_decode_tps": 190.5,
+   "engine_prefill_tps": 538.6,
+   "accept_pct": 72.7,
+   "drafts": "16/22",
+   "text": "{\"intent\":\"account_login_issue\",\"sentiment\":\"anxious\",\"urgency\":5,\"need_human\":true}"
+  },
+  {
+   "shape": "E_multi_turn_qa",
+   "run": 2,
+   "error": null,
+   "prompt_tokens": 80,
+   "completion_tokens": 160,
+   "cap": 160,
+   "finish": "length",
+   "ttft_s": 0.178,
+   "client_decode_tps": 135.4,
+   "engine_decode_tps": 135.3,
+   "engine_prefill_tps": 478.5,
+   "accept_pct": 39.8,
+   "drafts": "49/123",
+   "text": "针对订单服务在高峰期出现的 **P99 延迟飙升（120ms -> 900ms）** 且伴随 **数据库连接池打满** 的现象，这通常表明系统瓶颈集中在数据库交互层或应用层的资源竞争上。以下是三个最可能的根因、区分方法及临时缓解手段：\n\n---\n\n### 根因一：慢 SQL 导致数据库响应变慢（最常见）\n\n**现象描述**  \n某些查询在数据量增长或索引失效后执行时间显著增加，导致单个请求占用数据库连接的时间过长，进而耗尽连接池。\n\n**如何用指标区分**  \n- **数据库侧**：查看 MySQL/PostgreSQL 的 `slow_query_log` 或性能监控（如 Prometheus + mysqld_exporter"
+  },
+  {
+   "shape": "A_long_summary",
+   "run": 3,
+   "error": null,
+   "prompt_tokens": 40403,
+   "completion_tokens": 57,
+   "cap": 160,
+   "finish": "stop",
+   "ttft_s": 7.219,
+   "client_decode_tps": 111.8,
+   "engine_decode_tps": 111.7,
+   "engine_prefill_tps": 5612.3,
+   "accept_pct": 41.9,
+   "drafts": "13/31",
+   "text": "材料涵盖了本季度服务稳定性通过率的变化情况。\n材料记录了平均响应时间的波动数据。\n材料统计了告警数量的增减变化。\n材料涉及节点扩缩容与限流策略的调整记录。\n材料包含缓存命中率与数据库连接池配置的调整信息。"
+  },
+  {
+   "shape": "B_600w_plan",
+   "run": 3,
+   "error": null,
+   "prompt_tokens": 73,
+   "completion_tokens": 504,
+   "cap": 512,
+   "finish": "stop",
+   "ttft_s": 0.273,
+   "client_decode_tps": 128.5,
+   "engine_decode_tps": 128.5,
+   "engine_prefill_tps": 278.9,
+   "accept_pct": 44.3,
+   "drafts": "112/253",
+   "text": "**微服务拆分与发布风险控制技术方案**\n\n为应对现有单体架构在迭代中日益凸显的耦合度高、发布风险大等问题，本方案旨在将核心业务拆分为“用户中心”、“订单交易”和“商品库存”三个独立微服务。此次重构的核心目标是通过解耦实现故障隔离，显著降低单次发布的爆炸半径与回滚成本。\n\n**一、 拆分边界定义**\n我们将严格遵循领域驱动设计（DDD）原则划定服务边界。**用户中心**负责身份认证、权限管理及基础资料维护；**订单交易**专注于下单流程、支付状态流转及订单生命周期管理；**商品库存**则独立处理SKU信息、库存扣减与补货逻辑。各服务间通过RESTful API或gRPC进行同步调用，异步场景采用消息队列解耦，确保业务逻辑的内聚性与独立性。\n\n**二、 数据一致性策略**\n鉴于分布式事务的复杂性，我们放弃强一致性，转而采用“最终一致性”模型。核心交易链路（如扣减库存与创建订单）引入基于本地消息表的事务性发件箱模式（Outbox Pattern），确保业务操作与消息发送的原子性。下游服务通过消费消息实现状态同步，并配合定时对账任务进行数据校验与补偿，从而在保障高可用的同时维持数据逻辑一致。\n\n**三、 灰度发布步骤**\n发布过程严格执行“金丝雀发布”策略。首先，在测试环境完成全量回归；其次，在生产环境选取1%的流量通过网关路由至新版本服务，监控核心指标（如错误率、延迟）；若指标正常，逐步将流量比例提升至5%、20%、50%，直至100%全量切换。每一步观察期不少于30分钟，确保潜在问题在早期被捕获。\n\n**四、 回滚预案**\n建立自动化监控告警机制，一旦新版本错误率超过阈值或响应时间显著劣化，立即触发自动回滚流程。通过网关配置一键将流量切回旧版本服务实例，同时保留新实例以便排查日志。此外，数据库变更采用向后兼容设计（如新增字段而非修改原有结构），确保代码回滚时数据层无需同步回退，实现秒级恢复业务连续性。\n\n本方案通过清晰的边界划分、稳健的一致性保障及精细化的发布控制，将有效降低系统演进风险，提升交付效率与稳定性。"
+  },
+  {
+   "shape": "C_python_script",
+   "run": 3,
+   "error": null,
+   "prompt_tokens": 86,
+   "completion_tokens": 512,
+   "cap": 512,
+   "finish": "length",
+   "ttft_s": 0.165,
+   "client_decode_tps": 261.3,
+   "engine_decode_tps": 260.7,
+   "engine_prefill_tps": 557.4,
+   "accept_pct": 79.6,
+   "drafts": "374/470",
+   "text": "```python\nimport json\nimport csv\nimport sys\nfrom collections import defaultdict\n\n\ndef main():\n    if len(sys.argv) != 3:\n        print(\"用法: python script.py <input_jsonl_file> <output_csv_file>\")\n        sys.exit(1)\n\n    input_file = sys.argv[1]\n    output_file = sys.argv[2]\n\n    # 检查文件是否存在\n    try:\n        with open(input_file, 'r', encoding='utf-8') as f:\n            lines = f.readlines()\n    except FileNotFoundError:\n        print(f\"错误：文件 '{input_file}' 不存在。\")\n        sys.exit(1)\n\n    # 按 status 分组统计 count 的总和与平均值\n    stats = defaultdict(lambda: {'sum': 0, 'count': 0})\n\n    for line_num, line in enumerate(lines, start=1):\n        line = line.strip()\n        if not line:\n            continue\n\n        # JSON 解析\n        try:\n            data = json.loads(line)\n        except json.JSONDecodeError as e:\n            print(f\"错误：第 {line_num} 行 JSON 解析失败：{e}\")\n            continue\n\n        # 字段缺失检查\n        if 'status' not in data or 'count' not in data:\n            print(f\"错误：第 {line_num} 行缺少 'status' 或 'count' 字段。\")\n            continue\n\n        status = data['status']\n        count_value = data['count']\n\n        # 确保 count 是数值类型\n        if not isinstance(count_value, (int, float)):\n            print(f\"错误：第 {line_num} 行 'count' 字段不是数值类型。\")\n            continue\n\n        stats[status]['sum'] += count_value\n        stats[status]['count'] += 1\n\n    # 输出 CSV\n    try:\n        with open(output_file, 'w', encoding='utf-8', newline='') as f:\n            writer = csv.writer(f)\n            writer.writerow(['status', 'total_count', 'average_count'])\n            for status in sorted(stats.keys()):\n                total = stats[status]['sum']\n                cnt = stats[status]['count']\n                avg = total / cnt if cnt > 0 else 0\n                writer.writerow([status, total, round"
+  },
+  {
+   "shape": "D_json_classify",
+   "run": 3,
+   "error": null,
+   "prompt_tokens": 101,
+   "completion_tokens": 24,
+   "cap": 320,
+   "finish": "stop",
+   "ttft_s": 0.18,
+   "client_decode_tps": 216.4,
+   "engine_decode_tps": 209.1,
+   "engine_prefill_tps": 597.6,
+   "accept_pct": 87.5,
+   "drafts": "14/16",
+   "text": "{\"intent\":\"account_login_issue\",\"sentiment\":\"anxious\",\"urgency\":4,\"need_human\":true}"
+  },
+  {
+   "shape": "E_multi_turn_qa",
+   "run": 3,
+   "error": null,
+   "prompt_tokens": 80,
+   "completion_tokens": 160,
+   "cap": 160,
+   "finish": "length",
+   "ttft_s": 0.172,
+   "client_decode_tps": 139.3,
+   "engine_decode_tps": 139.1,
+   "engine_prefill_tps": 496.6,
+   "accept_pct": 45.5,
+   "drafts": "50/110",
+   "text": "针对订单服务在高峰期出现的 **P99 延迟飙升（120ms -> 900ms）** 且伴随 **数据库连接池打满** 的现象，这通常表明系统瓶颈集中在数据库交互层或应用层的资源竞争上。以下是三个最可能的根因、区分方法及临时缓解手段：\n\n---\n\n### 根因一：慢 SQL 导致数据库响应变慢（最常见）\n\n**现象描述**  \n某些查询在数据量增长或索引失效后执行时间显著增加，导致单个请求占用数据库连接的时间过长，进而耗尽连接池。\n\n**如何用指标区分**  \n- **数据库侧**：查看 MySQL/PostgreSQL 的 `slow_query_log` 或性能监控（如 Prometheus + mysqld_exporter"
+  }
+ ]
+}
