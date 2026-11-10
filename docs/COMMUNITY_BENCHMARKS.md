@@ -77,6 +77,11 @@ and their limits. Report what you actually measured and label estimates separate
   fork `586dc5e` Linux source build (CUDA 13.0), NVFP4 GPTQ pack, 294,912-token window, `--kv int8 --kv-resident 32768`;
   **10 consecutive strict-256K runs (≥262,144 prompt tokens), 13/13 retrieval and reasoning checks on every run**,
   ~2,857 tok/s prefill and 102.6 tok/s decode at ~262K, 22.9 GiB VRAM peak; same-box llama.cpp UD-Q4_K_XL comparison.
+- [2026-11-10: RTX PRO 4000 Blackwell 24 GB (sm_120), Threadripper 7970X, 64 GB of RAM simulated (cgroup cap 56G on a 128 GB box)](../bench/results/2026-11-10-community-rtx-pro-4000-24gb-64gb-ram-sim/README.md):
+  fork `586dc5e` Linux source build, NVFP4 GPTQ pack in the low-RAM mode (`--ram-budget 48`, K/V in VRAM, 131,072-token context);
+  48 GiB of experts pinned in RAM, 5,562 in the GPU cache, the rest read from the NVMe. Two runs each at 4K/32K/128K:
+  **decode 80.0/82.0 tok/s at 4K/32K (109.8/107.5 with 128 GB on the same box)**, TTFT 2.7/16.2/60.9 s (2.0/11.4/43.5 s),
+  ready in under a minute; a 24 GB card has fewer GPU expert slots than the 5090 behind the README's 64 GB figure.
 
 ## Run the standard benchmark
 
