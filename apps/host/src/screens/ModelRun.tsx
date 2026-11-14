@@ -1,5 +1,5 @@
 import { tr } from '../lib/i18n';
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { newId } from '../lib/uid';import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { ActionError, Btn, Dialog, ErrorNotice, Icon, Select } from '../components/ui';
 import { Screen } from '../components/layout';
 import { DemoTest } from '../components/EngineExperience';
@@ -333,7 +333,7 @@ function LegacyModelRunScreen({ importFirst = false, initialVariant }: {
                 setIssues(checked.issues);
                 throw new Error('Correct the configuration before saving a profile.');
             }
-            const profile = { id: updateExisting && selectedProfile ? selectedProfile.id : crypto.randomUUID(), name: profileName.trim(), variantId: model.id, hardware: computer, engineVersion: engine.engine.version, config: structuredClone(config), imageModel: imageChoice, updatedAt: new Date().toISOString() };
+            const profile = { id: updateExisting && selectedProfile ? selectedProfile.id : newId(), name: profileName.trim(), variantId: model.id, hardware: computer, engineVersion: engine.engine.version, config: structuredClone(config), imageModel: imageChoice, updatedAt: new Date().toISOString() };
             persist(saveProfile(profiles, profile, makeDefault));
             setActiveProfile(profile.id);
             setProfileOpen(false);

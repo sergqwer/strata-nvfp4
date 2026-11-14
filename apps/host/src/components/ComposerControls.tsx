@@ -1,5 +1,5 @@
 import { tr } from '../lib/i18n';
-import { modelFamilyIcon } from '../lib/model-icons';
+import { newId } from '../lib/uid';import { modelFamilyIcon } from '../lib/model-icons';
 import { useEffect, useRef, useState } from 'react';
 import { FloatingMenu } from './FloatingMenu';
 import { DictationControl } from './DictationControl';
@@ -86,7 +86,7 @@ export function ComposerControls({ session, onPreview, onAttach, onError, onSlas
         }
         const isPdf = /\.pdf$/i.test(selected.name), isImage = photoTypes.test(selected.name), isTable = /\.csv$/i.test(selected.name), isCode = /\.(tsx?|jsx?|py|json|css|rs|go|sh)$/i.test(selected.name), isHtml = /\.html?$/i.test(selected.name);
         try {
-            onPreview({ id: crypto.randomUUID(), kind: isPdf ? 'pdf' : isImage ? 'image' : isTable ? 'table' : isCode ? 'code' : isHtml ? 'website' : 'markdown', title: selected.name, ...(isPdf || isImage ? { url: URL.createObjectURL(selected) } : { content: await selected.text() }) });
+            onPreview({ id: newId(), kind: isPdf ? 'pdf' : isImage ? 'image' : isTable ? 'table' : isCode ? 'code' : isHtml ? 'website' : 'markdown', title: selected.name, ...(isPdf || isImage ? { url: URL.createObjectURL(selected) } : { content: await selected.text() }) });
         }
         catch {
             onError('Could not read the file.');
