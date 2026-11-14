@@ -7253,12 +7253,21 @@ def run_with_mcp(svc: Service, hub, messages, tools, kw, ids, thinking, max_new,
         if rounds >= max_rounds:
             finalizing = True
             tools = None
-            system_end = next((index for index, message in enumerate(messages)
-                               if message.get("role") not in ("system", "developer")), len(messages))
-            messages.insert(system_end, {"role": "system", "content":
-                f"The tool-use limit of {max_rounds} rounds has been reached. No tools are available for this final "
-                "reply. Answer the user's original request in their language using the results already obtained. "
-                "Explain any gaps in the available evidence. Do not request or emit further tool calls."})
+            note = (f"The tool-use limit of {max_rounds} rounds has been reached. No tools are available for this final "
+                    "reply. Answer the user's original request in their language using the results already obtained. "
+                    "Explain any gaps in the available evidence. Do not request or emit further tool calls.")
+            head = messages[0] if messages and isinstance(messages[0], dict) else None
+            base = head.get("content") if head is not None and head.get("role") in ("system", "developer") else None
+            if isinstance(base, str):
+                # A pack's own chat template can allow exactly ONE system message at the head: the
+                # Qwen-family template raises "System message must be at the beginning." on a second
+                # one, which made this insert a hard 400 on the limit round. Fold the note into the
+                # head system when there is one; only a headless request still gets an insert.
+                messages[0] = dict(head, content=base + "\n\n" + note)
+            else:
+                system_end = next((index for index, message in enumerate(messages)
+                                   if message.get("role") not in ("system", "developer")), len(messages))
+                messages.insert(system_end, {"role": "system", "content": note})
             yield "mcp", {"event": "limit", "max_rounds": max_rounds}
         try:
             ids, thinking, max_new = svc.prepare(messages, tools, kw, max_req, cancel=cancel)
