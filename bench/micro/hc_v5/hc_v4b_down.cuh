@@ -148,7 +148,7 @@ __global__ void __launch_bounds__(TH) gr_down_v4b_kernel(GrMulti m, float* __res
 #pragma unroll
         for (int k = 0; k < MAX_T; ++k) {
             const float4* xp = reinterpret_cast<const float4*>(xs + (size_t) k * SL);
-            x0[k] = xp[j]; x1[k] = xp[SL / 8 + j];
+            if ((DIAG & 4) != 0 && k > 0) { x0[k] = x0[0]; x1[k] = make_float4(x1[0].x + k, x1[0].y, x1[0].z, x1[0].w); } else { x0[k] = xp[j]; x1[k] = xp[SL / 8 + j]; }
         }
         // dot8u of every (row, token) at once: each chain in dot8u's order, the chains interleaved
         float d[R2][MAX_T];

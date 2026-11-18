@@ -190,6 +190,8 @@ template <int KB> static void v4e_attr() {
     f(gr_down_v4e_kernel<1, true, 2, KB>, 1); f(gr_down_v4e_kernel<2, true, 2, KB>, 2); f(gr_down_v4e_kernel<3, true, 2, KB>, 3); f(gr_down_v4e_kernel<4, true, 2, KB>, 4);
     f(gr_down_v4e_kernel<5, true, 2, KB>, 5); f(gr_down_v4e_kernel<6, true, 2, KB>, 6); f(gr_down_v4e_kernel<7, true, 2, KB>, 7); f(gr_down_v4e_kernel<8, true, 2, KB>, 8);
 }
+template <int TT> static cudaError_t v4bd4(const GrMulti& m, float* s, int T, cudaStream_t st, int part) { return v4b_t<TT, 2, 2, 256, 4>(m, s, T, st, part); }
+template <int TT> static cudaError_t v4bd36(const GrMulti& m, float* s, int T, cudaStream_t st, int part) { return v4b_t<TT, 2, 2, 256, 36>(m, s, T, st, part); }
 #define TSWITCH(F, ...) switch (T) { case 1: return F<1>(__VA_ARGS__); case 2: return F<2>(__VA_ARGS__); case 3: return F<3>(__VA_ARGS__);     case 4: return F<4>(__VA_ARGS__); case 5: return F<5>(__VA_ARGS__); case 6: return F<6>(__VA_ARGS__); case 7: return F<7>(__VA_ARGS__);     default: return F<8>(__VA_ARGS__); }
 template <int TT, int DG>
 static cudaError_t dg_t(const GrMulti& m, float* scratch, int T, cudaStream_t st, int part) {
@@ -217,7 +219,7 @@ template <int DG> static void dg_attr1() {
     f(gr_down_dg_kernel<7, true, true, 2, DG>, 7); f(gr_down_dg_kernel<8, true, true, 2, DG>, 8);
 }
 static void set_attrs() {
-    v4b_attr<1, 2>(); v4b_attr<2, 2>(); v4b_attr<4, 2>(); v4b_attr<2, 1>(); v4b_attr<2, 2, 128>(); v4b_attr<1, 2, 128>(); v4b_attr<2, 1, 128>(); v4b_attr<2, 2, 256, 1>(); v4b_attr<2, 2, 256, 2>(); v4b_attr<2, 2, 256, 32>(); v4b_attr<1, 4>(); v4b_attr<2, 4>(); v4d_attr<2>(); v4d_attr<4>(); v4d_attr<8>(); v4e_attr<1>(); v4e_attr<2>(); v4e_attr<4>();
+    v4b_attr<1, 2>(); v4b_attr<2, 2>(); v4b_attr<4, 2>(); v4b_attr<2, 1>(); v4b_attr<2, 2, 128>(); v4b_attr<1, 2, 128>(); v4b_attr<2, 1, 128>(); v4b_attr<2, 2, 256, 1>(); v4b_attr<2, 2, 256, 2>(); v4b_attr<2, 2, 256, 32>(); v4b_attr<2, 2, 256, 4>(); v4b_attr<2, 2, 256, 36>(); v4b_attr<1, 4>(); v4b_attr<2, 4>(); v4d_attr<2>(); v4d_attr<4>(); v4d_attr<8>(); v4e_attr<1>(); v4e_attr<2>(); v4e_attr<4>();
     d5_attr<2>(); d5_attr<4>(); d5_attr<8>(); d5_attr<2, 1>(); d5_attr<2, 2>(); d5_attr<2, 4>(); d5_attr<2, 8>(); d5_attr<2, 16>(); d5_attr<2, 48>(); d5_attr<2, 64>(); d5_attr<2, 128>(); d5_attr<2, 288>(); d5_attr<2, 544>(); d5_attr<2, 1024>(); d5_attr<4, 1024>(); d5_attr<2, 1056>(); d5_attr<2, 32>(); d5_attr<2, 36>();
     dg_attr1<1>(); dg_attr1<2>(); dg_attr1<4>(); dg_attr1<8>();
     v4_attr<1, true>(); v4_attr<2, true>(); v4_attr<3, true>(); v4_attr<4, true>(); v4_attr<5, true>(); v4_attr<6, true>();
@@ -227,7 +229,7 @@ static const char* variant_name(int v) {
     switch (v) {
         case 0: return "v4";
         case 1: return "v4 exact78";
-        case 2: return "v4dn+v5up"; case 11: return "v4b kb1"; case 12: return "v4b kb2"; case 14: return "v4b kb4"; case 15: return "v4b kb2 r1"; case 21: return "v4c kb2"; case 31: return "v4b distinct"; case 33: return "v4b stamps"; case 40: return "v4b+v5b up"; case 41: return "v4b r4 kb1"; case 60: return "v4d cs2"; case 70: return "v4e kb1"; case 71: return "v4e kb2"; case 72: return "v4e kb4"; case 61: return "v4d cs4"; case 62: return "v4d cs8"; case 42: return "v4b r4 kb2"; case 32: return "v4b bo dist"; case 22: return "v4c kb1"; case 23: return "v4c kb2 r1";
+        case 2: return "v4dn+v5up"; case 11: return "v4b kb1"; case 12: return "v4b kb2"; case 14: return "v4b kb4"; case 15: return "v4b kb2 r1"; case 21: return "v4c kb2"; case 31: return "v4b distinct"; case 33: return "v4b stamps"; case 34: return "v4b 1-x lds"; case 35: return "v4b 1x stamps"; case 40: return "v4b+v5b up"; case 41: return "v4b r4 kb1"; case 60: return "v4d cs2"; case 70: return "v4e kb1"; case 71: return "v4e kb2"; case 72: return "v4e kb4"; case 61: return "v4d cs4"; case 62: return "v4d cs8"; case 42: return "v4b r4 kb2"; case 32: return "v4b bo dist"; case 22: return "v4c kb1"; case 23: return "v4c kb2 r1";
         case 3: return "v5 P2"; case 81: return "P2 nocl"; case 82: return "P2 coalW"; case 84: return "P2 nostage"; case 88: return "P2 ldg"; case 96: return "P2 cp.ca"; case 148: return "P2 ca stamps"; case 164: return "P2 seqdots"; case 228: return "P2 rot"; case 388: return "P2 now stamps"; case 644: return "P2 distinct st"; case 50: return "v5 P2 ldg"; case 51: return "v5 P4 ldg"; case 52: return "P2 ldg stamps"; case 132: return "P2 stamps"; case 136: return "P2 nost stamps"; case 4: return "v5 P4"; case 5: return "v5 P8";
         case 91: return "dg nostage"; case 92: return "dg nodots"; case 94: return "dg up nolo"; case 98: return "dg up 1dot";
     }
@@ -245,6 +247,8 @@ static cudaError_t launch_variant(int v, const GrMulti& m, float* scratch, int T
         case 21: TSWITCH(v4ck2, m, scratch, T, st, part)
         case 31: TSWITCH(v4bd1, m, scratch, T, st, part)
         case 33: TSWITCH(v4bd32, m, scratch, T, st, part)
+        case 34: TSWITCH(v4bd4, m, scratch, T, st, part)
+        case 35: TSWITCH(v4bd36, m, scratch, T, st, part)
         case 40: TSWITCH(v5bk2, m, scratch, T, st, part)
         case 41: TSWITCH(v4br4k1, m, scratch, T, st, part)
         case 60: TSWITCH(v4dc2, m, scratch, T, st, part)
