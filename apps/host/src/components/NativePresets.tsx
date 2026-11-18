@@ -1,5 +1,6 @@
 import { tr } from '../lib/i18n';
-import { newId } from '../lib/uid';import { useRef, useState } from 'react';
+import { newId } from '../lib/uid';
+import { useRef, useState } from 'react';
 import { Btn, Dialog, Icon } from './ui';
 import { FloatingMenu } from './FloatingMenu';
 type Preset = {

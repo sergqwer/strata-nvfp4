@@ -1,5 +1,6 @@
 import { tr } from '../lib/i18n';
-import { newId } from '../lib/uid';import { modelFamilyIcon } from '../lib/model-icons';
+import { newId } from '../lib/uid';
+import { modelFamilyIcon } from '../lib/model-icons';
 import { useEffect, useRef, useState } from 'react';
 import { FloatingMenu } from './FloatingMenu';
 import { DictationControl } from './DictationControl';

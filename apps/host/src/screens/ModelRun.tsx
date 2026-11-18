@@ -1,5 +1,6 @@
 import { tr } from '../lib/i18n';
-import { newId } from '../lib/uid';import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { newId } from '../lib/uid';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { ActionError, Btn, Dialog, ErrorNotice, Icon, Select } from '../components/ui';
 import { Screen } from '../components/layout';
 import { DemoTest } from '../components/EngineExperience';
