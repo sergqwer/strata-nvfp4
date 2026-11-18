@@ -65,16 +65,18 @@ class PythonBooleans(unittest.TestCase):
                    {"literal": "True", "count": "True", "text_or_null": "False"})
 
     def test_other_spellings_are_not_booleans(self):
-        for spelling, value in (('"True"', "True"), ("yes", "yes"), ("TRUE", "TRUE"), ("1", 1), ("None", "None")):
+        # strata-nvfp4 0.2.15: upstream's #5979 reads any case of true / false for a declared boolean ("TRUE" -> True)
+        for spelling, value in (('"True"', "True"), ("yes", "yes"), ("TRUE", True), ("1", 1), ("None", "None")):
             with self.subTest(spelling=spelling):
                 self.check({"active": spelling}, {"active": value})
 
-    def test_an_undeclared_tool_decodes_them_too(self):
+    def test_an_undeclared_tool_keeps_the_text(self):
+        # strata-nvfp4 0.2.15: upstream's #5979 rule - no schema, the text as before (this fork decoded it until 0.2.13)
         text = "<tool_call>\n<function=other>\n<parameter=flag>\nTrue\n</parameter>\n</function>\n</tool_call>"
         p = OutputParser(thinking=False, tools=[TOOL], stream_tools=True, deferred=True)   # #804: undeclared = call only with deferred tools
         evs = p.feed(text) + p.finish("stop")
-        self.assertEqual([e.call.arguments for e in evs if e.kind == "tool_call"], [{"flag": True}])
-        self.assertEqual(json.loads("".join(e.text for e in evs if e.kind == "tool_args")), {"flag": True})
+        self.assertEqual([e.call.arguments for e in evs if e.kind == "tool_call"], [{"flag": "True"}])
+        self.assertEqual(json.loads("".join(e.text for e in evs if e.kind == "tool_args")), {"flag": "True"})
 
     def test_bool_allowed(self):
         self.assertTrue(bool_allowed({"type": "boolean"}))

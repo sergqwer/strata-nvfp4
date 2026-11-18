@@ -1284,6 +1284,14 @@ def lenient_json(text: str):
 PY_BOOLS = {"True": True, "False": False}
 
 
+def declared_of(spec):   # strata-nvfp4 0.2.15
+    """What coerce_value is told a parameter is: its "type"; a schema without one (anyOf / oneOf, or no type at all) as
+    the whole dict, so bool_allowed can read it; no schema (or an empty one): None, upstream's "as before"."""
+    if not isinstance(spec, dict) or not spec:
+        return None
+    return spec["type"] if "type" in spec else spec
+
+
 def bool_allowed(spec) -> bool:   # strata-nvfp4
     """A parameter's schema lets a Python-style `True` / `False` be its boolean: it declares "boolean" (alone, in a
     type list, or in an anyOf / oneOf branch) or declares no type at all.  A declared string, number, object, ...
@@ -1311,6 +1319,8 @@ def coerce_value(value: str, declared, notes: list | None = None):
     except ValueError:
         if not value.lstrip().startswith(("[", "{", "`")) or (isinstance(declared, list) and "string" in declared):
             v = value.strip()                    # strata-nvfp4: Qwen's `True` / `False` where the type allows a boolean
+            if declared is None or (isinstance(declared, list) and "string" in declared):   # #5979 (upstream 0.2.15): no schema, or a string allowed: the text stays text
+                return value
             return PY_BOOLS[v] if v in PY_BOOLS and bool_allowed(declared if isinstance(declared, dict) else
                                                                  ({} if declared is None else {"type": declared})) else value
         try:
@@ -1350,7 +1360,7 @@ def parse_tool_call(body: str, schema: dict | None = None, notes: list | None = 
             value = value[1:]
         if value.endswith("\n"):
             value = value[:-1]
-        args[pname] = coerce_value(value, (props.get(pname) or {}).get("type"), notes)
+        args[pname] = coerce_value(value, declared_of(props.get(pname)), notes)
     return ToolCall(name=name, arguments=args)
 
 
@@ -1747,7 +1757,7 @@ class OutputParser:
                     return out
                 self.scall = ToolCall(name=name, arguments={})
                 props = ((self.schemas.get(name) or {}).get("parameters") or {}).get("properties") or {}
-                self.sdeclared = {k: (v or {}).get("type") for k, v in props.items()}
+                self.sdeclared = {k: declared_of(v) for k, v in props.items()}
                 out.append(Event("tool_start", call=self.scall))
                 args("{")
                 self.sp += b + 1

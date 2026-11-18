@@ -6362,9 +6362,9 @@ def build_engine(gpu, vision, yes, llama, toolkit=None) -> Path:
             if local and (eng / EXE).exists() else "  Compiling the Strata engine for your GPU (10-20 minutes, once) ...")
         cmake_build(ROOT, bdir, "strata",
                     ["-DSTRATA_ENABLE_CUDA=ON", "-DSTRATA_BUILD_TESTS=OFF", "-DSTRATA_Q6K_EXPERTS=ON", "-DSTRATA_MMQ_KQUANTS=ON",
-                     # without llama.cpp's MMQ, also in a build folder configured before (its cache says ON); ARM64 (DGX Spark):
-                     # not measured without MMQ, kept as in 0.2.13
-                     "-DSTRATA_MMQ=" + ("ON" if is_arm64() else "OFF"),
+                     # strata-nvfp4: with llama.cpp's MMQ, as 0.2.13 and this fork's release engine (its NVFP4 prompt path is
+                     # MMQ w4a4x2 / w4a8; upstream 0.2.14+ builds without it, the int8 kernels give other bits)
+                     "-DSTRATA_MMQ=ON",
                      f"-DCMAKE_CUDA_ARCHITECTURES={cuda_archs}",
                      f"-DCMAKE_CUDA_COMPILER={nvcc}", *toolkit_root_defs(nvcc), *ggml_defs(llama),
                      *host_compiler_defs(True), *engine_defs(archs, toolkit),

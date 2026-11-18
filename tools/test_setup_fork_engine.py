@@ -78,7 +78,7 @@ class Case(unittest.TestCase):
         # the temp ROOT here): the fork's release is named, so the tag is tried first as in a real install
         return [mock.patch.object(setup, "ROOT", self.root),
                 mock.patch.object(setup, "release_version", lambda: "0.2.13-nvfp4.1"),
-                mock.patch.object(setup.urllib.request, "urlopen", urlopen),
+                mock.patch.object(setup.urllib.request, "urlopen", urlopen), mock.patch.object(setup.netpolicy, "urlopen", urlopen),
                 mock.patch.object(setup, "download", download),
                 mock.patch.object(setup, "engine_digest", lambda asset, base: None),
                 mock.patch.object(setup, "gpu_info", lambda *a: {"arch": self.arch, "name": "X", "vram_gb": 24.0}),

@@ -134,7 +134,7 @@ class Choice(unittest.TestCase):
         self.assertTrue(lines[0].startswith("1) Qwen3.8-Flash-Next (NVFP4, GPTQ)"), lines)
         self.assertTrue(lines[1].startswith("2) Qwen3.8-Flash-Next (NVIDIA's NVFP4)"), lines)
         self.assertTrue(lines[2].startswith("3) Qwen3.8-Flash-Next "), lines)
-        self.assertEqual(len(lines), 2 + len(setup.FAMILIES) + len(setup.OWN_PATH_FAMILIES) + len(setup.MULTI_FILE_FAMILIES))   # + upstream's Qwen3.6
+        self.assertEqual(len(lines), 2 + len(setup.FAMILIES) + len(setup.OWN_PATH_FAMILIES))   # (strata-nvfp4 0.2.15: DeepSeek gone upstream)   # + upstream's Qwen3.6
         self.assertNotIn("Huihui", menu)                                  # withdrawn
         self.assertNotIn("OrcaRouter", menu)                              # withdrawn
         self.assertEqual(cfg["model_name"], "qwen3.8-flash-next-gptq-nvfp4")
@@ -433,7 +433,7 @@ class Fetch(unittest.TestCase):
             asked.append(req.full_url)
             raise setup.urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
         url = f"https://huggingface.co/{QG}/resolve/{'1' * 40}/ple.gguf"
-        with mock.patch.object(setup.urllib.request, "urlopen", urlopen), mock.patch.object(setup.time, "sleep"), \
+        with mock.patch.object(setup.urllib.request, "urlopen", urlopen), mock.patch.object(setup.netpolicy, "urlopen", urlopen), mock.patch.object(setup.time, "sleep"), \
                 mock.patch("sys.stdout", io.StringIO()) as out, self.assertRaises(SystemExit):
             setup.download(url, self.dst, "ple.gguf", unpinned_ok=False)
         self.assertTrue(asked)

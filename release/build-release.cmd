@@ -13,7 +13,9 @@ if not defined VS (echo build-release: no Visual Studio installation found & exi
 call "%VS%\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1 || exit /b 1
 rem strata-nvfp4 0.2.13: the vendored third_party/strata-ggml (upstream 0.2.x; the same llama.cpp pin 3cf03257), no llama.cpp checkout
 rem configured on every run: an existing build-release\ from before takes the architecture list too
+rem strata-nvfp4 0.2.15: -DSTRATA_MMQ=ON - upstream 0.2.14 builds without llama.cpp's MMQ by default; this fork keeps
+rem its NVFP4 prompt path on MMQ (w4a4x2 / w4a8, the same bits as 0.2.13; docs/NVFP4.md, upstream 0.2.15)
 cmake -G Ninja -S "%ROOT%" -B "%ROOT%\build-release" -DCMAKE_BUILD_TYPE=Release -DSTRATA_ENABLE_CUDA=ON ^
-      -DSTRATA_BUILD_TESTS=OFF -DSTRATA_PORTABLE=ON "-DCMAKE_CUDA_ARCHITECTURES=75-real;86-real;89-real;120-real" "-DSTRATA_GGML_DIR=" >nul || exit /b 1
+      -DSTRATA_BUILD_TESTS=OFF -DSTRATA_PORTABLE=ON "-DCMAKE_CUDA_ARCHITECTURES=75-real;86-real;89-real;120-real" "-DSTRATA_GGML_DIR=" -DSTRATA_MMQ=ON >nul || exit /b 1
 cmake --build "%ROOT%\build-release" --target strata -j 16 || exit /b 1
 exit /b 0

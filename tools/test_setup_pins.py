@@ -347,7 +347,7 @@ class Engine(unittest.TestCase):
         (self.root / "engine" / "BUILD.json").write_text(json.dumps({"version": "0.1.40.3", "archs": [89]}))
         (self.root / "engine" / setup.EXE).write_bytes(b"upstream")
         got, wrote = [], []
-        with mock.patch.object(setup.urllib.request, "urlopen", lambda req, timeout=None: Response()), \
+        with mock.patch.object(setup.urllib.request, "urlopen", lambda req, timeout=None: Response()), mock.patch.object(setup.netpolicy, "urlopen", lambda req, timeout=None: Response()), \
                 mock.patch.object(setup, "download", self.fake_download(got, wrote)), \
                 mock.patch.object(setup, "engine_digest", self.fake_digest(wrote)):
             eng, out = quiet(setup.get_prebuilt, setup.PREBUILT_URL, {"arch": 89}, "gpu")
@@ -373,7 +373,7 @@ class Engine(unittest.TestCase):
         def urlopen(req, timeout=None):
             raise AssertionError("asked the network for an asset the fork does not publish")
 
-        with mock.patch.object(setup.urllib.request, "urlopen", urlopen):
+        with mock.patch.object(setup.urllib.request, "urlopen", urlopen), mock.patch.object(setup.netpolicy, "urlopen", urlopen):
             eng, out = quiet(setup.get_prebuilt, setup.PREBUILT_URL, {"arch": 89}, "gpu", toolkit=12)
             self.assertIsNone(eng)
             self.assertIn("publishes a ready-made engine for Windows (CUDA 13) only: compiling it from this source", out)
