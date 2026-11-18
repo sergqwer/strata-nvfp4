@@ -2,7 +2,7 @@
 
 **Qwen3.8-Flash-Next (125B hybrid MoE) with NVFP4 experts on one RTX 20, 30, 40 or 50 card (12 GB of VRAM or more)
 and 64 GB of RAM or more, text and pictures.** A fork of [Niko1221/Strata](https://github.com/Niko1221/Strata), on
-upstream 0.2.13 (its engine, server and setup; not its app or installers). Setup installs, ready-made from Hugging Face, the original Qwen in NVFP4 (our GPTQ, or NVIDIA's
+upstream 0.2.15 (its engine, server and setup; not its app or installers). Setup installs, ready-made from Hugging Face, the original Qwen in NVFP4 (our GPTQ, or NVIDIA's
 checkpoint converted), censored as Qwen ships it; on ours an opt-in switch turns the censorship off. Upstream's GGUF
 models are still offered.
 
@@ -61,6 +61,21 @@ files by hand.
 
 ## What's new
 
+- **On upstream 0.2.15 (0.2.15-nvfp4.1).** Upstream's engine, server and setup of 0.2.14 and 0.2.15 (the engine reports
+  0.1.61) under this fork's NVFP4 models. One GPU and one dialog give the same bits as 0.2.13-nvfp4.1 at 2K and 32K;
+  prompts run at the same speed (32K: 8,800 tokens/s both); decode measured 1.8% slower on the 5090 (12.0 ms a round
+  against 11.7)
+  ([the port and its checks](docs/NVFP4.md#upstream-0215-2026-11-18-release-0215-nvfp41)).
+  - Upstream 0.2.14 builds its engine without llama.cpp's MMQ kernels and runs NVFP4 prompts on its own int8 kernels.
+    This fork's release is still built with MMQ and keeps its NVFP4 prompt path: on the 5090 upstream's kernels gave
+    other answers (they are not the same bits) and were not faster (32K prompt 2.6% slower, 128K 5% slower).
+    `STRATA_PF_FUSED=1` selects upstream's kernels.
+  - New in this fork: the hyper-connection read v5 (opt-in, `STRATA_GR_V5=1`, checked bit for bit against the plain
+    read).
+  - Behaviour change from upstream's #5979: a tool argument `True` / `False` (any case) is a boolean where the tool
+    declares one; with no schema, or where a string is allowed, the text stays text. This fork's Python booleans
+    also still apply to `anyOf` / untyped parameters.
+  - Setup: DeepSeek is gone, as upstream removed it.
 - **On upstream 0.2.13 (0.2.13-nvfp4.1).** Upstream's engine, server and setup of 0.2.1 to 0.2.13 (the engine reports
   0.1.59) under this fork's NVFP4 models. One GPU and one dialog give the same bits as 0.2.0-beta-nvfp4.3 at 2K and 32K;
   decode and a 32K prompt run at the same speed as 0.2.0-beta-nvfp4.3 on the 5090 (12.2 ms a round both;

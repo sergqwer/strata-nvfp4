@@ -378,6 +378,61 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### Upstream 0.2.15 (2026-11-18, release 0.2.15-nvfp4.1)
+
+The fork moves from upstream 0.2.13 to upstream 0.2.15 (the engine reports 0.1.61), the usual way (port-fork.md): the
+fork's 205 commits since 0.2.13 (with #26, #28, the `_mend_tags` fix of #24 and the hyper-connection read v5) were
+cherry-picked onto the tag, which gave 202 commits; 3 came out empty (their content was in files merged by hand). 22
+files that both sides changed were each carried over as one 3-way merge. Upstream's DeepSeek support is gone from
+setup, as upstream removed it.
+
+- **The NVFP4 prompt path stays on MMQ.** Upstream 0.2.14 builds the engine without llama.cpp's MMQ by default
+  (`-DSTRATA_MMQ=OFF`), and NVFP4 prompt experts then run on Strata's own int8 kernels. `release/build-release.cmd`
+  and setup's CUDA source build pass `-DSTRATA_MMQ=ON`, so NVFP4 prompts keep this fork's path (gate/up on two FP4
+  activation terms, down on w4a8). Measured on the 5090, tray GPTQ profile without the control vector, 3 interleaved
+  rounds, medians:
+
+  | prompt | 0.2.13-nvfp4.1 | this release | `STRATA_PF_FUSED=1` (upstream's int8 kernels) | built without MMQ |
+  |---|---|---|---|---|
+  | 2K | 2,826 tok/s | 2,869 tok/s | 2,832 tok/s | 2,812 tok/s |
+  | 8K | 6,846 | 6,825 | 6,842 | 6,831 |
+  | 32K | 8,799 | 8,794 | 8,540 | 8,443 |
+  | 128K | 9,231 | 9,185 | 8,743 | 8,819 |
+
+  Upstream's kernels give other answers. KL of the first verify window against this release, with 8 prompts at each
+  size and a paired bootstrap 95% CI: 0.0165 [0.0001, 0.0463] at 2K and 0.0758 [0.0004, 0.2132] at 32K. Running this
+  release twice gives 0.0019 at 2K and exactly 0 at 32K. Against the exact FP16 prompt path, upstream's kernels are
+  further off at 2K (0.0119 against 0.0018; the paired difference +0.0101 [+0.0002, +0.0251]) and closer at 32K
+  (0.0062 against 0.0668). The 32K figure comes from one prompt, where this fork's path has KL 0.51 against FP16; the
+  other seven stay at 0.023 or less. Eight prompts cannot settle that (the CI of the difference includes 0), so the
+  default stays as it was. `STRATA_PF_FUSED=1` selects upstream's kernels.
+- **Upstream's other new defaults do not change this fork's answers.** The release gives the same bits as
+  0.2.13-nvfp4.1 at 2K and 32K. With the fork's defaults switched off, it gives the same bits as clean upstream 0.2.15,
+  both built with MMQ and built without it. Some new defaults are compiled only into a build without MMQ: equal-size
+  long-prompt chunks and the tail rules. Others do not apply to this pack:
+  - the Q8_0 hyper-connection weights (this pack's are BF16);
+  - the fused prompt kernels on by default for the IQ/K-quant classes;
+  - the staged walk's batched group entry, which NVFP4 takes only with `STRATA_PF_FUSED=1`.
+
+  KV streaming's host DMA is on by default, but the tray profile keeps its K/V in VRAM (elastic K/V). Taken as
+  upstream ships them: the park pools, a replaced reply not being parked, and the elastic K/V growing from new VRAM
+  when the expert cache cannot lend. The last one replaces this fork's own fix for the same bug. Drafting stays MTP:
+  upstream's automatic DFlash2 still leaves NVFP4 models out.
+- **Tool arguments.** Upstream's #5979 does what this fork's Python booleans did. Its rules win where the two differ:
+  - any case of true / false is a declared boolean's value;
+  - with no schema, or where a string is allowed, the text stays text.
+
+  This fork still reads `True` / `False` for `anyOf` and untyped parameters.
+- **New in this fork: the hyper-connection read v5**, opt-in with `STRATA_GR_V5=1`. The card checks it bit for bit
+  against the plain read at start: 128 of 128 cases are the same bits.
+- Checks: `ctest` 349 tests, 5 failing. Two are upstream tests that do not build under MSVC, two are as in 0.2.13 (no
+  model files), and one is upstream's Qwen3.6 fused test, which assumes a build without MMQ. The server suite runs
+  1673 tests, with 3 errors in `test_vision_cpu_fallback`: its temporary log is still open on Windows, and clean
+  upstream fails the same way. Host `npm test` runs 1694 tests: 1581 pass, 0 fail. Setup and fork tests: 1117 OK.
+  Decode, 5 interleaved pairs against 0.2.13-nvfp4.1 (bench_prompt, 1000 tokens, stopping at the end of the turn):
+  11.956 +- 0.132 ms a round against 11.742 +- 0.100 (+1.8%; 4 of 5 pairs slower, expert misses 2.22 against 2.15
+  a layer). The 32K prompt: 8,800 tokens/s against 8,817.
+
 ### Upstream 0.2.13 (2026-11-09, release 0.2.13-nvfp4.1)
 
 The fork moves from upstream 0.2.0-beta to upstream 0.2.13 (the engine reports 0.1.59). As before, the release takes
