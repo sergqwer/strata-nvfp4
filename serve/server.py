@@ -162,6 +162,45 @@ def end_leftover_engines(exe: str) -> None:
         print(f"[strata] could not check for engines left by an earlier run: {type(e).__name__}", flush=True)
 
 
+#: strata-nvfp4: how long the start's port check waits for a port that is in use to come free (seconds; 0 = no wait).
+#: A launcher that stops one model and starts the next (tray_llm switching profiles) started the next server while
+#: Windows was still closing the killed one's listener (about 1.3 s, measured 2026-11-18: the port listed under a
+#: process that was gone), and the new server refused to start.  A server that really runs there is still refused,
+#: after the wait.
+PORT_WAIT_S = 15.0
+
+
+def port_in_use(e: OSError) -> bool:
+    import errno
+    return (getattr(e, "winerror", None) or e.errno) in (errno.EADDRINUSE, 10048)
+
+
+def wait_port_free(host: str, port: int, wait_s: float | None = None, bind=None) -> OSError | None:
+    """strata-nvfp4: None once (host, port) can be bound, else the last OSError: at once for any error but "in use",
+    after `wait_s` (STRATA_PORT_WAIT_S, else PORT_WAIT_S) for "in use".  `bind` (tests): the probe, by default a
+    Server bound and closed again."""
+    if wait_s is None:
+        try:
+            wait_s = float(os.environ.get("STRATA_PORT_WAIT_S", PORT_WAIT_S))
+        except ValueError:
+            wait_s = PORT_WAIT_S
+    probe = bind or (lambda: Server((host, port), BaseHTTPRequestHandler).server_close())
+    deadline = time.monotonic() + max(0.0, wait_s)
+    said = False
+    while True:
+        try:
+            probe()
+            return None
+        except OSError as e:
+            if not port_in_use(e) or time.monotonic() >= deadline:
+                return e
+            if not said:
+                said = True
+                print(f"[strata] port {port} is still in use; waiting up to {wait_s:.0f} s for a server that is "
+                      "stopping to let it go", flush=True)
+            time.sleep(0.25)
+
+
 def listen_problem(host: str, port: int, e: OSError) -> str:
     """#769: why the server cannot listen.  Only an address that is taken says "already in use"; anything else (a port
     Windows keeps reserved, an address this PC does not have, no permission) says what the OS said."""
@@ -10542,10 +10581,9 @@ def _main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> i
         print(f"[strata] {e}: set a key, or leave it out", file=sys.stderr)
         return 2
     # A key is recommended on a network, never required (owner decision 2026-10-20): the banner below warns once.
-    try:                                                # before the minutes of loading: is the port free?
-        Server((a.host, a.port), BaseHTTPRequestHandler).server_close()
-    except OSError as e:
-        ap.error(listen_problem(a.host, a.port, e))
+    busy = wait_port_free(a.host, a.port)              # before the minutes of loading: is the port free? (strata-nvfp4:
+    if busy is not None:                                # a server that is stopping gets PORT_WAIT_S to let it go)
+        ap.error(listen_problem(a.host, a.port, busy))
     if cfg.get("tokenizer"):
         a.tokenizer = cfg["tokenizer"]
     tok = ByteTokenizer()

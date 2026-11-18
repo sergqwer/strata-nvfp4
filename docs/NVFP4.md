@@ -422,6 +422,10 @@ What the release changes:
   MTP is loaded, as the RAM park already did. Saved and restored 6,200 tokens; the dialog went on from the file.
 - The zip has the draft vocabularies setup's `--draft-vocab en | fr | latin` name. Every subset holds the English and
   code tokens; this fork's default (`draft_vocab.bin`) is the Cyrillic one, the same bytes as `draft_vocab_cyrillic.bin`.
+- The server's start waits up to 15 s (`STRATA_PORT_WAIT_S`) for its port when it is in use, then refuses as before. A
+  launcher that switches models (the tray, 2 of 5 switches) started the next server while Windows was still closing the
+  killed one's listener: for about 1.3 s the port was listed under a process that was already gone, and the new server
+  said "port 8091 is already in use" and ended. This is older than DFlash2: the check has been there since 0.1.40.
 
 ### Upstream 0.2.15 (2026-11-18, release 0.2.15-nvfp4.1)
 
