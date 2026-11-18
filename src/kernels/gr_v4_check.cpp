@@ -1,8 +1,8 @@
 // src/kernels/gr_v4_check.cpp - the hyper-connection read v4 (STRATA_GR_V4=1: the weights first; =2: and launched as
-// programmatic dependents) against v3: the same bits for T = 1..8 tokens, with and without the pending write and the
-// inject rows, called directly and through a captured graph replayed twice.  --bench: the time per read (down + up)
-// at those T, the weights from DRAM as in decode (24 weight sets in rotation, 316 MB, more than the L2 holds), the
-// variants alternating.
+// programmatic dependents) and v5 (STRATA_GR_V5=1 on top of either) against v3: the same bits for T = 1..8 tokens,
+// with and without the pending write and the inject rows, called directly and through a captured graph replayed
+// twice.  --bench: the time per read (down + up) at those T, the weights from DRAM as in decode (24 weight sets in
+// rotation, 316 MB, more than the L2 holds), the variants alternating.
 #include "strata/kernels/fused_gr.hpp"
 
 #include <cuda_runtime.h>
@@ -162,8 +162,10 @@ int main(int argc, char** argv) {
                 fused_gr_read_multi(a.data(), T, xn, st);
                 ck(cudaStreamSynchronize(st), "v3");
                 const Snap ref = snap(tok, T);
-                for (int mode = std::getenv("GRV4_SELF") ? 0 : 1; mode <= 2; ++mode) {
+                for (int mv = std::getenv("GRV4_SELF") ? 0 : 1; mv <= 4; ++mv) {
+                    const int mode = mv <= 2 ? mv : mv - 2, v5 = mv >= 3 ? 1 : 0;   // 3, 4: v5 with v4=1 / =2
                     fused_gr_set_v4(mode);
+                    fused_gr_set_v5(v5);
                     clear(tok, T, st);
                     fused_gr_read_multi(a.data(), T, xn, st);
                     ck(cudaStreamSynchronize(st), "v4 direct");
@@ -183,14 +185,15 @@ int main(int argc, char** argv) {
                     cudaGraphDestroy(g);
                     ++cases;
                     if (!d_ok || !g_ok) {
-                        std::printf("  FAIL T=%d apply=%d inject=%d STRATA_GR_V4=%d: %s%s\n", T, apply, inject, mode,
-                                    d_ok ? "" : "direct ", g_ok ? "" : "graph");
+                        std::printf("  FAIL T=%d apply=%d inject=%d STRATA_GR_V4=%d STRATA_GR_V5=%d: %s%s\n", T, apply, inject,
+                                    mode, v5, d_ok ? "" : "direct ", g_ok ? "" : "graph");
                         ++bad;
                     }
                 }
             }
-    std::printf("  v4 (=1 and =2) against v3, T 1..8, pending write on/off, inject on/off, direct and graph: %d of %d "
-                "cases the same bits\n", cases - bad, cases);
+    fused_gr_set_v5(0);
+    std::printf("  v4 (=1 and =2) and v5 (with v4=1 and =2) against v3, T 1..8, pending write on/off, inject on/off, direct "
+                "and graph: %d of %d cases the same bits\n", cases - bad, cases);
     if (bench) {
         std::vector<WSet> sets;
         sets.push_back(w0);
@@ -198,11 +201,13 @@ int main(int argc, char** argv) {
         const double wbytes = (double) LR * D * 2 * 2 + (double) HC * D * 2;   // down + up + inject, BF16
         std::printf("  time per read (down + up), %d weight sets in rotation (%.0f MB), medians of 15 replays of %d reads:\n",
                     NSETS, NSETS * wbytes / 1e6, NSETS);
-        std::printf("    T   v3 us  (GB/s)    v4=1 us (GB/s)  speedup   v4=2 us (GB/s)  speedup\n");
+        std::printf("    T   v3 us  (GB/s)    v4=1 us (GB/s)  speedup   v4=2 us (GB/s)  speedup   v5 us   (GB/s)  vs v4=2\n");
+        constexpr int NV = 4;   // v3, v4=1, v4=2, v5 (with v4=2)
         for (int T = 1; T <= MAXT; ++T) {
-            cudaGraphExec_t gx[3] = {};
-            for (int v = 0; v < 3; ++v) {
-                fused_gr_set_v4(v);
+            cudaGraphExec_t gx[NV] = {};
+            for (int v = 0; v < NV; ++v) {
+                fused_gr_set_v4(v < 3 ? v : 2);
+                fused_gr_set_v5(v == 3 ? 1 : 0);
                 cudaGraph_t g = nullptr;
                 ck(cudaStreamBeginCapture(st, cudaStreamCaptureModeThreadLocal), "bench capture");
                 for (int s = 0; s < NSETS; ++s) {
@@ -218,10 +223,11 @@ int main(int argc, char** argv) {
             cudaEvent_t e0, e1;
             cudaEventCreate(&e0);
             cudaEventCreate(&e1);
-            std::vector<float> ms[3];
+            fused_gr_set_v5(0);
+            std::vector<float> ms[NV];
             for (int r = 0; r < 15; ++r)
-                for (int j = 0; j < 3; ++j) {
-                    const int v = (r + j) % 3;
+                for (int j = 0; j < NV; ++j) {
+                    const int v = (r + j) % NV;
                     cudaEventRecord(e0, st);
                     cudaGraphLaunch(gx[v], st);
                     cudaEventRecord(e1, st);
@@ -230,14 +236,15 @@ int main(int argc, char** argv) {
                     cudaEventElapsedTime(&x, e0, e1);
                     ms[v].push_back(x);
                 }
-            double us[3];
-            for (int v = 0; v < 3; ++v) {
+            double us[NV];
+            for (int v = 0; v < NV; ++v) {
                 std::sort(ms[v].begin(), ms[v].end());
                 us[v] = 1000.0 * ms[v][ms[v].size() / 2] / NSETS;
                 cudaGraphExecDestroy(gx[v]);
             }
-            std::printf("    %d  %6.2f (%5.0f)   %6.2f (%5.0f)  %5.2fx   %6.2f (%5.0f)  %5.2fx\n", T, us[0], wbytes / us[0] / 1e3,
-                        us[1], wbytes / us[1] / 1e3, us[0] / us[1], us[2], wbytes / us[2] / 1e3, us[0] / us[2]);
+            std::printf("    %d  %6.2f (%5.0f)   %6.2f (%5.0f)  %5.2fx   %6.2f (%5.0f)  %5.2fx   %6.2f (%5.0f)  %5.2fx\n", T, us[0],
+                        wbytes / us[0] / 1e3, us[1], wbytes / us[1] / 1e3, us[0] / us[1], us[2], wbytes / us[2] / 1e3,
+                        us[0] / us[2], us[3], wbytes / us[3] / 1e3, us[2] / us[3]);
             cudaEventDestroy(e0);
             cudaEventDestroy(e1);
         }

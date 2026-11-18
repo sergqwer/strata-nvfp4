@@ -1429,6 +1429,347 @@ __global__ void __launch_bounds__(THREADS) gr_up_v4_kernel(GrMulti m, const floa
         m.a[k].mixed[d0 + col] = sum / (float) HC;
     }
 }
+// ================================ hc read v5 (opt-in: STRATA_GR_V5=1) - v4's sums, the per-token latency removed =====
+// The same sums in the same order as v4 and v3 (the same bits: gr_v4_check, T 1..8, pending write on/off, inject on/off,
+// direct and in graphs).  v4 spent ~1.5 us per extra token of a read on chains of dependent latency, not on its work:
+//  - `apply ? f(load) : 0` per token compiles to a branch around the load, so the tokens' L2 round trips ran one after
+//    another (inj_prev in `down`, bo_prev / inj_prev in `up`'s epilogue, bo in `down`'s staging): every token's loads
+//    are now unconditional (R again where there is no pending write) and the result selected.
+//  - exact instantiations for every T (v4 runs T 7 and 8 through its runtime-T kernel: +3 us).
+//  - `down`: the per-token parameters read before the PDL wait; two tokens' activations loaded before their stores;
+//    the dots of every (row, token) interleaved FMA by FMA (each chain still dot8u's order; v4 issued each 8-long
+//    dependent chain back to back with one warp per scheduler).
+//  - `up`: the prologue's loads (sums of squares, lo's partials, block 0's inject partials) issued together, then the
+//    arithmetic (v4: one L2 round trip per loop trip); the weights unpacked once; lanes 0-7's second chunk (8 rows x 8
+//    dots, which v4 issued on the whole warp with 24 lanes idle) spread over all 32 lanes, 2 a lane, moved back by
+//    shuffles (lane l < 8 still adds da + db); the rows' FMA chains interleaved.
+// Tried and not kept (bench/micro/hc_v5_proto.cu, the same bits each): `down` split along K over clusters of 2/4/8
+// blocks (DSMEM butterfly) - slower; clusters staging the activations once and sharing them over DSMEM - slower;
+// 128-thread blocks on 164 SMs - slower (twice the L2 staging); 4 rows a warp - slower (255 registers); a software
+// pipeline of `down`'s token batches - no gain.  CUDA only; S = 1 only (the cards v4 runs on).
+template <int MAX_T, bool PDL>
+__global__ void __launch_bounds__(THREADS) gr_down_v5_kernel(GrMulti m, float* __restrict__ part, float* __restrict__ ssg) {
+    extern __shared__ __align__(16) float xs[];    // [T][N]
+    __shared__ float red[WARPS][MAX_T];
+    constexpr int R2 = 2, KB = 2, T = MAX_T;
+    constexpr int SL = N, TQS = SL / 8 / 32;      // 10 uint4 chunks per lane
+    const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
+    const int rg = blockIdx.x, c = blockIdx.y;
+    constexpr int NDB = LR / (WARPS * R2);        // down row blocks per stream; block NDB = the inject rows
+    const bool inject_block = rg == NDB;
+    const int row0 = inject_block ? warp : (rg * WARPS + warp) * R2;
+    const bool active = inject_block ? (m.a[0].w_inject != nullptr && warp < HC) : true;
+    const int nrows = inject_block ? (active ? 1 : 0) : R2;
+    const uint16_t* wbase = inject_block ? m.a[0].w_inject : m.a[0].w_down;
+    uint4 wq[R2][TQS];
+#pragma unroll
+    for (int r = 0; r < R2; ++r) {
+        if (r >= nrows) break;
+        const uint4* w4 = reinterpret_cast<const uint4*>(wbase + (size_t) (row0 + r) * D + (size_t) c * N);
+#pragma unroll
+        for (int q = 0; q < TQS; ++q) wq[r][q] = __ldg(w4 + lane + 32 * q);
+    }
+    constexpr int NI = (SL / 4 + THREADS - 1) / THREADS;   // float4s per thread and token (2.5 -> 3)
+    float4 gv[NI];
+    {
+        const float4* G4 = reinterpret_cast<const float4*>(m.a[0].w_norm + (size_t) c * N);
+#pragma unroll
+        for (int u = 0; u < NI; ++u)
+            if (t + u * THREADS < SL / 4) gv[u] = __ldg(G4 + t + u * THREADS);
+    }
+    // every token's parameters before the wait (no kernel writes them); no branch on a token's `apply`
+    bool ap[MAX_T];
+    const float4* R4k[MAX_T];
+    const float4* B4k[MAX_T];
+    const float* Ik[MAX_T];
+#pragma unroll
+    for (int k = 0; k < MAX_T; ++k) {
+        const FusedGrArgs& a = m.a[k];
+        ap[k] = a.apply;
+        const float* Rk = a.R + (size_t) c * N;
+        R4k[k] = reinterpret_cast<const float4*>(Rk);
+        B4k[k] = reinterpret_cast<const float4*>(ap[k] ? a.bo_prev : Rk);
+        Ik[k] = ap[k] ? a.inj_prev + c : Rk;
+    }
+    if constexpr (PDL) {
+        gr_pdl_launch_dependents();               // `up` may start loading its weights now
+        gr_pdl_wait();                            // R, bo_prev, inj_prev and the scratch are the kernels' before
+    }
+    float ipv[MAX_T], gwk[MAX_T];
+#pragma unroll
+    for (int k = 0; k < MAX_T; ++k) ipv[k] = __ldg(Ik[k]);
+#pragma unroll
+    for (int k = 0; k < MAX_T; ++k) {
+        const float g = 2.0f * sigmoidf_(ipv[k] / (float) HC);
+        gwk[k] = ap[k] ? g : 0.0f;
+    }
+    float ssp[MAX_T];
+#pragma unroll
+    for (int k0 = 0; k0 < MAX_T; k0 += KB) {
+        float4 rr[KB][NI], bb[KB][NI];
+#pragma unroll
+        for (int kk = 0; kk < KB; ++kk) {
+            const int k = k0 + kk;
+            if (k >= MAX_T) break;
+#pragma unroll
+            for (int u = 0; u < NI; ++u) {
+                const int i = t + u * THREADS;
+                if (i < SL / 4) { rr[kk][u] = __ldg(R4k[k] + i); bb[kk][u] = __ldg(B4k[k] + i); }
+            }
+        }
+#pragma unroll
+        for (int kk = 0; kk < KB; ++kk) {
+            const int k = k0 + kk;
+            if (k >= MAX_T) break;
+            ssp[k] = 0.0f;
+            float4* X4 = reinterpret_cast<float4*>(xs + (size_t) k * SL);
+#pragma unroll
+            for (int u = 0; u < NI; ++u) {
+                const int i = t + u * THREADS;
+                if (i >= SL / 4) break;
+                float4 r = rr[kk][u];
+                const float4 b = bb[kk][u];
+                const float gw = gwk[k];
+                const float4 ra = make_float4(fmaf(b.x, gw, r.x), fmaf(b.y, gw, r.y), fmaf(b.z, gw, r.z), fmaf(b.w, gw, r.w));
+                if (ap[k]) r = ra;
+                const float4 g = gv[u];
+                ssp[k] += r.x * r.x + r.y * r.y + r.z * r.z + r.w * r.w;
+                X4[(i & 1) * (SL / 8) + (i >> 1)] = make_float4(r.x * g.x, r.y * g.y, r.z * g.z, r.w * g.w);
+            }
+        }
+    }
+#pragma unroll
+    for (int k = 0; k < MAX_T; ++k) {
+        const float v = warp_sum(ssp[k]);
+        if (lane == 0) red[warp][k] = v;
+    }
+    __syncthreads();
+    if (rg == 0 && t < T) {
+        float sum = 0.0f;
+        for (int w = 0; w < WARPS; ++w) sum += red[w][t];
+        ssg[t * HC + c] = sum;
+    }
+    if (!active) return;
+    float acc[R2][MAX_T];
+#pragma unroll
+    for (int r = 0; r < R2; ++r)
+#pragma unroll
+        for (int k = 0; k < MAX_T; ++k) acc[r][k] = 0.0f;
+#pragma unroll
+    for (int q = 0; q < TQS; ++q) {
+        const int j = lane + 32 * q;
+        Bf16x8 w[R2];
+#pragma unroll
+        for (int r = 0; r < R2; ++r) w[r] = unpack8(wq[r][q]);
+        float4 x0[MAX_T], x1[MAX_T];
+#pragma unroll
+        for (int k = 0; k < MAX_T; ++k) {
+            const float4* xp = reinterpret_cast<const float4*>(xs + (size_t) k * SL);
+            x0[k] = xp[j]; x1[k] = xp[SL / 8 + j];
+        }
+        // dot8u of every (row, token) at once: each chain in dot8u's order, the chains interleaved
+        float d[R2][MAX_T];
+#pragma unroll
+        for (int r = 0; r < R2; ++r)
+#pragma unroll
+            for (int k = 0; k < MAX_T; ++k) d[r][k] = 0.0f;
+#define GR5_STEP(WF, XV, C) _Pragma("unroll") for (int r = 0; r < R2; ++r) _Pragma("unroll") for (int k = 0; k < MAX_T; ++k) d[r][k] = fmaf(w[r].WF, XV[k].C, d[r][k]);
+        GR5_STEP(a.x, x0, x) GR5_STEP(a.y, x0, y) GR5_STEP(a.z, x0, z) GR5_STEP(a.w, x0, w)
+        GR5_STEP(b.x, x1, x) GR5_STEP(b.y, x1, y) GR5_STEP(b.z, x1, z) GR5_STEP(b.w, x1, w)
+#undef GR5_STEP
+#pragma unroll
+        for (int r = 0; r < R2; ++r)
+            if (r < nrows)
+#pragma unroll
+                for (int k = 0; k < MAX_T; ++k) acc[r][k] += d[r][k];
+    }
+#pragma unroll
+    for (int r = 0; r < R2; ++r) {
+        if (r >= nrows) break;
+        const int prow = inject_block ? LR + warp : row0 + r;
+#pragma unroll
+        for (int k = 0; k < MAX_T; ++k) {
+            const float v = warp_sum(acc[r][k]);
+            if (lane == 0) part[((size_t) k * HC + c) * PR + prow] = v;
+        }
+    }
+}
+
+template <int MAX_T, bool PDL>
+__global__ void __launch_bounds__(THREADS) gr_up_v5_kernel(GrMulti m, const float* __restrict__ part,
+                                                           const float* __restrict__ ssg) {
+    __shared__ __align__(16) float lo[MAX_T][LR];  // two planes: floats 0-3 and 4-7 of every chunk of 8 apart
+    __shared__ float rsS[MAX_T][HC];
+    __shared__ float g[MAX_T][HC][UPM_COLS];
+    const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
+    constexpr int T = MAX_T;
+    const int d0 = blockIdx.x * UPM_COLS;
+    constexpr int RPW = HC * UPM_COLS / WARPS;     // 8 rows per warp: row warp + q * WARPS
+    static_assert(RPW == 8 && LR / 8 - 32 == 8, "the second chunks below: 8 rows x 8 lanes over 32 lanes");
+    Bf16x8 wa[RPW], wb[2];
+    const int lb_ = lane & 7, qb = lane >> 3;      // this lane's second-chunk dots: chunk 32 + lb_ of rows qb, qb + 4
+#pragma unroll
+    for (int q = 0; q < RPW; ++q) {
+        const int r = warp + q * WARPS;
+        const int c = r / UPM_COLS, dd = r - c * UPM_COLS, i = c * N + d0 + dd;
+        const uint4* w4 = reinterpret_cast<const uint4*>(m.a[0].w_up + (size_t) i * LR);
+        wa[q] = unpack8(__ldg(w4 + lane));
+    }
+#pragma unroll
+    for (int s2 = 0; s2 < 2; ++s2) {
+        const int r = warp + (qb + 4 * s2) * WARPS;
+        const int c = r / UPM_COLS, dd = r - c * UPM_COLS, i = c * N + d0 + dd;
+        const uint4* w4 = reinterpret_cast<const uint4*>(m.a[0].w_up + (size_t) i * LR);
+        wb[s2] = unpack8(__ldg(w4 + 32 + lb_));
+    }
+    // the epilogue's share of this lane: row qo = (lane >> 2) & 7 of the warp, tokens ko = lane & 3 and ko + 4
+    const int qo = (lane >> 2) & 7, ko = lane & 3;
+    const int ro = warp + qo * WARPS, co = ro / UPM_COLS, ddo = ro - co * UPM_COLS, io = co * N + d0 + ddo;
+    const float wn = __ldg(m.a[0].w_norm + io);   // the same w_norm for every token; constant: before the wait
+    if constexpr (PDL) gr_pdl_wait();             // part / ssg are `down`'s, R and the rest the kernels' before
+    float rvq[2], boq[2], ipq[2];
+    bool apq[2];
+#pragma unroll
+    for (int j = 0; j < 2; ++j) {
+        const int k = min(ko + 4 * j, T - 1);      // a valid token for every lane; used only when ko + 4 j < T
+        const FusedGrArgs& a = m.a[k];
+        apq[j] = a.apply;
+        rvq[j] = a.R[io];
+        boq[j] = __ldg(apq[j] ? a.bo_prev + d0 + ddo : a.R + io);
+        ipq[j] = __ldg(apq[j] ? a.inj_prev + co : a.R + io);
+    }
+    // every load of the prologue at once: this thread's sum of squares, its lo entries' partials, block 0's inject
+    // partials; then v4's arithmetic
+    constexpr int NLO = (MAX_T * LR + THREADS - 1) / THREADS;
+    float pv[NLO][HC];
+    float ssv = 0.0f, pj[HC];
+    if (t < T * HC) ssv = __ldg(ssg + t);
+#pragma unroll
+    for (int u = 0; u < NLO; ++u) {
+        const int i = t + u * THREADS;
+        if (i < T * LR) {
+            const int k = i / LR, r = i - k * LR;
+#pragma unroll
+            for (int c = 0; c < HC; ++c) pv[u][c] = __ldg(part + ((size_t) k * HC + c) * PR + r);
+        }
+    }
+    const bool inj = blockIdx.x == 0 && t < T * HC && m.a[t / HC].w_inject != nullptr;
+    if (inj) {
+        const int k = t / HC, cc = t - k * HC;
+#pragma unroll
+        for (int c = 0; c < HC; ++c) pj[c] = __ldg(part + ((size_t) k * HC + c) * PR + LR + cc);
+    }
+    if (t < T * HC) {
+        const int k = t / HC, c = t - k * HC;
+        float ss = 0.0f;
+        ss += ssv;
+        const float r = rsqrtf(ss / (float) N + m.a[k].eps);
+        rsS[k][c] = r;
+        if (blockIdx.x == 0) m.a[k].rs[c] = r;
+    }
+    __syncthreads();
+#pragma unroll
+    for (int u = 0; u < NLO; ++u) {
+        const int i = t + u * THREADS;
+        if (i >= T * LR) break;
+        const int k = i / LR, r = i - k * LR;
+        float sum = 0.0f;
+#pragma unroll
+        for (int c = 0; c < HC; ++c) {
+            float p = 0.0f;
+            p += pv[u][c];
+            sum = fmaf(rsS[k][c], p, sum);
+        }
+        const float x = sum / (float) HC;
+        lo[k][((r & 7) >> 2) * (LR / 2) + (r >> 3) * 4 + (r & 3)] = x / (1.0f + __expf(-x));   // two planes
+    }
+    if (inj) {
+        const int k = t / HC, cc = t - k * HC;
+        float sum = 0.0f;
+#pragma unroll
+        for (int c = 0; c < HC; ++c) {
+            float p = 0.0f;
+            p += pj[c];
+            sum = fmaf(rsS[k][c], p, sum);
+        }
+        m.a[k].inject_out[cc] = sum;
+    }
+    __syncthreads();
+    float mine[2] = {0.0f, 0.0f};
+    const bool b4 = (lane & 16) != 0, b3 = (lane & 8) != 0, b2 = (lane & 4) != 0;
+#pragma unroll
+    for (int k = 0; k < MAX_T; ++k) {
+        const float4* lp = reinterpret_cast<const float4*>(lo[k]);
+        const float4 la0 = lp[lane], la1 = lp[LR / 8 + lane];
+        const float4 lb0 = lp[32 + lb_], lb1 = lp[LR / 8 + 32 + lb_];
+        float sv[RPW], db[2];
+        {
+            // every row's dot8u at once (each chain in dot8u's order) and this lane's two second-chunk dots
+            float d[RPW + 2];
+#pragma unroll
+            for (int q = 0; q < RPW + 2; ++q) d[q] = 0.0f;
+#define GR5_UPSTEP(WF, XA, XB) _Pragma("unroll") for (int q = 0; q < RPW; ++q) d[q] = fmaf(wa[q].WF, XA, d[q]); \
+            d[RPW] = fmaf(wb[0].WF, XB, d[RPW]); d[RPW + 1] = fmaf(wb[1].WF, XB, d[RPW + 1]);
+            GR5_UPSTEP(a.x, la0.x, lb0.x) GR5_UPSTEP(a.y, la0.y, lb0.y) GR5_UPSTEP(a.z, la0.z, lb0.z) GR5_UPSTEP(a.w, la0.w, lb0.w)
+            GR5_UPSTEP(b.x, la1.x, lb1.x) GR5_UPSTEP(b.y, la1.y, lb1.y) GR5_UPSTEP(b.z, la1.z, lb1.z) GR5_UPSTEP(b.w, la1.w, lb1.w)
+#undef GR5_UPSTEP
+#pragma unroll
+            for (int q = 0; q < RPW; ++q) sv[q] = d[q];
+            db[0] = d[RPW]; db[1] = d[RPW + 1];
+        }
+        // lane l < 8 adds row q's chunk 32 + l (v4: acc = dot8u(chunk l) + dot8u(chunk 32 + l)), computed by lane
+        // (q & 3) * 8 + l in its slot q >> 2
+#pragma unroll
+        for (int q = 0; q < RPW; ++q) {
+            const float v = __shfl_sync(0xffffffffu, db[q >> 2], (q & 3) * 8 + lb_);
+            if (lane < LR / 8 - 32) sv[q] += v;
+        }
+        // v4's butterfly of the 8 rows
+        float h4[4], h2[2];
+#pragma unroll
+        for (int r = 0; r < 4; ++r) {
+            const float send = b4 ? sv[r] : sv[4 + r];
+            const float got = __shfl_xor_sync(0xffffffffu, send, 16);
+            h4[r] = (b4 ? sv[4 + r] : sv[r]) + got;
+        }
+#pragma unroll
+        for (int r = 0; r < 2; ++r) {
+            const float send = b3 ? h4[r] : h4[2 + r];
+            const float got = __shfl_xor_sync(0xffffffffu, send, 8);
+            h2[r] = (b3 ? h4[2 + r] : h4[r]) + got;
+        }
+        float fin;
+        {
+            const float send = b2 ? h2[0] : h2[1];
+            const float got = __shfl_xor_sync(0xffffffffu, send, 4);
+            fin = (b2 ? h2[1] : h2[0]) + got;
+        }
+        fin += __shfl_xor_sync(0xffffffffu, fin, 2);
+        fin += __shfl_xor_sync(0xffffffffu, fin, 1);   // row qo's sum for token k, in lanes 4 qo .. 4 qo + 3
+        if ((k & 3) == ko) mine[k >> 2] = fin;
+    }
+#pragma unroll
+    for (int j = 0; j < 2; ++j) {
+        const int k = ko + 4 * j;
+        if (k < T) {
+            float rv = rvq[j];
+            if (apq[j]) {
+                rv = fmaf(boq[j], 2.0f * sigmoidf_(ipq[j] / (float) HC), rv);
+                m.a[k].R_out[io] = rv;
+            }
+            const float x = rv * wn * rsS[k][co];
+            g[k][co][ddo] = x * sigmoidf_(mine[j]);
+        }
+    }
+    __syncthreads();
+    for (int i = t; i < T * UPM_COLS; i += THREADS) {
+        const int k = i / UPM_COLS, col = i - k * UPM_COLS;
+        float sum = 0.0f;
+#pragma unroll
+        for (int c = 0; c < HC; ++c) sum += g[k][c][col];
+        m.a[k].mixed[d0 + col] = sum / (float) HC;
+    }
+}
 #endif
 
 // v4 (=1; =2: and launched as programmatic dependents, the default): one launch of each kernel at this T.
@@ -1450,6 +1791,16 @@ int gr_v4_mode() {
         if (g_gr_v4 < 0 || g_gr_v4 > 2) g_gr_v4 = 2;
     }
     return g_gr_v4;
+}
+// v5 (STRATA_GR_V5=1, opt-in): v4's dispatch (=1 / =2, PDL where the card has it) with the v5 kernels, exact for every
+// T; -2 = not read yet; fused_gr_set_v5 (tests) overrides it
+int g_gr_v5 = -2;
+int gr_v5_mode() {
+    if (g_gr_v5 == -2) {
+        const char* v = std::getenv("STRATA_GR_V5");
+        g_gr_v5 = v != nullptr && std::atoi(v) == 1 ? 1 : 0;
+    }
+    return g_gr_v5;
 }
 #if !defined(__HIPCC__)
 template <int TT, bool EX>
@@ -1483,6 +1834,54 @@ cudaError_t launch_v4_t(const GrMulti& m, float* part, float* ssg, size_t sm, cu
         if (e == cudaSuccess) e = cudaLaunchKernelEx(&cu, gr_up_v4_kernel<TT, EX, false>, m, cpart, cssg);
     }
     return e;
+}
+template <int TT>
+cudaError_t launch_v5_t(const GrMulti& m, float* part, float* ssg, cudaStream_t st, bool pdl) {
+    cudaLaunchAttribute attr[1];
+    attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    attr[0].val.programmaticStreamSerializationAllowed = 1;
+    cudaLaunchConfig_t cd = {};
+    cd.gridDim = dim3(LR / (WARPS * 2) + 1, HC);
+    cd.blockDim = dim3(THREADS);
+    cd.dynamicSmemBytes = (size_t) TT * N * sizeof(float);
+    cd.stream = st;
+    cd.attrs = pdl ? attr : nullptr;
+    cd.numAttrs = pdl ? 1 : 0;
+    cudaLaunchConfig_t cu = cd;
+    cu.gridDim = dim3(UPM_BLOCKS);
+    cu.dynamicSmemBytes = 0;
+    const float* cpart = part;
+    const float* cssg = ssg;
+    cudaError_t e = pdl ? cudaLaunchKernelEx(&cd, gr_down_v5_kernel<TT, true>, m, part, ssg)
+                        : cudaLaunchKernelEx(&cd, gr_down_v5_kernel<TT, false>, m, part, ssg);
+    if (e == cudaSuccess)
+        e = pdl ? cudaLaunchKernelEx(&cu, gr_up_v5_kernel<TT, true>, m, cpart, cssg)
+                : cudaLaunchKernelEx(&cu, gr_up_v5_kernel<TT, false>, m, cpart, cssg);
+    return e;
+}
+template <int TT>
+bool v5_attrs() {
+    bool ok = true;
+    auto set = [&](auto fd) {
+        ok = ok && cudaFuncSetAttribute(fd, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) (TT * N * sizeof(float))) == cudaSuccess;
+        cudaFuncSetAttribute(fd, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+    };
+    set(gr_down_v5_kernel<TT, false>);
+    set(gr_down_v5_kernel<TT, true>);
+    return ok;
+}
+cudaError_t launch_v5(int n_tok, const GrMulti& m, float* part, float* ssg, cudaStream_t st, bool pdl) {
+    static_assert(kFusedGrMaxT == 8, "v5 instantiates T 1..8");
+    switch (n_tok) {
+        case 1: return launch_v5_t<1>(m, part, ssg, st, pdl);
+        case 2: return launch_v5_t<2>(m, part, ssg, st, pdl);
+        case 3: return launch_v5_t<3>(m, part, ssg, st, pdl);
+        case 4: return launch_v5_t<4>(m, part, ssg, st, pdl);
+        case 5: return launch_v5_t<5>(m, part, ssg, st, pdl);
+        case 6: return launch_v5_t<6>(m, part, ssg, st, pdl);
+        case 7: return launch_v5_t<7>(m, part, ssg, st, pdl);
+        default: return launch_v5_t<8>(m, part, ssg, st, pdl);
+    }
 }
 template <int TT, bool EX>
 bool v4_attrs(size_t need) {
@@ -3015,6 +3414,7 @@ int g_gr_fast = -1;
 #endif
 void fused_gr_set_fast(int on) { g_gr_fast = on; }
 void fused_gr_set_v4(int mode) { g_gr_v4 = mode < 0 ? -2 : mode; }
+void fused_gr_set_v5(int on) { g_gr_v5 = on < 0 ? -2 : (on == 1 ? 1 : 0); }
 
 // STRATA_GR_V3: the stream-split hyper-connection read (gr_down_v3_kernel / gr_up_v3_kernel).  Another summation order than the default
 // read (~1e-7; a greedy tie can flip, so the answers are not byte-identical to 0.2.6's).  0.2.7: ON by default on a compute capability 12.0
@@ -3296,7 +3696,26 @@ static bool fused_gr_read_multi_slice(const FusedGrArgs* a, int n_tok, float* xn
             const size_t sm = (size_t) n_tok * N * sizeof(float);
             const bool pdl = v4 == 2 && v4pdl[dev3];
             cudaError_t e4;
+            // v5 (STRATA_GR_V5=1): v4's sums with the per-token latency removed, exact for every T
+            static bool v5ok[64] = {}, v5tried[64] = {};
+            if (gr_v5_mode() == 1 && !v5tried[dev3]) {
+                v5tried[dev3] = true;
+                v5ok[dev3] = v5_attrs<1>() && v5_attrs<2>() && v5_attrs<3>() && v5_attrs<4>() && v5_attrs<5>() &&
+                             v5_attrs<6>() && v5_attrs<7>() && v5_attrs<8>();
+                cudaGetLastError();
+                std::fprintf(stderr, "strata: STRATA_GR_V5=1: the hyper-connection read v5%s\n",
+                             v5ok[dev3] ? "" : " does not fit this card: v4");
+            }
+            if (gr_v5_mode() == 1 && v5ok[dev3]) {
+                e4 = launch_v5(n_tok, m, part, ssg, st, pdl);
+                if (e4 == cudaSuccess) return false;   // like v4: no q8_1 (the caller quantizes)
+                std::fprintf(stderr, "strata: the hyper-connection read v5 failed to launch (%s): v4 from now on\n",
+                             cudaGetErrorString(e4));
+                cudaGetLastError();
+                v5ok[dev3] = false;
+            }
             switch (n_tok) {
+
                 case 1: e4 = launch_v4_t<1, true>(m, part, ssg, sm, st, pdl); break;
                 case 2: e4 = launch_v4_t<2, true>(m, part, ssg, sm, st, pdl); break;
                 case 3: e4 = launch_v4_t<3, true>(m, part, ssg, sm, st, pdl); break;
