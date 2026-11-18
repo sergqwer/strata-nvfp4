@@ -1612,6 +1612,156 @@ bool parse_i64_list(const char* s, std::vector<int64_t>& out, std::string& err) 
     return true;
 }
 
+// strata-nvfp4 (qwen-speedup-plan #13 step 1, measurement only): STRATA_ROUTE_TRACE=<file> records every MoE layer of every
+// pool call: the routed experts of each row, which of the layer's experts the VRAM tier held when the layer started (before
+// this layer's PCIe admissions), and the layer's MoE input for the layers STRATA_ROUTE_TRACE_X names: "taps" (default: the
+// layers of STRATA_ROUTE_TRACE_TAPS, else 5,15,25,35,45 - what DFlash2 reads), "all", or "none".  tools/route_eval.py reads
+// it.  Unset: nothing is opened and nothing changes.
+//   header: "SRD1", u32 version 1, u32 n_layers, u32 n_expert, u32 n_embd, u32 n_x, u32 x_layers[n_x]
+//   record: u8 'L', u8 has_x, u16 layer, u16 n_tok, u16 k, u32 round (+1 at every layer 0), u64 microseconds since open,
+//           i16 ids[n_tok * k], u8 resident[n_expert / 8] (bit e of byte e / 8), then f16 x[n_tok * n_embd] when has_x
+//   window: u8 'W', u8 0, u16 n_tok, u32 0, i64 position of the first row, i32 tokens[n_tok] - written before a decode
+//           window runs, so it belongs to the next round's 'L' records (the drafts are known before the round starts)
+namespace route_dump {
+struct Dump {
+    std::FILE* f = nullptr;
+    std::vector<uint8_t> x_layer;      // per layer: 1 = its MoE input is written
+    std::vector<uint8_t> buf;
+    uint32_t round = 0;
+    bool started = false;
+    std::chrono::steady_clock::time_point t0;
+    std::mutex mu;
+};
+
+inline uint16_t f2h(float v) {         // IEEE half, round to nearest even
+    uint32_t x = 0;
+    std::memcpy(&x, &v, 4);
+    const uint32_t sign = (x >> 16) & 0x8000u;
+    const uint32_t e8 = (x >> 23) & 0xffu;
+    uint32_t mant = x & 0x7fffffu;
+    if (e8 == 0xffu) return (uint16_t) (sign | 0x7c00u | (mant != 0 ? 0x200u : 0u));
+    const int32_t e = (int32_t) e8 - 127 + 15;
+    if (e >= 31) return (uint16_t) (sign | 0x7c00u);
+    if (e <= 0) {
+        if (e < -10) return (uint16_t) sign;
+        mant |= 0x800000u;
+        const int shift = 14 - e;
+        uint32_t h = mant >> shift;
+        const uint32_t rem = mant & ((1u << shift) - 1u), half = 1u << (shift - 1);
+        if (rem > half || (rem == half && (h & 1u) != 0)) ++h;
+        return (uint16_t) (sign | h);
+    }
+    uint32_t h = ((uint32_t) e << 10) | (mant >> 13);
+    const uint32_t rem = mant & 0x1fffu;
+    if (rem > 0x1000u || (rem == 0x1000u && (h & 1u) != 0)) ++h;
+    return (uint16_t) (sign | h);
+}
+
+template <typename T> void put(std::vector<uint8_t>& b, T v) {
+    const size_t at = b.size();
+    b.resize(at + sizeof(T));
+    std::memcpy(b.data() + at, &v, sizeof(T));
+}
+
+Dump* get() {
+    static Dump* dump = []() -> Dump* {
+        const char* path = std::getenv("STRATA_ROUTE_TRACE");
+        if (path == nullptr || path[0] == '\0') return nullptr;
+        const auto& g = strata::core::kCompiledGeometry;
+        auto* d = new Dump();
+        d->f = std::fopen(path, "wb");
+        if (d->f == nullptr) {
+            std::fprintf(stderr, "strata generate: STRATA_ROUTE_TRACE: cannot write %s; no route dump\n", path);
+            delete d;
+            return nullptr;
+        }
+        std::setvbuf(d->f, nullptr, _IOFBF, 16u << 20);
+        d->x_layer.assign((size_t) g.n_layers, 0);
+        const char* xm = std::getenv("STRATA_ROUTE_TRACE_X");
+        const std::string mode = xm != nullptr && xm[0] != '\0' ? xm : "taps";
+        if (mode == "all") {
+            std::fill(d->x_layer.begin(), d->x_layer.end(), (uint8_t) 1);
+        } else if (mode != "none") {
+            const char* tl = std::getenv("STRATA_ROUTE_TRACE_TAPS");
+            std::stringstream list(tl != nullptr && tl[0] != '\0' ? tl : "5,15,25,35,45");
+            std::string item;
+            while (std::getline(list, item, ','))
+                if (const int l = std::atoi(item.c_str()); l >= 0 && l < g.n_layers) d->x_layer[(size_t) l] = 1;
+        }
+        std::vector<uint8_t> h;
+        h.insert(h.end(), {'S', 'R', 'D', '1'});
+        put<uint32_t>(h, 1);
+        put<uint32_t>(h, (uint32_t) g.n_layers);
+        put<uint32_t>(h, (uint32_t) g.n_expert);
+        put<uint32_t>(h, (uint32_t) g.n_embd);
+        uint32_t n_x = 0;
+        for (uint8_t on : d->x_layer) n_x += on;
+        put<uint32_t>(h, n_x);
+        for (size_t l = 0; l < d->x_layer.size(); ++l)
+            if (d->x_layer[l]) put<uint32_t>(h, (uint32_t) l);
+        std::fwrite(h.data(), 1, h.size(), d->f);
+        d->t0 = std::chrono::steady_clock::now();
+        std::fprintf(stderr, "strata generate: STRATA_ROUTE_TRACE: routes, VRAM residency and the MoE input of %u of %d layers "
+                             "(%s) -> %s (measurement only)\n", n_x, (int) g.n_layers, mode.c_str(), path);
+        std::atexit([] { if (Dump* dd = get()) { std::lock_guard<std::mutex> lk(dd->mu); std::fflush(dd->f); } });
+        return d;
+    }();
+    return dump;
+}
+
+void layer(Dump& d, const strata::core::ExpertDispatch& dd, int64_t layer, const float* x, const int32_t* ids,
+           int64_t n_tok, int64_t k) {
+    const auto& g = strata::core::kCompiledGeometry;
+    if (layer < 0 || layer >= g.n_layers || n_tok < 1 || k < 1 || ids == nullptr) return;
+    std::lock_guard<std::mutex> lk(d.mu);
+    if (layer == 0) {
+        if (d.started) ++d.round;
+        d.started = true;
+        if ((d.round & 255u) == 0) std::fflush(d.f);   // a killed run loses at most 256 rounds
+    }
+    const bool has_x = x != nullptr && d.x_layer[(size_t) layer] != 0;
+    std::vector<uint8_t>& b = d.buf;
+    b.clear();
+    put<uint8_t>(b, (uint8_t) 'L');
+    put<uint8_t>(b, (uint8_t) (has_x ? 1 : 0));
+    put<uint16_t>(b, (uint16_t) layer);
+    put<uint16_t>(b, (uint16_t) n_tok);
+    put<uint16_t>(b, (uint16_t) k);
+    put<uint32_t>(b, d.round);
+    put<uint64_t>(b, (uint64_t) std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - d.t0).count());
+    for (int64_t i = 0; i < n_tok * k; ++i) put<int16_t>(b, (int16_t) ids[i]);
+    const size_t at = b.size(), nb = (size_t) (g.n_expert + 7) / 8;
+    b.resize(at + nb, 0);
+    if (dd.host_res != nullptr)
+        for (int64_t e = 0; e < g.n_expert; ++e)
+            if (dd.host_res[(size_t) layer * (size_t) dd.n_expert + (size_t) e] >= 0) b[at + (size_t) e / 8] |= (uint8_t) (1u << (e % 8));
+    if (has_x) {
+        const size_t xa = b.size(), n = (size_t) (n_tok * g.n_embd);
+        b.resize(xa + n * 2);
+        for (size_t i = 0; i < n; ++i) {
+            const uint16_t h = f2h(x[i]);
+            std::memcpy(b.data() + xa + i * 2, &h, 2);
+        }
+    }
+    std::fwrite(b.data(), 1, b.size(), d.f);
+}
+
+void window(const int32_t* tok, int64_t n_tok, int64_t pos) {
+    Dump* d = get();
+    if (d == nullptr || tok == nullptr || n_tok < 1 || n_tok > 65535) return;
+    std::lock_guard<std::mutex> lk(d->mu);
+    std::vector<uint8_t>& b = d->buf;
+    b.clear();
+    put<uint8_t>(b, (uint8_t) 'W');
+    put<uint8_t>(b, 0);
+    put<uint16_t>(b, (uint16_t) n_tok);
+    put<uint32_t>(b, 0);
+    put<int64_t>(b, (int64_t) pos);
+    for (int64_t i = 0; i < n_tok; ++i) put<int32_t>(b, tok[i]);
+    std::fwrite(b.data(), 1, b.size(), d->f);
+}
+}  // namespace route_dump
+
 /// The pool's adapter plus the wall-clock it spent, so the report can say how much of the token was the CPU.
 struct Drive {
     strata::core::ExpertDispatch d;
@@ -1627,6 +1777,7 @@ struct Drive {
 void drive_pool(void* user, const float* x_f, const int32_t* ids, const float* weights, int64_t n_embd, int64_t k,
                 float* out) {
     Drive* t = (Drive*) user;
+    if (route_dump::Dump* rd = route_dump::get()) route_dump::layer(*rd, t->d, t->d.layers, x_f, ids, 1, k);   // (#13: before the dispatch)
     const Clock::time_point a = Clock::now();
     strata::core::expert_pool_dispatch(&t->d, x_f, ids, weights, n_embd, k, out);
     t->cpu_ms += std::chrono::duration<double, std::milli>(Clock::now() - a).count();
@@ -1658,6 +1809,7 @@ void drive_pool_multi_impl(void* user, const float* x_f, const int32_t* ids, int
                            int64_t layer, strata::kernels::cpu::NativeArithmetic arithmetic) {
     Drive* t = (Drive*) user;
     t->d.layers = layer;
+    if (route_dump::Dump* rd = route_dump::get()) route_dump::layer(*rd, t->d, layer, x_f, ids, n_tok, k);   // (#13: before the dispatch)
     const Clock::time_point a = Clock::now();
     strata::core::expert_pool_dispatch_multi(t->d, x_f, ids, n_tok, k, out, arithmetic);
     t->cpu_ms += std::chrono::duration<double, std::milli>(Clock::now() - a).count();
@@ -22453,6 +22605,7 @@ int main(int argc, char** argv) {
                 else if (strata::spec::mtp_q_applies(use_mtp, req_df2, use_mtp && mtp.prob(), from_sfx, first_window, T_mtp)) ver.set_spec_q(mtp.spec_q(), T_mtp - 1);   // only candidates the MTP drew
                 const auto decode_pool_fn = use_mtp && mtp.prob() ? invariant_win_pool_fn : win_pool_fn;
                 exit_if_gpu_fatal("");   // (the test hook counts windows here)
+                route_dump::window(window.data(), T, p);   // STRATA_ROUTE_TRACE only (#13)
                 if (!ver.run(T, window.data(), p, decode_pool_fn, win_pool_user, outv.data(), err) || drive.d.failed) {
                     exit_if_gpu_fatal(drive.d.failed && drive.d.fail ? drive.d.fail : err);
                     std::printf("ERR %s\n", drive.d.failed && drive.d.fail ? drive.d.fail : err.c_str());
@@ -24503,6 +24656,7 @@ int main(int argc, char** argv) {
             else if (strata::spec::mtp_q_applies(use_mtp, spec_uses_df2, use_mtp && mtp.prob(), from_sfx, first_window, T_mtp) && o.spec_corrupt <= 0)
                 ver.set_spec_q(mtp.spec_q(), T_mtp - 1);
             const auto decode_pool_fn = use_mtp && mtp.prob() ? &drive_pool_multi_invariant : &drive_pool_multi;
+            route_dump::window(window.data(), T, p);   // STRATA_ROUTE_TRACE only (#13)
             if (!ver.run(T, window.data(), p, decode_pool_fn, &drive, outv.data(), err)) {
                 // The graph of a window size is captured the first time it is used, and the draft source took VRAM: when the capture runs
                 // out of memory the window gets one row narrower (the widths below it are already captured) instead of the run failing.
