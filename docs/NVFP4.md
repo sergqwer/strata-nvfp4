@@ -423,15 +423,24 @@ setup, as upstream removed it.
   - with no schema, or where a string is allowed, the text stays text.
 
   This fork still reads `True` / `False` for `anyOf` and untyped parameters.
-- **New in this fork: the hyper-connection read v5**, opt-in with `STRATA_GR_V5=1`. The card checks it bit for bit
-  against the plain read at start: 128 of 128 cases are the same bits.
+- **New in this fork: the hyper-connection read v5**, opt-in with `STRATA_GR_V5=1`. It removes v4's per-token
+  latency: loads no longer wait on each other behind a branch, T 7 and 8 get kernels of their own, and the up
+  prologue is spread over the whole warp. `gr_v4_check` compares it with the plain read: 128 of 128 cases give the
+  same bits (T 1 to 8, pending write and inject on and off, direct call and captured graph). At start the engine only
+  checks that the kernels fit the card. On the 5090 one read takes 10.9 to 17.9 us against v4's 11.8 to 26.3 us
+  (T 1 to 8), and a decode round 11.75 ms against 11.95 (6 runs each), because PDL already hid most of v4's time.
 - Checks: `ctest` 349 tests, 5 failing. Two are upstream tests that do not build under MSVC, two are as in 0.2.13 (no
   model files), and one is upstream's Qwen3.6 fused test, which assumes a build without MMQ. The server suite runs
   1673 tests, with 3 errors in `test_vision_cpu_fallback`: its temporary log is still open on Windows, and clean
   upstream fails the same way. Host `npm test` runs 1694 tests: 1581 pass, 0 fail. Setup and fork tests: 1117 OK.
-  Decode, 5 interleaved pairs against 0.2.13-nvfp4.1 (bench_prompt, 1000 tokens, stopping at the end of the turn):
-  11.956 +- 0.132 ms a round against 11.742 +- 0.100 (+1.8%; 4 of 5 pairs slower, expert misses 2.22 against 2.15
-  a layer). The 32K prompt: 8,800 tokens/s against 8,817.
+  Decode (bench_prompt, 1000 tokens, stopping at the end of the turn, cache auto): the same speed. Five pairs against
+  the tray's 0.2.13-nvfp4.1 engine first gave 11.956 +- 0.132 ms a round against 11.742 +- 0.100. Six rotated rounds of
+  three engines then gave this release 11.707 +- 0.249, 0.2.13-nvfp4.1 11.605 +- 0.232, and a second 0.2.13 build
+  11.753 +- 0.198. That build differs from the release's engine by 9 bytes of PDB stamps and has the same cache (8,531
+  slots) and expert profile. Two builds of the same code are 0.15 ms apart, so that is the spread of these runs. The CPU
+  pool spends the same time per CPU expert in all three (2.34 to 2.35 ms); what varies is how many experts a layer
+  sends to the CPU (1.83 to 1.87), and that follows the routes of the text each run writes. The 32K prompt: 8,800
+  tokens/s against 8,817.
 
 ### Upstream 0.2.13 (2026-11-09, release 0.2.13-nvfp4.1)
 

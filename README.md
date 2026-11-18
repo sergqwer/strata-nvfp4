@@ -63,15 +63,15 @@ files by hand.
 
 - **On upstream 0.2.15 (0.2.15-nvfp4.1).** Upstream's engine, server and setup of 0.2.14 and 0.2.15 (the engine reports
   0.1.61) under this fork's NVFP4 models. One GPU and one dialog give the same bits as 0.2.13-nvfp4.1 at 2K and 32K;
-  prompts run at the same speed (32K: 8,800 tokens/s both); decode measured 1.8% slower on the 5090 (12.0 ms a round
-  against 11.7)
+  prompts and decode run at the same speed on the 5090 (32K: 8,800 tokens/s both; decode 11.71 ms a round against
+  11.75 for a 0.2.13 build)
   ([the port and its checks](docs/NVFP4.md#upstream-0215-2026-11-18-release-0215-nvfp41)).
   - Upstream 0.2.14 builds its engine without llama.cpp's MMQ kernels and runs NVFP4 prompts on its own int8 kernels.
     This fork's release is still built with MMQ and keeps its NVFP4 prompt path: on the 5090 upstream's kernels gave
     other answers (they are not the same bits) and were not faster (32K prompt 2.6% slower, 128K 5% slower).
     `STRATA_PF_FUSED=1` selects upstream's kernels.
-  - New in this fork: the hyper-connection read v5 (opt-in, `STRATA_GR_V5=1`, checked bit for bit against the plain
-    read).
+  - New in this fork: the hyper-connection read v5 (opt-in, `STRATA_GR_V5=1`): the same bits as the plain read, 0.2 ms
+    off a decode round on the 5090.
   - Behaviour change from upstream's #5979: a tool argument `True` / `False` (any case) is a boolean where the tool
     declares one; with no schema, or where a string is allowed, the text stays text. This fork's Python booleans
     also still apply to `anyOf` / untyped parameters.
