@@ -25,6 +25,46 @@ ROOT = Path(__file__).resolve().parents[1]
 TABLE = ROOT / "model-files.json"
 FAMILY = "qwen-nvfp4-gptq"
 MODEL_DIR = "models/qwen-nvfp4-gptq"
+CONFIG = "config/strata-qwen-nvfp4-gptq.json"
+
+
+def drafter(root: Path = ROOT, check_only: bool = False) -> int:
+    """The DFlash2 drafter (incoai's, pinned and checked, packed here: strata_control/drafting_fetch.py) into models/qwen-nvfp4-gptq/dflash2,
+    where Auto drafts with it: one CUDA card that holds as many experts as the RTX 5090 it was measured on (strata_control/drafting.py
+    FORK_GPTQ_SETS).  Anywhere else the MTP drafts and nothing is fetched.  A failure is a message, not an error: the MTP drafts until a
+    later run gets it.  -> 1 only for --check with the drafter missing."""
+    sys.path.insert(0, str(root))
+    from strata_control import drafting
+    try:
+        cfg = json.loads((root / CONFIG).read_text(encoding="utf-8"))
+        backend, archs = drafting.detect_hardware()
+        vram = drafting.card_vram_mib(cfg, backend, archs)
+        wanted = drafting.choice_of("auto", model_name=cfg.get("model_name"), backend=backend, archs=archs,
+                                    args=drafting.strip_mtp_flags(cfg.get("args") or []), vram_mib=vram) == "dflash2"
+    except Exception as exc:  # noqa: BLE001 - no config or no card answer: the MTP drafts
+        print(f"DFlash2 drafter: not looked for ({exc}); the MTP drafts")
+        return 0
+    data = root / MODEL_DIR
+    if not wanted:
+        print("DFlash2 drafter: not used on this card (the MTP drafts)")
+        return 0
+    if drafting.pack_ready(data):
+        print("DFlash2 drafter: here")
+        return 0
+    if check_only:
+        print(f"  missing: the DFlash2 drafter ({MODEL_DIR}/{drafting.FOLDER}, {drafting.DOWNLOAD_GB:g} GB to download)")
+        return 1
+    from strata_control import drafting_fetch
+    print(f"DFlash2 drafter: {drafting.REPO} ({drafting.DOWNLOAD_GB:g} GB), packed for the engine here", flush=True)
+    try:
+        drafting_fetch.ensure(data, progress=lambda msg, done, total: None)
+        if drafting.engine_reads_selector_q4(root / "engine" / "strata.exe"):
+            drafting_fetch.convert_selector(data)          # the Q4_0 selector: 174 MiB less VRAM
+    except Exception as exc:  # noqa: BLE001 - the MTP drafts until a later run gets it
+        print(f"The DFlash2 drafter could not be prepared ({exc}). The model drafts with the MTP; run prepare-model.cmd again to retry.")
+        return 0
+    print(f"DFlash2 drafter: ready in {data / drafting.FOLDER}")
+    return 0
 
 
 def sha256_file(p: Path) -> str:
@@ -141,7 +181,10 @@ def main(argv=None) -> int:
         write_table(a.write)
         return 0
     os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
-    return prepare(check_only=a.check)
+    rc = prepare(check_only=a.check)
+    if rc == 0 or a.check:                          # the model's files first: the drafter is for a model that is here
+        rc = max(rc, drafter(check_only=a.check))
+    return rc
 
 
 if __name__ == "__main__":

@@ -38,7 +38,7 @@ OUT = REPO / "dist" / "strata-nvfp4"
 CUDA = pathlib.Path(os.environ["CUDA_PATH"])
 CUDA_BIN = CUDA / "bin" / "x64" if (CUDA / "bin" / "x64" / "cublas64_13.dll").exists() else CUDA / "bin"
 LLAMA = REPO / "third_party" / "llama.cpp"
-VERSION = "0.2.15-nvfp4.1"
+VERSION = "0.2.15-nvfp4.2"
 ZIP = REPO / "dist" / ("strata-nvfp4-v%s-windows-x64.zip" % VERSION)
 SETUP_ZIP = REPO / "dist" / "strata-windows-x64.zip"   # setup.py's PREBUILT_ASSET
 allow_dirty = "--allow-dirty" in sys.argv[1:]
@@ -184,6 +184,8 @@ shutil.copytree(LLAMA / "gguf-py", OUT / "third_party" / "llama.cpp" / "gguf-py"
 
 # data, docs, license
 for name in ("expert-profile.bin", "draft_vocab.bin",
+             # the other draft subsets (setup --draft-vocab, and DFlash2's choice by the computer's language: drafting.auto_vocab)
+             "draft_vocab_en.bin", "draft_vocab_cyrillic.bin", "draft_vocab_fr.bin", "draft_vocab_latin.bin",
              # the censorship switch the config loads (off by default: "uncensored": false)
              "uncensor/qwen-nvfp4-gptq-uncensored.gguf", "uncensor/qwen-nvfp4-gptq-uncensored.json",
              "uncensor/README.md"):

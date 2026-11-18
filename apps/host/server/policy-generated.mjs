@@ -10,4 +10,4 @@ export const SPEED_SWITCH_TABLE = [
 /** The families that have a Drafting choice (strata_control/drafting.py SUPPORTED_FAMILIES). */
 export const DRAFTING_FAMILIES = ["qwen", "gyro", "unsloth"];
 /** The model names the DFlash2 drafter was made for (strata_control/drafting.py _SUPPORTED_NAME), a case-insensitive pattern. */
-export const DFLASH2_MODEL_PATTERN = "^qwen3\\.8-flash-next(-gyro-[a-z0-9._-]+|-unsloth-[a-z0-9._-]+|-(q|iq|tq)\\d[a-z0-9_.]*)?$";
+export const DFLASH2_MODEL_PATTERN = "^qwen3\\.8-flash-next(-gyro-[a-z0-9._-]+|-unsloth-[a-z0-9._-]+|-(q|iq|tq)\\d[a-z0-9_.]*|-gptq-nvfp4|-nvfp4-gptq(-uncensored)?)?$";

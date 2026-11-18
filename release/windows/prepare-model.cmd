@@ -4,7 +4,8 @@ rem Downloads the model ready-made into models\: qwen-nvfp4-gptq, the original Q
 rem NVFP4 by this fork's GPTQ (Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata, at the revision model-files.json
 rem pins, as setup.py installs it), and the image encoder. Every file is checked against its SHA-256; nothing is
 rem converted. Needs Python 3.11+ on PATH and ~130 GB free on this drive. A stopped run resumes: start it again.
-rem prepare-model.cmd --check only says what is there.
+rem prepare-model.cmd --check only says what is there. On a card like the RTX 5090 it also prepares the DFlash2
+rem drafter (1.2 GB once), which drafts for this model there; elsewhere the model's MTP layer drafts.
 cd /d "%~dp0"
 set "PY=.venv-model\Scripts\python.exe"
 set "HF_XET_HIGH_PERFORMANCE=1"
@@ -14,8 +15,9 @@ if not exist "%PY%" (
   echo Creating .venv-model and installing huggingface_hub ...
   python -m venv .venv-model || goto :fail
   "%PY%" -m pip install --quiet --upgrade pip
-  "%PY%" -m pip install --quiet -r requirements-model.txt || goto :fail
 )
+rem every run: an older .venv-model gets what a newer release added (numpy, for the DFlash2 drafter)
+"%PY%" -m pip install --quiet -r requirements-model.txt || goto :fail
 
 "%PY%" tools\bundle_model.py %* || goto :fail
 echo.

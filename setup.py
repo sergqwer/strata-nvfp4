@@ -9077,6 +9077,41 @@ def nvfp4_args(paths: dict, ctx: int, kv: str, vision: str, scaling=None, rope_s
     return args
 
 
+def nvfp4_dflash2(model_name: str, args: list, gpu: dict) -> bool:
+    """strata-nvfp4: does Auto draft with DFlash2 for this install (strata_control/drafting.py FORK_GPTQ_SETS: the fork's GPTQ set on one
+    CUDA card that holds as many experts as the RTX 5090 it was measured on)?  Then setup fetches the drafter; the MTP stays as its fallback."""
+    from strata_control import drafting
+    if gpu.get("uma"):
+        return False
+    return drafting.choice_of("auto", model_name=model_name, backend="cuda", archs=[f"sm_{gpu.get('arch', '')}"],
+                              args=drafting.strip_mtp_flags(args), vram_mib=float(gpu["vram_gb"]) * 1024.0) == "dflash2"
+
+
+def nvfp4_fetch_dflash2(data: Path, exe: Path) -> None:
+    """strata-nvfp4: the DFlash2 drafter into <data>/dflash2 (strata_control/drafting_fetch.py: pinned, checked, packed here), and its
+    Q4_0-selector form when `exe` reads it (174 MiB less VRAM).  A failure is a warning: the model drafts with the MTP until
+    `strata drafting fetch` gets it."""
+    from strata_control import drafting, drafting_fetch
+    last = [0.0]
+
+    def progress(msg, done, total):
+        now = time.monotonic()
+        if now - last[0] >= 10 or done >= total:
+            last[0] = now
+            say(f"  {msg} {100.0 * done / max(total, 1):.0f}%")
+    try:
+        pack = drafting_fetch.ensure(data, progress=progress)
+    except Exception as exc:  # noqa: BLE001 - any failure: the MTP drafts, and the person is told how to get it later
+        warn(f"the DFlash2 drafter is not here ({exc}): the model drafts with the MTP until `strata drafting fetch` gets it")
+        return
+    if drafting.engine_reads_selector_q4(exe):
+        try:
+            pack = drafting_fetch.convert_selector(data)
+        except Exception as exc:  # noqa: BLE001 - the bf16-selector pack beside it still runs
+            warn(f"the DFlash2 drafter's smaller selector could not be made ({exc}); it runs with the larger one")
+    ok(f"DFlash2 drafter: {pack} (Auto drafts with it on this card; the MTP stays as its fallback)")
+
+
 def nvfp4_engine_plan(a) -> str:
     """--dry-run: where the engine would come from."""
     eng = engine_dir(13)
@@ -9289,6 +9324,10 @@ def nvfp4_install(a, family: str, gpu: dict, multi: list, cuda_tk: int, ram: flo
     need = sum(max(f[4] - part(where[(f[1], f[3])]), 0) for f in missing if not linked(f)) / 1e9 + \
         (1 if vision != "none" and not mmproj.exists() else 0) + 1
     extra += ["--vram-reserve-mib", str(a.vram_reserve_mib)] if a.vram_reserve_mib is not None else []
+    from strata_control import drafting
+    df2 = nvfp4_dflash2(f"{fam['name']}-{nvfp4_size(family).lower()}", nvfp4_args(paths, ctx, kv, vision, scaling, rope_scale, extra), gpu)
+    if df2 and not drafting.pack_ready(paths["pack"].parent):
+        need += drafting.DOWNLOAD_GB                   # the source file is fetched, packed and removed (about 0.9 GB stays)
     if a.dry_run:
         say()
         say("Plan (--dry-run: nothing is downloaded, installed or written):")
@@ -9308,6 +9347,9 @@ def nvfp4_install(a, family: str, gpu: dict, multi: list, cuda_tk: int, ram: flo
             say("  (ModelScope has no copy of these repositories: they come from Hugging Face)")
         say(f"  disk     ~{need:.0f} GB more in {models_dir} (free: {free_gb_peek(models_dir):.0f} GB)")
         say(f"  engine   {nvfp4_engine_plan(a)}")
+        if df2:
+            say(f"  drafter  DFlash2 ({drafting.REPO}, {drafting.DOWNLOAD_GB:g} GB once): Auto drafts with it on this card, the MTP stays as "
+                "its fallback" + (" (already here)" if drafting.pack_ready(paths["pack"].parent) else ""))
         say(f"  config   {cfg_path.name}, start script run-{tag.lower()}.{'bat' if WIN else 'sh'}; the engine's arguments:")
         line = []
         for x in nvfp4_args(paths, ctx, kv, vision, scaling, rope_scale, extra):
@@ -9356,6 +9398,8 @@ def nvfp4_install(a, family: str, gpu: dict, multi: list, cuda_tk: int, ram: flo
     draft_vocab = a.draft_vocab or saved_draft_vocab(cfg_path)
     refresh_draft_vocab(paths["mtp"], draft_vocab or "cjk")
     ok(f"MTP draft layer: {paths['mtp']} (the fine-tune's own draft head)")
+    if df2:
+        nvfp4_fetch_dflash2(paths["pack"].parent, eng / EXE)
 
     # ---- 7. the start script
     step(7, "writing the start script")

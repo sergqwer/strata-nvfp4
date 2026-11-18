@@ -390,6 +390,28 @@ def tuned_conf_for(backend: str | None, model_name: str | None) -> float | None:
     return entry.tuned_conf if entry is not None else None
 
 
+#: strata-nvfp4: this fork's NVFP4 GPTQ set (set_of: setup.py's name, and the tray's two configs). Measured 2026-11-18 on an RTX 5090 32 GB
+#: (0.2.15-nvfp4.1, the stock Q4_0-selector pack, --spec 6 --draft-conf 0.5, 5 interleaved runs of 1000 new tokens; Strata-data/dflash-check):
+#: DFlash2 215.2 tok/s against the MTP's 200.2 (+7.5%), with the uncensoring projection on 212.9 against 193.5 (+10%); the Q8 drafter and the
+#: tuned strata1 pack accepted no more than the stock pack. Auto is DFlash2 for it on CUDA where the card holds at least FORK_GPTQ_MIN_SLOTS
+#: engine slots (slots_of: about 9,700 on the 5090, the CONF_STEPS step of 0.5); a smaller card (12-24 GB), several cards, the Spark or another
+#: engine family keep the MTP until they are measured. Chosen by name, DFlash2 runs wherever it runs.
+FORK_GPTQ_SETS = ("gptq-nvfp4", "nvfp4-gptq", "nvfp4-gptq-uncensored")
+FORK_GPTQ_MIN_SLOTS = 7500
+
+
+def fork_gptq_mtp(backend: str | None, model_name: str | None, archs: Any = None, *, args: list[Any] | None = None,
+                  vram_mib: float | None = None) -> bool:
+    """strata-nvfp4: does Auto keep the MTP for this start of the fork's GPTQ set (FORK_GPTQ_SETS)? Yes off CUDA, on the Spark (sm_121), and
+    where the card's slots are not known or fewer than FORK_GPTQ_MIN_SLOTS. False for every other set."""
+    if set_of(model_name) not in FORK_GPTQ_SETS:
+        return False
+    if str(backend or "").strip().lower() != "cuda" or first_arch(archs) == "sm_121":
+        return True
+    slots = slots_of(list(args or []), vram_mib)
+    return slots is None or slots < FORK_GPTQ_MIN_SLOTS
+
+
 def first_arch(archs: Any) -> str:
     first = [archs] if isinstance(archs, str) else list(archs or [])
     return str(first[0]).strip().lower() if first else ""
@@ -457,7 +479,10 @@ SUPPORTED_FAMILIES = ("qwen", "gyro", "unsloth")
 #: The model_name setup.py (and metal/setup_mac.py) write: f"{family name}-{model.lower()}": qwen3.8-flash-next-iq3_s, qwen3.8-flash-next-gyro-gyro-s,
 #: qwen3.8-flash-next-unsloth-ud-q4_k_xl. (Coder is qwen3.8-flash-next-coder-iq1_m, NVFP4 qwen3.8-flash-next-nvfp4-nvfp4: neither matches.) Mirrored in
 #: apps/host/server/native-settings.mjs; tests/drafting.test.mjs keeps the two the same.
-_SUPPORTED_NAME = re.compile(r"^qwen3\.8-flash-next(-gyro-[a-z0-9._-]+|-unsloth-[a-z0-9._-]+|-(q|iq|tq)\d[a-z0-9_.]*)?$", re.IGNORECASE)
+#: strata-nvfp4: + this fork's GPTQ set, as setup.py writes it (qwen3.8-flash-next-gptq-nvfp4) and as a hand-made config names it
+#: (qwen3.8-flash-next-nvfp4-gptq, -uncensored); its Auto rule is FORK_GPTQ_SETS.
+_SUPPORTED_NAME = re.compile(r"^qwen3\.8-flash-next(-gyro-[a-z0-9._-]+|-unsloth-[a-z0-9._-]+|-(q|iq|tq)\d[a-z0-9_.]*|-gptq-nvfp4|-nvfp4-gptq(-uncensored)?)?$",
+                             re.IGNORECASE)
 
 
 def supported_model(model_name: str | None = None, family: str | None = None) -> bool:
@@ -1384,6 +1409,8 @@ def choice_of(mode: Any, *, model_name: str | None = None, family: str | None = 
     klass = class_entry(backend, model_name, archs, args=args, vram_mib=vram_mib)
     if asked == "auto" and klass is not None and klass.drafter == "mtp":
         return "mtp"                                          # this set on this class of card (CLASS_DEFAULTS)
+    if asked == "auto" and fork_gptq_mtp(backend, model_name, archs, args=args, vram_mib=vram_mib):
+        return "mtp"                                          # strata-nvfp4: this fork's GPTQ set on a card it was not measured on
     return "dflash2" if can_run_dflash2(model_name, family, backend, archs) else "mtp"
 
 
@@ -1498,13 +1525,15 @@ def strip_mtp_flags(args: list[Any]) -> list[str]:
 
 
 def data_dir_of(args: list[Any]) -> Path | None:
-    """The model data folder an argument list belongs to: `--pack <data>/packs/<tag>`, else `--mtp <data>/mtp/rt`."""
+    """The model data folder an argument list belongs to: `--pack <data>/packs/<tag>` (this fork's NVFP4 sets: `--pack <data>/pack`), else `--mtp <data>/mtp/rt`."""
     items = [str(a) for a in args]
     for flag, up in (("--pack", 2), ("--mtp", 2)):
         if flag in items and items.index(flag) + 1 < len(items):
             path = Path(items[items.index(flag) + 1])
             if flag == "--mtp" and path.name.isdigit():
                 continue
+            if flag == "--pack" and path.name.lower() == "pack" and path.parent.name.lower() != "packs":
+                return path.parent                    # strata-nvfp4: this fork's NVFP4 sets (setup.py nvfp4_paths)
             return path.parents[up - 1] if len(path.parents) >= up else None
     return None
 

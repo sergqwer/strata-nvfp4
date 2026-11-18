@@ -378,6 +378,51 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### DFlash2 drafts for the NVFP4 GPTQ (2026-11-18, release 0.2.15-nvfp4.2)
+
+Upstream kept DFlash2 (incoai's block drafter for Qwen3.8-Flash-Next) off for every NVFP4 model, because it had no
+acceptance numbers for one (strata_control/drafting.py `_EXCLUDED_NAME`). The drafter reads the target's hidden states at
+layers 5, 15, 25, 35 and 45 and was trained on the BF16 model, so nothing stops it on the GPTQ pack: the engine takes it
+as it is. Measured on the RTX 5090 with 0.2.15-nvfp4.1's engine and the tray's GPTQ profile, 1,000 new tokens a run,
+`--stop-eos`, arms interleaved and their order rotated per round:
+
+| Drafter | Decode, tokens/s | Tokens a round | ms a round | Drafting, ms a round | Expert slots |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| MTP (`--spec 6 --spec-min-p 0.7`, the setup's) | 200.2 ± 3.4 | 2.38 | 11.82 | 0.88 | 8,345 |
+| DFlash2, window 6, conf 0.5 | **215.2 ± 4.1** | 2.66 | 12.33 | 0.73 | 8,503 |
+| DFlash2, window 8 | 213.7 ± 4.5 | 2.66 | 12.42 | 0.74 | 8,503 |
+| MTP, censorship switch on | 193.5 ± 3.8 | 2.37 | 12.13 | 0.90 | 8,345 |
+| DFlash2, censorship switch on | **212.9 ± 3.9** | 2.67 | 12.53 | 0.74 | 8,503 |
+
+- +7.5% decode (+10% with the switch on, where the MTP guesses worse), and 158 more experts on the card: the drafter
+  (564 MiB with the Q4_0 selector) is smaller than the MTP layer.
+- The confidence, in one interleaved series: 0.35 gave 206.4 tokens/s, 0.5 208.6, 0.7 203.5. 0.5 is what the setup's rule
+  (CONF_STEPS) already gives a card of this size. A window of 8 adds nothing.
+- The drafter's precision is not what limits it: a Q8_0 drafter took 2.67 tokens a round against 2.68 for Q4_0 (and drafts
+  slower, with 152 fewer slots). Upstream's tuned `strata1` pack, trained on what Unsloth's GGUFs write, gave 2.66: no gain
+  on this model. A GPTQ or NVFP4 drafter could not gain either: drafting is 6% of a round.
+- Greedy output: on the short prompts no drafter, the MTP and DFlash2 give the same tokens. On a 400-token answer both
+  drafters leave the no-drafter text (the MTP at token 115, DFlash2 at 74). That comes from the verify windows, which have
+  other widths than one-token decode, and it is the same for both: they verify with the same captured windows of 1 to 6.
+- The dialog cache in RAM works with it: a dialog parked behind another came back in 19-24 ms, and the drafter rebuilt
+  its window rows from its own log (about 2,000 rows in 18 ms).
+
+What the release changes:
+- **Auto drafts with DFlash2 for the GPTQ set** (`qwen3.8-flash-next-gptq-nvfp4`, as setup and the zip's config name it)
+  on one CUDA card that holds at least 7,500 expert slots by the rule's estimate (`FORK_GPTQ_MIN_SLOTS`; the 5090 is
+  about 9,700). Cards of 12-24 GB, several cards, the DGX Spark and other engine families keep the MTP until they are
+  measured. NVIDIA's NVFP4 and the mix keep the MTP. DFlash2 or the MTP chosen by name wins over Auto.
+- Setup and the zip's `prepare-model.cmd` fetch the drafter where Auto uses it: the pinned 1.2 GB file is checked,
+  packed on the PC and removed; about 0.86 GB stays in `<model>/dflash2`. An install without the drafter drafts with the
+  MTP and says so; `prepare-model.cmd` (the zip) or setup run again gets it.
+- `drafting.data_dir_of` reads the fork's `<data>/pack` layout (it looked for upstream's `<data>/packs/<tag>` and found
+  the parent folder).
+- #5153 (upstream): saving a session file (`/slots/0?action=save`) with DFlash2 alone failed with "conversation
+  snapshot: invalid K/V extent", because SAVE and RESTORE passed the MTP layer's empty K/V. They now pass it only when the
+  MTP is loaded, as the RAM park already did. Saved and restored 6,200 tokens; the dialog went on from the file.
+- The zip has the draft vocabularies setup's `--draft-vocab en | fr | latin` name. Every subset holds the English and
+  code tokens; this fork's default (`draft_vocab.bin`) is the Cyrillic one, the same bytes as `draft_vocab_cyrillic.bin`.
+
 ### Upstream 0.2.15 (2026-11-18, release 0.2.15-nvfp4.1)
 
 The fork moves from upstream 0.2.13 to upstream 0.2.15 (the engine reports 0.1.61), the usual way (port-fork.md): the
