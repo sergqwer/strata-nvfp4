@@ -835,6 +835,14 @@ _LOOSE_PART = re.compile(r"<\s*(?:function[ \t]*[=:]?\s*|=\s*)?[A-Za-z0-9_.\-]*\
 # a quoted call's opener in a value: `<function=NAME>` and its first parameter or close; a bare FUNC_START is text
 _QUOTED_OPEN = re.compile(r"<function=[^<>\s]+>\s*(?:<parameter=|</function>)")
 
+# fork #24: a parameter tag that lost its `>` right before its line break, inside a `<tool_call>` (Qwen3.8 at long contexts)
+_SLIP_OPEN = re.compile(r"<parameter=([^<>\s]{1,128})(?=\r?\n)")
+_SLIP_CLOSE = re.compile(r"</parameter(?=\r?\n)")
+_SLIP_LOOKBACK = 160       # a slipped tag can start this far before the newest text (the longest name, then the line break)
+# fork #24: a line of an open value that starts with one of the call's own closers
+_LINE_FUNC_END = re.compile(r"\n[ \t]*</function>")
+_LINE_CALL_END = re.compile(r"\n[ \t]*</tool_call>")
+
 
 #: #4701: how much text after a closing sequence is looked at before the value is taken as ended there (a call followed by a long sentence)
 CLOSE_LOOKAHEAD_CHARS = 1500
@@ -981,32 +989,46 @@ def forced_call(tool_choice, tools: list[dict] | None) -> str | None:
 PARAM_START = "<parameter="
 
 
-def value_open(body: str) -> bool:
+def open_value_at(body: str) -> int:
     """A call body in the template's form (`<function=NAME>` and its parameters) ends inside a parameter's value: an
-    opened `<parameter=NAME>` whose `</parameter>` has not come (param_end's walk, as call_end's)."""
+    opened `<parameter=NAME>` whose `</parameter>` has not come (param_end's walk, as call_end's).  -> where that value
+    starts in `body`, or -1."""
     s = body.lstrip()
     pos = len(body) - len(s)
     if not s.startswith(FUNC_START):
-        return False
+        return -1
     gt = body.find(">", pos)
     if gt < 0:
-        return False
+        return -1
     pos = gt + 1
     while True:
         rest = body[pos:]
         s = rest.lstrip()
         pos += len(rest) - len(s)
         if not s.startswith(PARAM_START):
-            return False
+            return -1
         gt = body.find(">", pos)
         if gt < 0:
-            return False
+            return -1
         end = param_end(body[gt + 1:])
         if end == -1:
-            return True
+            return gt + 1
         if end < 0:                                  # a closer whose follower has not come: the value is written
-            return False
+            return -1
         pos = gt + 1 + end + len(PARAM_END)
+
+
+def value_open(body: str) -> bool:
+    """open_value_at as a yes / no."""
+    return open_value_at(body) >= 0
+
+
+def left_the_call(value: str) -> bool:
+    """fork #24: an open value that holds, at the start of a line, more `</function>` than the calls it quotes open (or
+    more `</tool_call>` than `<tool_call>`): the model has left the call, and its value's `</parameter>` slipped in a
+    form the repair does not cover.  A file that documents the call format quotes whole calls, so it stays open."""
+    return (len(_LINE_FUNC_END.findall(value)) > len(_QUOTED_OPEN.findall(value))
+            or len(_LINE_CALL_END.findall(value)) > value.count(CALL_START))
 
 
 # EOS literal: a typographic opening quotation mark always opens a quote; `"` and `'` open one at the start of a line or
@@ -1620,7 +1642,10 @@ class OutputParser:
         log), or None."""
         if self.state in ("call", "rcall"):
             body = self.buf[len(CALL_START):] if self.state == "rcall" else self.buf
-            return "in a tool call's argument" if value_open(body) else None
+            at = open_value_at(body)
+            # fork #24: past the call's own closers the end of turn ends the reply (the call stays unfinished, #211),
+            # instead of STOP_TEXT_MAX copies of its text inside the argument
+            return "in a tool call's argument" if at >= 0 and not left_the_call(body[at:]) else None
         if self.state not in ("content", "reasoning") or self.pending:
             return None
         fenced, line = self._place()
@@ -1684,6 +1709,8 @@ class OutputParser:
         self.sdeclared = {}
         self.spname = None
         self.svstart = 0
+        self._mend_at = 0            # fork #24: how far self.buf was checked for slipped parameter tags (see _mend_tags)
+        self._mend_stop = False      # ... and a `</tool_call>` was reached: nothing after it is changed
 
     def _wrapped_call_end(self) -> int:
         # Without a closing tag the structural walk cannot finish. Search only
@@ -1896,6 +1923,29 @@ class OutputParser:
                 found.append(tname)
         return found[0] if len(found) == 1 else None
 
+    def _mend_tags(self, origin: int):
+        """fork #24: inside a `<tool_call>` (the call body at self.buf[origin:]), `<parameter=NAME` and `</parameter`
+        followed by a line break are those tags with their `>` lost: written back, before any reader of the call sees
+        them.  Without it the name runs to the next `>` (a `</parameter>`), or the value never ends and its end of turn
+        becomes EOS literal's text.  Only text the streaming scanner has not taken (from self.sp), and nothing after
+        the call's first `</tool_call>`; a call that never closes still fails loudly (#211).  Each piece of text is
+        checked once: only the newest text and _SLIP_LOOKBACK before it."""
+        if self._mend_stop:
+            return
+        lo = max(origin, self.sp if self.state == "call" else 0, self._mend_at - _SLIP_LOOKBACK)
+        seg = self.buf[lo:]
+        tail = ""
+        stop = seg.find(CALL_END)
+        if stop >= 0:
+            seg, tail = seg[:stop], seg[stop:]
+            self._mend_stop = True
+        if "<parameter=" in seg or "</parameter" in seg:
+            fixed = _SLIP_CLOSE.sub(PARAM_END, _SLIP_OPEN.sub(r"<parameter=\1>", seg))
+            if fixed != seg:
+                self.buf = self.buf[:lo] + fixed + tail
+                self.notes.append("a parameter tag that lost its '>' was read as the tag")
+        self._mend_at = len(self.buf)
+
     def feed(self, delta: str) -> list[Event]:
         if self._held:
             delta, self._held = self._held + delta, ""
@@ -1907,9 +1957,12 @@ class OutputParser:
     def _feed(self) -> list[Event]:
         out: list[Event] = []
         while True:
+            if self.state not in ("call", "rcall"):
+                self._mend_at, self._mend_stop = 0, False     # fork #24: the next call body starts at its own text
             if self.state == "rcall":
                 # #804: a `<tool_call>` inside the reasoning, with tools declared.  It is held whole (never streamed
                 # as a call) until it ends: a declared name is then a tool call, anything else stays reasoning text.
+                self._mend_tags(len(CALL_START))
                 body = self.buf[len(CALL_START):]
                 end, think = call_end(body, hold=False), body.find(THINK_END)
                 drop = len(CALL_END)
@@ -2150,6 +2203,8 @@ class OutputParser:
                 self.state, self.lead = "content", call is not None
             else:
                 drop = None
+                if not self.bare:                   # fork #24: a wrapped call's slipped parameter tags
+                    self._mend_tags(0)
                 if self.bare:                       # no wrapper: the call ends at its </function>; a stray
                     i = function_end(self.buf)      # </tool_call> after it is the wrapper's closer, dropped
                     if i >= 0:
