@@ -20,9 +20,7 @@ namespace strata::core {
 /// segments come from the heap and stay there after free - malloc_trim gives the free pages back.  Windows: the UCRT
 /// heap releases blocks this size on free (measured: private bytes back to ~1 MiB after 2.1 GiB of mixed sizes).
 inline void conversation_return_freed_heap() {
-#if defined(__GLIBC__)
-    malloc_trim(0);
-#endif
+    (void) release_free_heap();   // upstream's own (#5697, conversation_cache.hpp): the same malloc_trim
 }
 
 /// One step of a release: the bytes it held (the cache's own accounting) and whether it was a parked conversation

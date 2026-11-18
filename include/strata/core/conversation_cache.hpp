@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <functional>
 #include <utility>
 #include <vector>
 
@@ -207,6 +208,9 @@ struct SavedConversation {
     std::shared_ptr<void> pending;
     // STRATA_CKPT_ASYNC: the same for the background copy that fills `live.gdn` (the park's running state)
     std::shared_ptr<void> live_pending;
+    // the disk tier's entry holding exactly this image (conversation_disk.hpp: written while the engine was idle), 0 =
+    // none.  A run-time mark only, not in the session file: an eviction then drops the RAM copy without a write.
+    uint64_t disk_id = 0;
 
     /// Holds a pinned shared prefix (see ConversationCheckpoint::pinned): the parked-conversation budget keeps it.
     bool pinned() const {
@@ -446,6 +450,9 @@ public:
         return true;
     }
 
+    /// Where an evicted conversation goes instead of being dropped (the disk tier); it owns the image from then on.
+    void set_on_evict(std::function<void(SavedConversation&&)> fn) { on_evict_ = std::move(fn); }
+
     // #879: every parked conversation (pinned ones too) and the retained K/V go - after non-finite logits any of them
     // may carry the poison.  Returns how many were parked.
     size_t clear() {
@@ -459,6 +466,15 @@ public:
 
     // The slot count, so a caller that evicts in a loop has a bound it did not invent.
     size_t slots() const { return slots_; }
+
+    // The disk tier's idle save walks the parked conversations (least recently active first) and marks the ones it
+    // wrote; the index is valid until the cache changes, the serial for good.
+    const SavedConversation& at(size_t index) const { return entries_.at(index); }
+    uint64_t serial_at(size_t index) const { return serials_.at(index); }
+    void set_disk_id(uint64_t serial, uint64_t disk_id) {
+        const size_t i = index_of(serial);
+        if (i != SIZE_MAX) entries_[i].disk_id = disk_id;
+    }
 
     // #342: drop the parked entries an outgoing conversation (its live tokens and checkpoint chain) supersedes:
     // the same conversation a turn back, whose DEEPEST checkpoint the outgoing chain still holds, so all it adds
@@ -567,8 +583,11 @@ private:
         for (size_t i = 0; i < entries_.size(); ++i) {
             if (entries_[i].pinned() || (guarded_ != 0 && serials_[i] == guarded_)) continue;
             bytes_ -= entries_[i].bytes();
+            SavedConversation gone = std::move(entries_[i]);
             erase(i);
             ++evictions_;
+            // strata-nvfp4: make_room's and evict_oldest's victims both go to the disk tier (conversation_disk.hpp); else dropped here
+            if (on_evict_) on_evict_(std::move(gone));
             return true;
         }
         return false;
@@ -583,6 +602,7 @@ private:
     std::deque<uint64_t> serials_;          // entries_[i]'s identity, never reused
     uint64_t next_serial_ = 1, guarded_ = 0;
     bool guard_blocked_ = false;
+    std::function<void(SavedConversation&&)> on_evict_;
     ConversationKvReuse reuse_;
     SegmentPoolBudget* pool_ = nullptr;   // STRATA_PARK_SEGPOOL_MIB (not owned)
 };

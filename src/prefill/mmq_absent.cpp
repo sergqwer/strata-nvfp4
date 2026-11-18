@@ -21,7 +21,7 @@ bool supported(int) { return false; }
 bool fits(int, int64_t) { return false; }
 Nvfp4Mode nvfp4_mode() { return Nvfp4Mode::FP16; }
 bool fp4_activations(int) { return false; }
-void quantize(const float*, const int32_t*, void*, int, int64_t, int64_t, int64_t, void*, float*) { absent("mmq::quantize"); }
+void quantize(const float*, const int32_t*, void*, int, int64_t, int64_t, int64_t, void*, float*, const int32_t*, int) { absent("mmq::quantize"); }
 void quantize_scatter(const float*, const int32_t*, const int32_t*, void*, int, int64_t, int64_t, int64_t, int, void*) {
     absent("mmq::quantize_scatter");
 }
@@ -41,6 +41,11 @@ size_t overread_bytes(int, int64_t) { return 0; }
 bool whole_tiles(int, int64_t, int) { return false; }
 bool launch_splits_k(int, int64_t, int64_t, int) { return false; }
 int direct_mode() { return 0; }
+// strata-nvfp4: the in-place (pointer-table) and w4a4x2 queries and the fused swiglu_quant of the MMQ side: never taken here
+bool direct_ok(int) { return false; }
+bool token_rows_ok(int, int64_t) { return false; }
+bool swiglu_quant_scaled_ok(int) { return false; }
+void swiglu_quant(const float*, void*, int64_t, const int32_t*, int, const float* const*, int64_t, float*, void*) { absent("mmq::swiglu_quant (fork)"); }
 size_t direct_slot_guard() { return 0; }
 void prep_group(const GuardTab&, size_t, void*, void*, size_t, void*) { absent("mmq::prep_group"); }
 
