@@ -36,6 +36,7 @@ import numpy as np
 MAGIC = b"SRD1"
 REC = struct.Struct("<BBHHHIQ")          # tag, has_x, layer, n_tok, k, round, t_us
 WIN = struct.Struct("<BBHIq")            # tag 'W', 0, n_tok, 0, position of the first row; then i32 tokens[n_tok]
+TAP = struct.Struct("<BBHIqI")           # tag 'T', 0, 0, rows, position of the first row, floats a row; then f16 [rows][floats]
 
 
 @dataclass
@@ -45,6 +46,7 @@ class Dump:
     n_embd: int
     x_layers: list[int]
     rounds: list["Round"] = field(default_factory=list)
+    taps: list[tuple[int, np.ndarray]] = field(default_factory=list)   # (position of the first row, f16 [rows][floats]): DFlash2's context rows
 
 
 @dataclass
@@ -59,7 +61,7 @@ class Round:
     pos: int = -1                         # the position of its first row
 
 
-def read_dump(path: str | Path, keep_x: bool = True, max_rounds: int | None = None) -> Dump:
+def read_dump(path: str | Path, keep_x: bool = True, max_rounds: int | None = None, keep_taps: bool = False) -> Dump:
     with open(path, "rb") as fh:
         data = mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)
     if data[:4] != MAGIC:
@@ -86,6 +88,16 @@ def read_dump(path: str | Path, keep_x: bool = True, max_rounds: int | None = No
                 break
             win = (np.frombuffer(data, dtype="<i4", count=n_w, offset=pos + WIN.size).copy(), p_w)
             pos += WIN.size + 4 * n_w
+            continue
+        if data[pos] == ord("T"):
+            if pos + TAP.size > len(data):
+                break
+            _, _, _, rows, p_t, per = TAP.unpack_from(data, pos)
+            if pos + TAP.size + 2 * rows * per > len(data):
+                break
+            if keep_taps:
+                dump.taps.append((p_t, np.frombuffer(data, dtype="<f2", count=rows * per, offset=pos + TAP.size).reshape(rows, per).copy()))
+            pos += TAP.size + 2 * rows * per
             continue
         tag, has_x, layer, n_tok, k, rnd, t_us = REC.unpack_from(data, pos)
         if tag != ord("L"):

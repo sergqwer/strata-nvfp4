@@ -63,6 +63,7 @@ struct ForesightSwap {
     // counters (dispatch thread)
     uint64_t hits = 0, copies = 0, busy = 0, over_budget = 0, pending = 0, predicted = 0;   // (under smu_)
     bool verify = false;                     ///< STRATA_FS_VERIFY=1: read every landed slot back and compare (slow, tests)
+    bool reactive = true;                    ///< STRATA_FS_REACTIVE=0: no copy of an expert that just missed (predictions only)
     uint64_t verify_ok = 0, verify_bad = 0;
     uint64_t dropped = 0;                    ///< slots dropped because an exchange moved their expert's bytes (under smu_)
     static constexpr int16_t kHeld = -2;     ///< `where`: an exchange is moving this expert's bytes, no copy now (#2134)

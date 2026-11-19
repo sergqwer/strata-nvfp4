@@ -2165,6 +2165,9 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 stamp(l, 11, grp);
                 // KV streaming: the n selections' blocks resident (device-side, inside the graph)
                 qsa_kv_resolve(st, *g_, sel_ + (size_t) tb * cap_, step_ + tb * kStepCount, n, cap_, cs);
+                if (st.kv_mode == 1)
+                    strata::kernels::kv_stream_predict_probe(st.map, scores_ + (size_t) tb * max_blocks_, step_ + tb * kStepCount,
+                                                             sel_ + (size_t) tb * cap_, n, cap_, max_blocks_, s, cs);
                 stamp(l, 12, grp);
                 if (qbr) join(0);   // the query, for attention
                 const QsaAttnPools pools = qsa_attn_pools(st);

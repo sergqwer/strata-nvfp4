@@ -114,6 +114,13 @@ struct KvStreamCounters {
 };
 /// Synchronous read of the counters (debug and the end-of-request summary).
 KvStreamCounters kv_stream_counters(const KvStreamMap& m);
+/// Measurement only: the resolve/copy cycle counters (see kv_stream.cu g_kvs_prof); `reset` zeroes them after the read.
+void kv_stream_prof(unsigned long long out[16], bool reset);
+/// Measurement only (STRATA_KV_PREDICT=K): after a resolve, mark the blocks a prefetch could have fetched for the next
+/// call of this layer (the K blocks below the threshold; the selected blocks' neighbours); the next resolve counts its
+/// misses among them. Nothing is fetched.
+void kv_stream_predict_probe(const KvStreamMap& m, const float* scores, const int32_t* steps, const int32_t* sel,
+                             int64_t n_q, int64_t cap, int64_t max_blocks, const QsaShapes& s, void* stream);
 
 /// Bytes of one block (page) of K and V together.
 uint64_t kv_block_bytes(const QsaShapes& s, int fmt);

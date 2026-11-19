@@ -2,12 +2,15 @@
 #include "strata/kernels/kv_stream.hpp"
 #include "strata/kernels/kv_q4.hpp"
 #include "strata/kernels/kv_q8.hpp"
+#include "strata/kernels/qsa_select.hpp"
 
 #include <cuda_runtime.h>
 
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <vector>
 
 namespace strata::kernels {
 namespace {
@@ -21,6 +24,29 @@ void check(const char* what) {
 }
 
 constexpr int RT = 1024;   // the resolve block
+
+// KV streaming diagnosis (measurement only): [0] calls [1] n_q sum [2] lookup-phase cycles [3] sweep cycles
+// [4] re-point cycles [5] sweep iterations [6] misses [7] copy blocks with work [8] copy cycles over those blocks
+// [9] resolve total cycles [10] calls with misses [11] candidates seen by the sweep
+__device__ unsigned long long g_kvs_prof[16];
+// [12] misses the threshold prediction named [13] misses the neighbour prediction named [14] / [15] their candidates
+// (distinct, not resident) - STRATA_KV_PREDICT=K
+constexpr int kPredLayers = 64, kPredWords = 4096, kPredQ = 64, kPredCap = 4352;   // 131072 blocks per layer
+__device__ unsigned g_pred[2][kPredLayers][kPredWords];
+__device__ int32_t g_steps2[kPredQ * kStepCount];
+__device__ int32_t g_sel2[kPredQ * kPredCap];
+int pred_k() {
+    static const int k = [] { const char* e = std::getenv("STRATA_KV_PREDICT"); const int v = e ? std::atoi(e) : 0;
+                              return v > 0 ? std::min(v, (kPredCap - 2051) / 4) : 0; }();
+    return k;
+}
+int pred_layer(const KvStreamMap& m) {   // the layer's index, by its page table (the graphs bake it in)
+    static std::vector<const void*> keys;
+    for (size_t i = 0; i < keys.size(); ++i) if (keys[i] == m.page_table) return (int) i;
+    if (keys.size() >= (size_t) kPredLayers) return -1;
+    keys.push_back(m.page_table);
+    return (int) keys.size() - 1;
+}
 
 // The per-block byte runs of the (up to four) pool arrays: block b of array i is bytes [b * len, (b + 1) * len).
 struct Runs {
@@ -86,15 +112,60 @@ __device__ int block_scan(int v, int* warp_sums, int& total) {
     return excl;
 }
 
+constexpr int kFastQ = 64;   // the pipelined lookup phase covers windows of up to this many queries
+constexpr int LU = 8;        // ids per thread in flight in the pipelined lookup phase
+
 __global__ void __launch_bounds__(RT) resolve_kernel(KvStreamMap m, const int32_t* __restrict__ ids,
-                                                     const int32_t* __restrict__ steps, int n_q, int cap, int page_size) {
+                                                     const int32_t* __restrict__ steps, int n_q, int cap, int page_size,
+                                                     int fast, int pl) {
     __shared__ int s_nmiss, s_lookups, s_cut;
     __shared__ int warp_sums[32];
+    __shared__ int s_off[kFastQ + 1];
+    const long long t0 = clock64();
     const int epoch = m.ctl[0] + 1;
     if (threadIdx.x == 0) { s_nmiss = 0; s_lookups = 0; }
+    if (fast && n_q <= kFastQ && threadIdx.x == 0) {
+        int acc = 0;
+        for (int q = 0; q < n_q; ++q) { s_off[q] = acc; acc += steps[q * kStepCount + kStepWidth]; }
+        s_off[n_q] = acc;
+    }
     __syncthreads();
     // 1. hits take this epoch and their reference bit; a missing block is claimed exactly once (-1 -> -2)
     int lookups = 0;
+    if (fast && n_q <= kFastQ) {
+        // the n_q selections as one flat list; LU ids per thread are loaded, then their LU page-table entries, then
+        // decided: a few dependent memory waits per call instead of two per query and pass
+        const int total = s_off[n_q];
+        for (int base = 0; base < total; base += RT * LU) {
+            int bl[LU], sl[LU];
+            int q = 0;
+#pragma unroll
+            for (int u = 0; u < LU; ++u) {
+                const int e = base + u * RT + (int) threadIdx.x;
+                bl[u] = -1;
+                if (e < total) {
+                    while (s_off[q + 1] <= e) ++q;   // e grows with u: the query only moves forward
+                    const int i = e - s_off[q];
+                    const int32_t* qi = ids + (long long) q * cap;
+                    const int b = qi[i] / page_size;
+                    if (!(i > 0 && qi[i - 1] / page_size == b)) bl[u] = b;   // ids are ascending: one lookup per block
+                }
+            }
+#pragma unroll
+            for (int u = 0; u < LU; ++u) sl[u] = bl[u] >= 0 ? m.page_table[bl[u]] : 0;
+#pragma unroll
+            for (int u = 0; u < LU; ++u) {
+                if (bl[u] < 0) continue;
+                ++lookups;
+                if (sl[u] >= 0) {
+                    m.slot_stamp[sl[u]] = epoch;
+                    m.slot_ref[sl[u]] = 1;
+                } else if (sl[u] == -1 && atomicCAS(&m.page_table[bl[u]], -1, -2) == -1) {
+                    m.miss_block[atomicAdd(&s_nmiss, 1)] = bl[u];
+                }
+            }
+        }
+    } else
     for (int q = 0; q < n_q; ++q) {
         const int width = steps[q * kStepCount + kStepWidth];
         const int32_t* qi = ids + (long long) q * cap;
@@ -113,6 +184,8 @@ __global__ void __launch_bounds__(RT) resolve_kernel(KvStreamMap m, const int32_
     }
     if (lookups > 0) atomicAdd(&s_lookups, lookups);   // (#783, stuchapin909) most threads see none: skip the shared atomic
     __syncthreads();
+    const long long t1 = clock64();
+    int iters = 0, cands = 0;
     // 2. one victim per miss: a clock sweep from the hand. A slot this call uses (stamp == epoch) is never taken;
     //    a referenced one loses its bit as the hand passes it and is taken on the next pass.
     const int need = s_nmiss, n = (int) m.n_slots;
@@ -137,13 +210,20 @@ __global__ void __launch_bounds__(RT) resolve_kernel(KvStreamMap m, const int32_
         }
         got += total < want ? total : want;
         hand = (int) (((long long) hand + cut) % n);
+        ++iters; cands += total;
         __syncthreads();
     }
+    const long long t2 = clock64();
     // 3. re-point the table; the copy kernel fills the slots
     const int placed = got < need ? got : need;
     for (int k = threadIdx.x; k < need; k += RT) {
         const int b = m.miss_block[k];
         if (k >= placed) { m.page_table[b] = -1; continue; }   // overflow: never happens with a legal n_slots
+        if (pl >= 0 && b < kPredWords * 32) {
+            const unsigned bit = 1u << (b & 31);
+            if (g_pred[0][pl][b >> 5] & bit) atomicAdd(&g_kvs_prof[12], 1ull);
+            if (g_pred[1][pl][b >> 5] & bit) atomicAdd(&g_kvs_prof[13], 1ull);
+        }
         const int sl = m.miss_slot[k];
         const int old = m.slot_block[sl];
         if (old >= 0) m.page_table[old] = -1;
@@ -152,7 +232,19 @@ __global__ void __launch_bounds__(RT) resolve_kernel(KvStreamMap m, const int32_
         m.slot_ref[sl] = 1;
         m.page_table[b] = sl;
     }
+    __syncthreads();
     if (threadIdx.x == 0) {
+        const long long t3 = clock64();
+        atomicAdd(&g_kvs_prof[0], 1ull);
+        atomicAdd(&g_kvs_prof[1], (unsigned long long) n_q);
+        atomicAdd(&g_kvs_prof[2], (unsigned long long) (t1 - t0));
+        atomicAdd(&g_kvs_prof[3], (unsigned long long) (t2 - t1));
+        atomicAdd(&g_kvs_prof[4], (unsigned long long) (t3 - t2));
+        atomicAdd(&g_kvs_prof[5], (unsigned long long) iters);
+        atomicAdd(&g_kvs_prof[6], (unsigned long long) need);
+        atomicAdd(&g_kvs_prof[9], (unsigned long long) (t3 - t0));
+        if (need > 0) atomicAdd(&g_kvs_prof[10], 1ull);
+        atomicAdd(&g_kvs_prof[11], (unsigned long long) cands);
         m.ctl[0] = epoch;
         m.ctl[1] = hand;
         m.ctl[2] = placed;
@@ -166,6 +258,7 @@ __global__ void __launch_bounds__(RT) resolve_kernel(KvStreamMap m, const int32_
 
 // One block per missed block (grid-stride): copy its runs from the host copy into its slot, 16 B per thread.
 __global__ void copy_kernel(KvStreamMap m, Runs r) {
+    const long long c0 = clock64();
     const int need = m.ctl[2];
     for (int k = blockIdx.x; k < need; k += gridDim.x) {
         const long long b = m.miss_block[k], sl = m.miss_slot[k];
@@ -175,6 +268,104 @@ __global__ void copy_kernel(KvStreamMap m, Runs r) {
             for (int i = threadIdx.x; i < r.len[a] / 16; i += blockDim.x) dst[i] = src[i];
         }
     }
+    if ((int) blockIdx.x < need) {
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            atomicAdd(&g_kvs_prof[7], 1ull);
+            atomicAdd(&g_kvs_prof[8], (unsigned long long) (clock64() - c0));
+        }
+    }
+}
+
+// The same copy with every load of a block's runs issued before its first store (one PCIe round trip per block, not
+// one per run: a mapped read queues behind the expert DMA on the link). U = ceil(16-byte units of a block / CT).
+constexpr int CT = 128, CG = 256;
+template <int U>
+__global__ void __launch_bounds__(CT) copy_fast_kernel(KvStreamMap m, Runs r) {
+    const long long c0 = clock64();
+    const int need = m.ctl[2];
+    const int e0 = r.len[0] / 16, e1 = e0 + (r.n > 1 ? r.len[1] / 16 : 0), e2 = e1 + (r.n > 2 ? r.len[2] / 16 : 0),
+              e3 = e2 + (r.n > 3 ? r.len[3] / 16 : 0);
+    for (int k = blockIdx.x; k < need; k += gridDim.x) {
+        const long long b = m.miss_block[k], sl = m.miss_slot[k];
+        uint4 v[U];
+#pragma unroll
+        for (int u = 0; u < U; ++u) {
+            const int f = (int) threadIdx.x + u * CT;
+            if (f < e3) {
+                const int a = f < e0 ? 0 : f < e1 ? 1 : f < e2 ? 2 : 3;
+                const int o = f - (a == 0 ? 0 : a == 1 ? e0 : a == 2 ? e1 : e2);
+                const uint8_t* src = a == 0 ? r.src[0] : a == 1 ? r.src[1] : a == 2 ? r.src[2] : r.src[3];
+                const int len = a == 0 ? r.len[0] : a == 1 ? r.len[1] : a == 2 ? r.len[2] : r.len[3];
+                v[u] = reinterpret_cast<const uint4*>(src + b * len)[o];
+            }
+        }
+#pragma unroll
+        for (int u = 0; u < U; ++u) {
+            const int f = (int) threadIdx.x + u * CT;
+            if (f < e3) {
+                const int a = f < e0 ? 0 : f < e1 ? 1 : f < e2 ? 2 : 3;
+                const int o = f - (a == 0 ? 0 : a == 1 ? e0 : a == 2 ? e1 : e2);
+                uint8_t* dst = a == 0 ? r.dst[0] : a == 1 ? r.dst[1] : a == 2 ? r.dst[2] : r.dst[3];
+                const int len = a == 0 ? r.len[0] : a == 1 ? r.len[1] : a == 2 ? r.len[2] : r.len[3];
+                reinterpret_cast<uint4*>(dst + sl * len)[o] = v[u];
+            }
+        }
+    }
+    if ((int) blockIdx.x < need) {
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            atomicAdd(&g_kvs_prof[7], 1ull);
+            atomicAdd(&g_kvs_prof[8], (unsigned long long) (clock64() - c0));
+        }
+    }
+}
+
+bool kv_fast() {
+    static const bool on = [] { const char* e = std::getenv("STRATA_KV_FAST"); return e == nullptr || std::atoi(e) != 0; }();
+    return on;
+}
+
+__global__ void pred_steps_kernel(const int32_t* __restrict__ steps, int n_q, int extra) {
+    for (int q = threadIdx.x; q < n_q; q += blockDim.x) {
+        for (int j = 0; j < kStepCount; ++j) g_steps2[q * kStepCount + j] = steps[q * kStepCount + j];
+        const int n_kv = steps[q * kStepCount + kStepNKv], w = steps[q * kStepCount + kStepWidth];
+        g_steps2[q * kStepCount + kStepWidth] = w + extra < n_kv ? w + extra : n_kv;
+    }
+}
+
+__global__ void __launch_bounds__(1024) pred_mark_kernel(KvStreamMap m, const int32_t* __restrict__ sel,
+                                                         const int32_t* __restrict__ steps, int n_q, int cap,
+                                                         int page_size, int pl) {
+    unsigned* p0 = g_pred[0][pl];
+    unsigned* p1 = g_pred[1][pl];
+    for (int i = threadIdx.x; i < kPredWords; i += blockDim.x) { p0[i] = 0u; p1[i] = 0u; }
+    __syncthreads();
+    unsigned long long c0 = 0, c1 = 0;
+    const long long nb = m.n_blocks < (long long) kPredWords * 32 ? m.n_blocks : (long long) kPredWords * 32;
+    for (int q = 0; q < n_q; ++q) {
+        const int w2 = g_steps2[q * kStepCount + kStepWidth], w = steps[q * kStepCount + kStepWidth];
+        const int32_t* s2 = g_sel2 + (long long) q * kPredCap;
+        for (int i = threadIdx.x; i < w2; i += blockDim.x) {   // (a) the wider selection's blocks not resident
+            const int b = s2[i] / page_size;
+            if ((i > 0 && s2[i - 1] / page_size == b) || b >= nb || m.page_table[b] >= 0) continue;
+            const unsigned bit = 1u << (b & 31);
+            if (!(atomicOr(&p0[b >> 5], bit) & bit)) ++c0;
+        }
+        const int32_t* s1 = sel + (long long) q * cap;
+        for (int i = threadIdx.x; i < w; i += blockDim.x) {    // (b) the neighbours of the selected blocks
+            const int b = s1[i] / page_size;
+            if (i > 0 && s1[i - 1] / page_size == b) continue;
+            for (int d = -1; d <= 1; d += 2) {
+                const int x = b + d;
+                if (x < 0 || x >= nb || m.page_table[x] >= 0) continue;
+                const unsigned bit = 1u << (x & 31);
+                if (!(atomicOr(&p1[x >> 5], bit) & bit)) ++c1;
+            }
+        }
+    }
+    if (c0) atomicAdd(&g_kvs_prof[14], c0);
+    if (c1) atomicAdd(&g_kvs_prof[15], c1);
 }
 
 __global__ void reset_kernel(KvStreamMap m) {
@@ -227,10 +418,42 @@ void kv_stream_resolve(const KvStreamMap& m, const QsaAttnPools& slots, const Kv
                              "slot twice\n", (long long) m.n_slots, RT);
         std::exit(1);
     }
-    resolve_kernel<<<1, RT, 0, (cudaStream_t) stream>>>(m, ids, steps, (int) n_q, (int) cap, (int) s.page_size);
+    const bool fast = kv_fast();
+    const int pl = pred_k() > 0 && n_q <= kPredQ ? pred_layer(m) : -1;
+    resolve_kernel<<<1, RT, 0, (cudaStream_t) stream>>>(m, ids, steps, (int) n_q, (int) cap, (int) s.page_size,
+                                                        fast ? 1 : 0, pl);
     check("resolve");
-    copy_kernel<<<96, 128, 0, (cudaStream_t) stream>>>(m, runs_of(slots, host, fmt, s));
+    const Runs r = runs_of(slots, host, fmt, s);
+    int units = 0;
+    for (int a = 0; a < r.n; ++a) units += r.len[a] / 16;
+    const int u = (units + CT - 1) / CT;
+    cudaStream_t cs = (cudaStream_t) stream;
+    if (fast && u == 1) copy_fast_kernel<1><<<CG, CT, 0, cs>>>(m, r);
+    else if (fast && u == 2) copy_fast_kernel<2><<<CG, CT, 0, cs>>>(m, r);
+    else if (fast && u == 3) copy_fast_kernel<3><<<CG, CT, 0, cs>>>(m, r);
+    else if (fast && u == 4) copy_fast_kernel<4><<<CG, CT, 0, cs>>>(m, r);
+    else if (fast && u <= 8) copy_fast_kernel<8><<<CG, CT, 0, cs>>>(m, r);
+    else copy_kernel<<<96, 128, 0, cs>>>(m, r);
     check("copy");
+}
+
+void kv_stream_predict_probe(const KvStreamMap& m, const float* scores, const int32_t* steps, const int32_t* sel,
+                             int64_t n_q, int64_t cap, int64_t max_blocks, const QsaShapes& s, void* stream) {
+    const int k = pred_k();
+    if (k <= 0 || n_q <= 0 || n_q > kPredQ) return;
+    const int pl = pred_layer(m);
+    if (pl < 0) return;
+    static int32_t* steps2 = nullptr;
+    static int32_t* sel2 = nullptr;
+    if (steps2 == nullptr) {
+        cudaGetSymbolAddress((void**) &steps2, g_steps2);
+        cudaGetSymbolAddress((void**) &sel2, g_sel2);
+    }
+    cudaStream_t cs = (cudaStream_t) stream;
+    pred_steps_kernel<<<1, 64, 0, cs>>>(steps, (int) n_q, 4 * k);
+    qsa_block_topk_ref(scores, steps2, n_q, max_blocks, kPredCap, s, sel2, stream);
+    pred_mark_kernel<<<1, 1024, 0, cs>>>(m, sel, steps, (int) n_q, (int) cap, (int) s.page_size, pl);
+    check("predict probe");
 }
 
 void kv_ring_table(int32_t* page_table, int64_t n_blocks, int64_t n_slots, void* stream) {
@@ -269,6 +492,14 @@ void kv_unstage_to_host(const QsaAttnPools& stage, const KvHostPools& host, int 
         if (cudaMemcpyAsync((void*) (r.src[a] + b0 * r.len[a]), r.dst[a] + b0 * r.len[a], (size_t) ((b1 - b0) * r.len[a]),
                             cudaMemcpyDefault, (cudaStream_t) stream) != cudaSuccess)
             check("unstage");
+}
+
+void kv_stream_prof(unsigned long long out[16], bool reset) {
+    if (cudaMemcpyFromSymbol(out, g_kvs_prof, sizeof(unsigned long long) * 16) != cudaSuccess) std::memset(out, 0, 128);
+    if (reset) {
+        static const unsigned long long zero[16] = {};
+        cudaMemcpyToSymbol(g_kvs_prof, zero, sizeof(zero));
+    }
 }
 
 KvStreamCounters kv_stream_counters(const KvStreamMap& m) {

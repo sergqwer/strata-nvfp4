@@ -5064,8 +5064,10 @@ bool FileExpertSource::pcie_layer(int64_t layer) const {
 // ================================ THE ADAPTER ================================
 
 bool ExpertDispatch::fetch_can(int64_t layer) const {
+    // STRATA_FS_WITH_FETCH=1 (#13 oracle test, measurement only): the PCIe share's admissions stay on beside the swap space
+    static const bool fs_with_fetch = [] { const char* v = std::getenv("STRATA_FS_WITH_FETCH"); return v != nullptr && std::atoi(v) != 0; }();
     return fetch_admit > 0 && res_mut != nullptr && !usage.empty() && plan != nullptr && plan->pcie_mode == 2 &&
-           plan->dst2 != nullptr && peer == nullptr && remote_count == 0 && fs == nullptr && pcie_num > 0 &&
+           plan->dst2 != nullptr && peer == nullptr && remote_count == 0 && (fs == nullptr || fs_with_fetch) && pcie_num > 0 &&
            src != nullptr && src->pcie_layer(layer);
 }
 
@@ -7040,6 +7042,7 @@ void ForesightSwap::request_locked(ExpertSource* src, int64_t layer, int32_t exp
     if (failed.load(std::memory_order_relaxed)) return;
     const size_t key = (size_t) (layer * n_expert + expert);
     if (where[key] != -1) return;                       // already on its way, or held by an exchange (#2134)
+    if (!predicted_copy && !reactive) return;           // STRATA_FS_REACTIVE=0: predictions only (#13 oracle test)
     const uint64_t now = completed.load(std::memory_order_acquire);
     if (admit > 1 && !predicted_copy) {
         if (now > miss_at[key] + 4) miss_cnt[key] = 0;
@@ -7117,6 +7120,7 @@ ForesightSwap* foresight_swap_from_env(int64_t layers, int64_t experts, const st
     f->admit = env_int("STRATA_FS_ADMIT", 1, 1);
     f->depth = env_int("STRATA_FS_DEPTH", 4, 2);
     f->verify = env_int("STRATA_FS_VERIFY", 0, 0) != 0;
+    f->reactive = env_int("STRATA_FS_REACTIVE", 1, 0) != 0;
     std::string err;
     if (!f->init(std::min(slots, 64), layers, experts, card_of_layer, devices, err)) {
         std::fprintf(stderr, "strata serve: foresight swap: %s - swap space off\n", err.c_str());

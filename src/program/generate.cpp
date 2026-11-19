@@ -1622,6 +1622,9 @@ bool parse_i64_list(const char* s, std::vector<int64_t>& out, std::string& err) 
 //           i16 ids[n_tok * k], u8 resident[n_expert / 8] (bit e of byte e / 8), then f16 x[n_tok * n_embd] when has_x
 //   window: u8 'W', u8 0, u16 n_tok, u32 0, i64 position of the first row, i32 tokens[n_tok] - written before a decode
 //           window runs, so it belongs to the next round's 'L' records (the drafts are known before the round starts)
+//   taps:   u8 'T', u8 0, u16 0, u32 rows, i64 position of the first row, u32 floats a row, then f16 [rows][floats] - the
+//           DFlash2 context rows exactly as the drafter takes them (prompt rows, then each round's committed rows), generate
+//           mode only
 namespace route_dump {
 struct Dump {
     std::FILE* f = nullptr;
@@ -1746,6 +1749,33 @@ void layer(Dump& d, const strata::core::ExpertDispatch& dd, int64_t layer, const
     std::fwrite(b.data(), 1, b.size(), d.f);
 }
 
+void taps(const float* dev, int64_t rows, int64_t pos0, int64_t per_row) {
+    Dump* d = get();
+    if (d == nullptr || dev == nullptr || rows < 1 || per_row < 1) return;
+    std::vector<float> h((size_t) (rows * per_row));
+    cudaDeviceSynchronize();   // measurement only: the rows come from work on other streams
+    if (cudaMemcpy(h.data(), dev, h.size() * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess) {
+        std::fprintf(stderr, "strata generate: STRATA_ROUTE_TRACE: a tap copy failed\n");
+        return;
+    }
+    std::lock_guard<std::mutex> lk(d->mu);
+    std::vector<uint8_t>& b = d->buf;
+    b.clear();
+    put<uint8_t>(b, (uint8_t) 'T');
+    put<uint8_t>(b, 0);
+    put<uint16_t>(b, 0);
+    put<uint32_t>(b, (uint32_t) rows);
+    put<int64_t>(b, (int64_t) pos0);
+    put<uint32_t>(b, (uint32_t) per_row);
+    const size_t at = b.size();
+    b.resize(at + h.size() * 2);
+    for (size_t i = 0; i < h.size(); ++i) {
+        const uint16_t v = f2h(h[i]);
+        std::memcpy(b.data() + at + i * 2, &v, 2);
+    }
+    std::fwrite(b.data(), 1, b.size(), d->f);
+}
+
 void window(const int32_t* tok, int64_t n_tok, int64_t pos) {
     Dump* d = get();
     if (d == nullptr || tok == nullptr || n_tok < 1 || n_tok > 65535) return;
@@ -1761,6 +1791,111 @@ void window(const int32_t* tok, int64_t n_tok, int64_t pos) {
     std::fwrite(b.data(), 1, b.size(), d->f);
 }
 }  // namespace route_dump
+
+// #13 oracle (measurement only): STRATA_FS_ORACLE=<file>, with the Foresight swap space on (STRATA_FS_SLOTS).  Before each
+// generate decode window, the experts that window really routes (a trace of the same text: --spec-follow) and no cache
+// holds are copied into the swap space, the earliest layers first, the most-voted first within a layer, at most
+// STRATA_FS_ORACLE_BUDGET (default 100) a window (0: none - the same run without the copies).  Only the leading window
+// rows whose tokens match the trace's are used.  File (tools/route_oracle.py): "SOR1", u32 n_layers, n_expert, k,
+// rounds; per round i64 pos, u32 n_tok, i32 tokens[n_tok], i16 ids[n_tok][n_layers][k].
+namespace route_oracle {
+struct Round {
+    std::vector<int32_t> tok;
+    std::vector<int16_t> ids;
+};
+struct Oracle {
+    int64_t L = 0, E = 0, K = 0;
+    int budget = 100;
+    std::unordered_map<int64_t, Round> by_pos;
+    std::vector<int> votes;
+    std::vector<int32_t> list;
+    uint64_t windows = 0, found = 0, rows = 0, rows_matched = 0, asked = 0, resident = 0, cut = 0;
+    ~Oracle() {
+        std::fprintf(stderr, "strata generate: STRATA_FS_ORACLE: %llu windows, %llu found in the trace, %llu of %llu rows "
+                             "matched; %llu copies asked, %llu routed experts already resident, %llu left out by the budget\n",
+                     (unsigned long long) windows, (unsigned long long) found, (unsigned long long) rows_matched,
+                     (unsigned long long) rows, (unsigned long long) asked, (unsigned long long) resident,
+                     (unsigned long long) cut);
+    }
+};
+
+Oracle* get() {
+    static std::once_flag once;
+    static std::unique_ptr<Oracle> o;
+    std::call_once(once, [] {
+        const char* path = std::getenv("STRATA_FS_ORACLE");
+        if (path == nullptr || *path == 0) return;
+        std::FILE* f = std::fopen(path, "rb");
+        if (f == nullptr) { std::fprintf(stderr, "strata generate: STRATA_FS_ORACLE: cannot open %s\n", path); return; }
+        auto o2 = std::make_unique<Oracle>();
+        char magic[4] = {0, 0, 0, 0};
+        uint32_t h[4] = {0, 0, 0, 0};
+        bool ok = std::fread(magic, 1, 4, f) == 4 && std::memcmp(magic, "SOR1", 4) == 0 && std::fread(h, 4, 4, f) == 4;
+        o2->L = h[0];
+        o2->E = h[1];
+        o2->K = h[2];
+        for (uint32_t r = 0; ok && r < h[3]; ++r) {
+            int64_t pos = 0;
+            uint32_t n = 0;
+            ok = std::fread(&pos, 8, 1, f) == 1 && std::fread(&n, 4, 1, f) == 1 && n >= 1 && n <= 64;
+            if (!ok) break;
+            Round rd;
+            rd.tok.resize(n);
+            rd.ids.resize((size_t) n * (size_t) (o2->L * o2->K));
+            ok = std::fread(rd.tok.data(), 4, n, f) == n && std::fread(rd.ids.data(), 2, rd.ids.size(), f) == rd.ids.size();
+            if (ok) o2->by_pos[pos] = std::move(rd);
+        }
+        std::fclose(f);
+        if (!ok || o2->L < 1 || o2->E < 1 || o2->K < 1) {
+            std::fprintf(stderr, "strata generate: STRATA_FS_ORACLE: %s is not an oracle file\n", path);
+            return;
+        }
+        if (const char* bv = std::getenv("STRATA_FS_ORACLE_BUDGET")) o2->budget = std::max(0, std::atoi(bv));
+        o2->votes.assign((size_t) o2->E, 0);
+        std::fprintf(stderr, "strata generate: STRATA_FS_ORACLE: %zu windows from %s, up to %d copies a window\n",
+                     o2->by_pos.size(), path, o2->budget);
+        o = std::move(o2);
+    });
+    return o.get();
+}
+
+void window(const strata::core::ExpertDispatch& dd, const int32_t* tok, int64_t T, int64_t pos) {
+    Oracle* o = get();
+    if (o == nullptr || dd.fs == nullptr || dd.src == nullptr) return;
+    ++o->windows;
+    o->rows += (uint64_t) T;
+    const auto it = o->by_pos.find(pos);
+    if (it == o->by_pos.end()) return;
+    const Round& r = it->second;
+    int64_t m = 0;
+    while (m < T && m < (int64_t) r.tok.size() && r.tok[(size_t) m] == tok[m]) ++m;
+    if (m == 0) return;
+    ++o->found;
+    o->rows_matched += (uint64_t) m;
+    int left = o->budget;
+    for (int64_t l = 0; l < o->L; ++l) {
+        o->list.clear();
+        for (int64_t i = 0; i < m; ++i)
+            for (int64_t j = 0; j < o->K; ++j) {
+                const int e = r.ids[(size_t) ((i * o->L + l) * o->K + j)];
+                if (e < 0 || e >= o->E) continue;
+                if (o->votes[(size_t) e]++ == 0) o->list.push_back(e);
+            }
+        std::stable_sort(o->list.begin(), o->list.end(), [&](int32_t a, int32_t b2) { return o->votes[(size_t) a] > o->votes[(size_t) b2]; });
+        for (const int32_t e : o->list) {
+            o->votes[(size_t) e] = 0;
+            if (dd.host_res != nullptr && dd.host_res[(size_t) l * (size_t) dd.n_expert + (size_t) e] >= 0) { ++o->resident; continue; }
+            if (left <= 0) { ++o->cut; continue; }
+            dd.fs->predict(dd.src, l, e);
+            ++o->asked;
+            --left;
+        }
+    }
+}
+// KV streaming diagnosis (measurement only): the decode's block reads, between the decode's start and its end
+uint64_t kvs0[3] = {0, 0, 0};
+bool kvs_on = false;
+}  // namespace route_oracle
 
 /// The pool's adapter plus the wall-clock it spent, so the report can say how much of the token was the CPU.
 struct Drive {
@@ -8101,7 +8236,11 @@ int main(int argc, char** argv) {
                                      "every expert in RAM, no --vram-elastic, --peer-device or --prefill-head-alias)\n");
             const char* iv = std::getenv("STRATA_KV_GROW_INIT");
             strata::core::qsa_set_kv_elastic(on, iv != nullptr && std::atoll(iv) > 0 ? std::atoll(iv) : 16384);
-            strata::core::ExpertCache::set_vmm(on);
+            // STRATA_CACHE_VMM=1 (measurement): the cache stays one VMM range with KV streaming too - the plain arena
+            // made every GPU stage of a window 20-60% slower (2K, 2026-11-19)
+            static const bool cache_vmm = [] { const char* e = std::getenv("STRATA_CACHE_VMM"); return e != nullptr && std::atoi(e) != 0; }();
+            strata::core::ExpertCache::set_vmm(on || (cache_vmm && !multi_gpu && strata::core::vmm_available() &&
+                                                      !o.vram_elastic && o.peer_device < 0));
         }
         if (cudaMalloc(&sbuf, strata::core::session_bytes(g, o.max_context, K, 0, hi0)) != cudaSuccess) {
             std::fprintf(stderr, "strata generate: session state allocation failed\n");
@@ -23718,7 +23857,7 @@ int main(int argc, char** argv) {
         if (use_df2) {   // the drafter's context: the last 2047 prompt rows' taps
             df2.reset();
             prefill.set_taps(df2.tap_layers(), std::max<int64_t>(0, n_prompt - 2047), 2048);
-            prefill.on_taps = [&](const float* taps, int64_t rows, int64_t pos0, std::string& e) -> bool { df2_tap_dump(taps, rows, pos0, (int64_t) df2.tap_layers().size() * g.n_embd); return df2.context(taps, rows, pos0, e); };
+            prefill.on_taps = [&](const float* taps, int64_t rows, int64_t pos0, std::string& e) -> bool { df2_tap_dump(taps, rows, pos0, (int64_t) df2.tap_layers().size() * g.n_embd); route_dump::taps(taps, rows, pos0, (int64_t) df2.tap_layers().size() * g.n_embd); return df2.context(taps, rows, pos0, e); };
         }
 #endif
         if (!kvg_started) {   // the elastic K/V: every cell this run can reach (no loan)
@@ -24100,7 +24239,24 @@ int main(int argc, char** argv) {
         drive.d.pcie_num = (int) (o.pcie_frac * 256.0 + 0.5);
         if (drive.d.pcie_num < 0) drive.d.pcie_num = 0;
         if (drive.d.pcie_num > 256) drive.d.pcie_num = 256;
+        // #13 oracle test: the Foresight swap space in generate mode too (STRATA_FS_SLOTS; unset = null, nothing changes).
+        // Measurement only: kept to the process's end on purpose (the source and the end-of-run report point at it).
+        if (drive.d.fs == nullptr && !multi_gpu) {
+            int main_dev = 0;
+            cudaGetDevice(&main_dev);
+            std::vector<int> card((size_t) g.n_layers, 0);
+            drive.d.fs = strata::core::foresight_swap_from_env(g.n_layers, g.n_expert, card, std::vector<int>{main_dev});
+            if (drive.d.fs != nullptr) src.set_foresight_swap(drive.d.fs);
+        }
         const int64_t pcie0 = drive.d.pcie_experts;
+        if (g.n_qsa_layers() > 0 && ss.qsa_states[ss.qsa_primary()].kv_mode == 1) {   // KV streaming: counters at the decode's start
+            route_oracle::kvs_on = true;
+            { unsigned long long z[16]; strata::kernels::kv_stream_prof(z, true); }   // the decode only
+            for (int64_t j = 0; j < ss.qsa_alloc; ++j) {
+                const strata::kernels::KvStreamCounters c = strata::kernels::kv_stream_counters(ss.qsa_states[ss.qsa_ord0 + j].map);
+                route_oracle::kvs0[0] += c.misses; route_oracle::kvs0[1] += c.lookups; route_oracle::kvs0[2] += c.calls;
+            }
+        }
         // CS-T: the file tier since the decode began (the prompt path's copies are before this)
         const int64_t files0 = src.file_reads(), ram0 = src.ram_reads();
         const uint64_t fbytes0 = src.file_blob_bytes(), fall0 = src.file_read_bytes();
@@ -24489,6 +24645,7 @@ int main(int argc, char** argv) {
                 if (wait_commit_first && !ver.wait_commit(err)) return false;
                 int32_t dd[strata::core::Dflash2Drafter::kDrafts];
                 float pp[strata::core::Dflash2Drafter::kDrafts];
+                route_dump::taps(ver.tap_dev(), a_ + 1, p, (int64_t) df2.tap_layers().size() * g.n_embd);   // STRATA_ROUTE_TRACE only (#13)
                 if (!df2.draft(ver.tap_dev(), a_ + 1, p, outv[(size_t) a_], dd, pp, err)) return false;
                 for (size_t i = 0; i < drafts.size() && i < (size_t) strata::core::Dflash2Drafter::kDrafts; ++i) { drafts[i] = dd[i]; dprob[i] = pp[i]; }
                 // what the MTP does while it drafts: the PLE rows of the tokens the next window will hold are read ahead
@@ -24532,10 +24689,12 @@ int main(int argc, char** argv) {
                 const strata::spec::DraftPolicy::Pick pk = kd > 0 ? policy.choose(S_mtp, kd, md) : strata::spec::DraftPolicy::Pick{};
                 if (kd > 0 && pk.lookup) {
                     dfr_lookup = true; dfr_T = pk.t; dfr_match = md;
+                    route_dump::taps(ver.tap_dev(), dfr_n, dfr_pos, (int64_t) df2.tap_layers().size() * g.n_embd);
                     if (!df2.context(ver.tap_dev(), dfr_n, dfr_pos, err)) { std::fprintf(stderr, "strata generate: %s\n", err.c_str()); return 1; }
                 } else {
                     int32_t dd[strata::core::Dflash2Drafter::kDrafts];
                     float pp[strata::core::Dflash2Drafter::kDrafts];
+                    route_dump::taps(ver.tap_dev(), dfr_n, dfr_pos, (int64_t) df2.tap_layers().size() * g.n_embd);
                     if (!df2.draft(ver.tap_dev(), dfr_n, dfr_pos, dfr_anchor, dd, pp, err)) { std::fprintf(stderr, "strata generate: %s\n", err.c_str()); return 1; }
                     for (size_t i = 0; i < drafts.size() && i < (size_t) strata::core::Dflash2Drafter::kDrafts; ++i) { drafts[i] = dd[i]; dprob[i] = pp[i]; }
                 }
@@ -24657,6 +24816,7 @@ int main(int argc, char** argv) {
                 ver.set_spec_q(mtp.spec_q(), T_mtp - 1);
             const auto decode_pool_fn = use_mtp && mtp.prob() ? &drive_pool_multi_invariant : &drive_pool_multi;
             route_dump::window(window.data(), T, p);   // STRATA_ROUTE_TRACE only (#13)
+            route_oracle::window(drive.d, window.data(), T, p);   // STRATA_FS_ORACLE only (#13)
             if (!ver.run(T, window.data(), p, decode_pool_fn, &drive, outv.data(), err)) {
                 // The graph of a window size is captured the first time it is used, and the draft source took VRAM: when the capture runs
                 // out of memory the window gets one row narrower (the widths below it are already captured) instead of the run failing.
@@ -24724,6 +24884,7 @@ int main(int argc, char** argv) {
                 return 1;
             }
             ++rounds;
+            if (drive.d.fs) drive.d.fs->completed.fetch_add(1, std::memory_order_release);   // the swap space's reuse rule
             drafts_total += T - 1;
             drafts_ok += a;
             ++accepted_hist[(size_t) a];
@@ -24891,6 +25052,10 @@ int main(int argc, char** argv) {
                         1000 * pm.g0, 1000 * pm.g);
         }
         (void) pool_ms0;
+        {   // STRATA_VERIFY_PROFILE: the GPU stage split per window (measurement)
+            const std::string pr = ver.profile_report();
+            if (!pr.empty()) std::fprintf(stderr, "strata generate: GPU stages (ms/window):%s\n", pr.c_str());
+        }
 #if defined(STRATA_HAVE_DFLASH2)
         if (use_df2 && df2.rounds > 0)
             std::printf("%-24s %.3f ms/round drafting (%lld rounds, GPU %.3f), %.0f MiB of VRAM\n", "dflash2", df2.ms_draft / (double) df2.rounds,
@@ -24936,6 +25101,38 @@ int main(int argc, char** argv) {
     const double decode_ms = decoded > 0 ? total_ms / (double) decoded : 0.0;
     std::printf("%-24s %lld tokens in %.1f ms  ->  %.2f tok/s\n", "decode", (long long) decoded, total_ms,
                 decode_ms > 0.0 ? 1000.0 / decode_ms : 0.0);
+    if (drive.d.fs) std::fprintf(stderr, "strata generate: %s\n", drive.d.fs->report().c_str());
+    if (route_oracle::kvs_on) {
+        uint64_t m = 0, l = 0, c = 0;
+        bool over = false;
+        for (int64_t j = 0; j < ss.qsa_alloc; ++j) {
+            const strata::kernels::KvStreamCounters k = strata::kernels::kv_stream_counters(ss.qsa_states[ss.qsa_ord0 + j].map);
+            m += k.misses; l += k.lookups; c += k.calls; over = over || k.overflow;
+        }
+        m -= route_oracle::kvs0[0]; l -= route_oracle::kvs0[1]; c -= route_oracle::kvs0[2];
+        std::fprintf(stderr, "strata generate: KV streaming in the decode: %llu block lookups, %llu read from RAM (%.2f%% hit), "
+                             "%.1f MiB, %llu resolve calls%s\n", (unsigned long long) l, (unsigned long long) m,
+                     l ? 100.0 * (double) (l - m) / (double) l : 100.0, (double) m * 4224.0 / 1048576.0, (unsigned long long) c,
+                     over ? " - OVERFLOW" : "");
+        unsigned long long p[16];
+        strata::kernels::kv_stream_prof(p, false);
+        int clk = 0;
+        cudaDeviceGetAttribute(&clk, cudaDevAttrClockRate, 0);   // kHz (the boost clock: an estimate)
+        const double us = clk > 0 ? 1000.0 / (double) clk : 0.0, cn = p[0] ? (double) p[0] : 1.0;
+        std::fprintf(stderr, "strata generate: KV resolve per call (%llu calls, %.2f queries, %.1f misses, %.0f%% calls "
+                             "with a miss): lookups %.2f us, sweep %.2f us (%.2f iterations, %.0f candidates), re-point %.2f us, "
+                             "total %.2f us; copy %.2f us per block with work (%.1f blocks a call) [cycles at %d MHz]\n",
+                     (unsigned long long) p[0], (double) p[1] / cn, (double) p[6] / cn, 100.0 * (double) p[10] / cn,
+                     (double) p[2] / cn * us, (double) p[3] / cn * us, (double) p[5] / cn, (double) p[11] / cn,
+                     (double) p[4] / cn * us, (double) p[9] / cn * us,
+                     p[7] ? (double) p[8] / (double) p[7] * us : 0.0, (double) p[7] / cn, clk / 1000);
+        if (p[14] + p[15] > 0)
+            std::fprintf(stderr, "strata generate: KV prefetch probe: of %.1f misses a call, the threshold list named %.1f "
+                                 "(%.0f%%, %.1f candidates a call), the neighbours %.1f (%.0f%%, %.1f candidates a call)\n",
+                         (double) p[6] / cn, (double) p[12] / cn, p[6] ? 100.0 * (double) p[12] / (double) p[6] : 0.0,
+                         (double) p[14] / cn, (double) p[13] / cn, p[6] ? 100.0 * (double) p[13] / (double) p[6] : 0.0,
+                         (double) p[15] / cn);
+    }
     if (n_prompt > 1)
         std::printf("%-24s %lld tokens in %.1f ms  ->  %.2f tok/s  (time to first token %.1f ms)\n", "prefill",
                     (long long) (n_prompt - 1), prefill_ms,
