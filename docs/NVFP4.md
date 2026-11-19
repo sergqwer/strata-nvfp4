@@ -378,6 +378,63 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### KV streaming on by default (2026-11-19, release 0.2.15-nvfp4.3)
+
+The elastic K/V (`--kv-grow`, on by default here) takes its VRAM from the expert cache as a dialog grows: 1,239 slots
+at 280K, and decode falls from about 205 tokens/s at the start to 180. KV streaming (`--kv-resident N`, upstream's)
+keeps N cells of each of the 12 attention layers in VRAM, the whole K/V in pinned RAM, and reads the blocks a token's
+selection names from RAM when they are not resident. It looked slower than the elastic K/V (upstream #4815 reports
+-13 to -20%), and it was, for a reason outside streaming: `--kv-resident` turns the elastic K/V off, and the expert
+cache was one VMM range only together with it (`ExpertCache::set_vmm(on)`). The plain arena the cache fell back to made
+every GPU stage of a verify window slower under WDDM, and unevenly from run to run. GPU stage times
+(`STRATA_VERIFY_PROFILE=1`), 2K prompt, ms a window:
+
+| | Projections (GEMV) | Experts in VRAM | Head | Decode, tokens/s |
+| --- | ---: | ---: | ---: | ---: |
+| Elastic K/V (VMM cache) | 1.04-1.05 | 1.56-1.58 | 0.46 | 190.6-193.2 |
+| `--no-kv-grow`, no streaming | 1.69 | 2.12 | 0.88 | (fewer slots) |
+| `--kv-resident 32768`, plain arena | 1.21-2.90 | 1.80-3.65 | 0.57-1.76 | 102-177 |
+| `--kv-resident 32768`, VMM cache | 1.03-1.08 | 1.56-1.61 | 0.45-0.47 | 183.5-190.2 |
+
+Decode with the VMM cache, RTX 5090, the GPTQ tray profile, DFlash2, the same 1,730-token answer after every prompt
+(`--spec-follow`: greedy output differs from run to run, so free runs compare different texts), arms interleaved:
+
+| Prompt | Elastic K/V | KV streaming | |
+| --- | ---: | ---: | ---: |
+| 2K | 190.6-193.2 | 183.5-190.2 | -1 to -4% |
+| 32K | 203.9 | 201.7 | -1% |
+| 128K | 192.8 | 196.0 | +2% |
+| 274K | 178.6-179.6 | 192.5-195.0 | +8% |
+
+The release's engine, the same way: 2K 203.4 and 205.9 with `--no-kv-stream` against 202.8 and 200.8, 274K 176.8
+against 188.7. A 128K prompt reads at 8,930 tokens/s against 9,030-9,130 (-2%).
+
+What streaming itself costs, from SM clock counters inside the resolve and copy kernels (they run inside the window
+graphs, which nsys does not trace on WDDM), per attention layer and window: the block lookups about 7.5 us, the clock
+sweep about 2 us, and at 280K the copy of about 72 missed blocks (300 KB) about 19 us: 0.33 ms a round of 12 layers.
+The copy is bound by the SMs' reads of pinned memory (about 16 GB/s), not by the experts' traffic on the same link:
+19.1 us a block with the PCIe share and the tier's swaps off (`--pcie-frac 0 --adapt-every 0`), 19.4 with them.
+Tried and dropped:
+- A copy with every load of a block issued before its stores, and lookups with their loads in flight together: both
+  parity tests pass, no gain.
+- Fetching blocks a round ahead, when the link is free: the 64 blocks below the top-k threshold of a call name 4% of the
+  next call's misses, the next 512 name 26% at 274 fetched blocks a call (4 times the misses' traffic), the blocks
+  beside the selected ones 15%. New blocks enter a selection at once, not from just below the threshold.
+
+The dialog cache in RAM works with it (the tray's profile through the server, three dialogs of about 100K tokens taken
+in turn): a switch back to a dialog took 258-286 ms (260-280 with the elastic K/V), its restore 77-90 ms, and every
+answer named code from its own dialog's file.
+
+What the release changes:
+- **KV streaming by default** where it pays: one GPU, `--max-context` of 131,072 or more, no `--batch`, a profiled
+  cache that can be one VMM range (every expert in RAM), and RAM for the experts plus 32 GiB plus the host copy (so a
+  96 GB PC keeps the elastic K/V). 32,768 cells a layer stay in VRAM. `--no-kv-stream` or `--kv-resident 0` keeps the
+  whole K/V in VRAM, an explicit `--kv-resident N` is used as given, `STRATA_KV_STREAM=0` turns the default off.
+  Not on AMD builds, an integrated GPU or WSL. Setup's own "KV streaming off" answers (`--kv-streaming off`, WSL, too
+  little RAM) write `STRATA_KV_STREAM=0` into the config's env, so they stay off with this engine.
+- **The expert cache is one VMM range with KV streaming too**, wherever the elastic K/V could have had it
+  (`STRATA_CACHE_VMM=0`: the old plain arena, for A/B).
+
 ### DFlash2 drafts for the NVFP4 GPTQ (2026-11-18, release 0.2.15-nvfp4.2)
 
 Upstream kept DFlash2 (incoai's block drafter for Qwen3.8-Flash-Next) off for every NVFP4 model, because it had no

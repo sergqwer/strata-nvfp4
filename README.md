@@ -61,6 +61,14 @@ files by hand.
 
 ## What's new
 
+- **KV streaming on by default (0.2.15-nvfp4.3).** On one GPU with a context of 131,072 tokens or more (the tray's
+  512K), the engine keeps 32,768 cells of each attention layer's K/V in VRAM and all of it in pinned RAM (6.2 GiB at
+  512K), so the VRAM the elastic K/V took from the experts as a dialog grew stays with them. RTX 5090, the same answer
+  after each prompt: 274K 195 tokens/s against 180 (+8%), 128K 196 against 193, 32K 202 against 204, 2K 190 against
+  193; a long prompt reads about 2% slower. The expert cache now stays one VMM range with streaming: the plain arena it
+  fell back to made every GPU stage 20-60% slower under WDDM, which is why `--kv-resident` looked slower before
+  (upstream #4815). `--no-kv-stream` turns it off
+  ([measurements](docs/NVFP4.md#kv-streaming-on-by-default-2026-11-19-release-0215-nvfp43)).
 - **DFlash2 drafts for the NVFP4 GPTQ (0.2.15-nvfp4.2).** On a card that holds as many experts as an RTX 5090, Auto
   drafts with DFlash2 instead of the MTP layer: 215 tokens/s against 200 on the 5090 (+7.5%), 213 against 194 with the
   censorship switch on (+10%). Setup and `prepare-model.cmd` fetch the drafter (1.2 GB once). Smaller cards, NVIDIA's

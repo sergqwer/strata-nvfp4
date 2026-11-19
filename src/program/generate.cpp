@@ -833,6 +833,7 @@ struct Options {
     bool ple_sync_submit = false;      ///< A/B arm: submit reads on the token thread, no I/O worker
     std::string kv = "fp16";           ///< plan v0.3 P7: KV storage, fp16 (default) or int8 (half the VRAM)
     int64_t kv_resident = 0;           ///< KV streaming: resident cells per QSA layer (0: all in VRAM)
+    bool kv_resident_given = false;    ///< --kv-resident / --no-kv-stream named: no automatic KV streaming
     bool kv_grow = true;               ///< the elastic K/V (kvg_ensure): on in the fork (--no-kv-grow, STRATA_KV_GROW=0)
     bool kv_grow_given = false;        ///< --kv-grow / --no-kv-grow on the command line
     std::string dump_residual;
@@ -1250,8 +1251,12 @@ void usage() {
                  "  --kv k8v4            hybrid: INT8 K (exact attention scores) + rotated Q4_0 V, 816 B/cell\n"
                  "                       (vs int8's 1,056); streams with --kv-resident too\n"
                  "  --kv-resident N      KV streaming: keep N cells of each QSA layer in VRAM (min 20480) and the\n"
-                 "                       whole K/V in pinned RAM; the freed VRAM goes to expert slots. 0 (default):\n"
-                 "                       all of it in VRAM. A context of N cells or fewer is not streamed\n"
+                 "                       whole K/V in pinned RAM; the freed VRAM goes to expert slots. 0: all of it\n"
+                 "                       in VRAM. A context of N cells or fewer is not streamed. Default (this\n"
+                 "                       fork): 32768 on one GPU with --max-context >= 131072, no --batch, a\n"
+                 "                       profiled cache in one VMM range and RAM for the experts + 32 GiB + the\n"
+                 "                       host copy; otherwise 0\n"
+                 "  --no-kv-stream       the whole K/V in VRAM (the same as --kv-resident 0)\n"
                  "  --kv-grow            the K/V takes VRAM only for the cells the requests reach and the expert\n"
                  "                       cache holds the rest, giving slots back as the context grows (one GPU, with\n"
                  "                       --expert-profile; STRATA_KV_GROW=1/0 also). On by default in this fork;\n"
@@ -3839,7 +3844,8 @@ int main(int argc, char** argv) {
         else if (a == "--ple-delay-us") o.ple_delay_us = std::atof(next("--ple-delay-us"));
         else if (a == "--ple-sync-submit") o.ple_sync_submit = true;
         else if (a == "--kv") o.kv = next("--kv");
-        else if (a == "--kv-resident") o.kv_resident = std::atoll(next("--kv-resident"));
+        else if (a == "--kv-resident") { o.kv_resident = std::atoll(next("--kv-resident")); o.kv_resident_given = true; }
+        else if (a == "--no-kv-stream") { o.kv_resident = 0; o.kv_resident_given = true; }
         else if (a == "--kv-grow") { o.kv_grow = true; o.kv_grow_given = true; }
         else if (a == "--no-kv-grow") { o.kv_grow = false; o.kv_grow_given = true; }
         else if (a == "--stream-token") o.stream_token = true;
@@ -7934,22 +7940,67 @@ int main(int argc, char** argv) {
             bool remote = false;
             for (const int r : o.expert_cache_remote) remote = remote || r > 0;
             const bool asked = ev != nullptr && ev[0] != '\0' ? ev[0] != '0' : o.kv_grow;
+            // what both the elastic K/V and a VMM cache need: one GPU, a profiled cache that can be one VMM range and
+            // every expert in RAM (--vram-elastic's cache is not one VMM range; upstream 0.1.44's
+            // --prefill-head-alias lends from slot 1: no gap for the K/V to grow into)
+            const bool vmm_cache_ok = !multi_gpu && !o.expert_profile.empty() && !o.resident_cpu_experts &&
+                                      o.expert_cache != 0 && !remote && strata::core::vmm_available() &&
+                                      !o.vram_elastic && o.peer_device < 0 && !o.prefill_head_alias;
+            // 0.2.15-nvfp4.3: KV streaming on by default where it pays (RTX 5090, Qwen3.8-Flash-Next, the same 1730-token
+            // answer: 274K 195 vs 180 tok/s, 128K 196 vs 193, 32K 202 vs 204, 2K 190 vs 193). 32768 cells of each QSA
+            // layer stay in VRAM, the K/V is in pinned RAM, and the VRAM the elastic K/V would take as the context
+            // grows stays with the experts. Only with the cache in one VMM range (below): a plain arena made every GPU
+            // stage 20-60% slower under WDDM. STRATA_KV_STREAM=0 / --no-kv-stream / --kv-resident 0 keep it off
+            // not on AMD builds, an integrated GPU (its "VRAM" is the same RAM) or WSL (the driver pins about 1 GB)
+            bool stream_card = true;
+#if defined(STRATA_USE_HIP)
+            stream_card = false;
+#else
+            int integrated = 0;
+            if (cudaDeviceGetAttribute(&integrated, cudaDevAttrIntegrated, primary_device) == cudaSuccess && integrated)
+                stream_card = false;
+#endif
+#if defined(__linux__)
+            {
+                std::ifstream osr("/proc/sys/kernel/osrelease");
+                std::string rel;
+                std::getline(osr, rel);
+                for (char& c : rel) c = (char) std::tolower((unsigned char) c);
+                if (rel.find("microsoft") != std::string::npos || rel.find("wsl") != std::string::npos) stream_card = false;
+            }
+#endif
+            if (!o.kv_resident_given && stream_card && g.n_qsa_layers() > 0 && vmm_cache_ok && o.batch <= 1 &&
+                o.max_context >= 131072) {
+                const char* sv = std::getenv("STRATA_KV_STREAM");
+                const uint64_t installed = strata::platform::total_physical_memory();
+                std::error_code fec;
+                const uint64_t experts = o.pack.empty() ? 0 : (uint64_t) std::filesystem::file_size(o.pack + "/experts.bin", fec);
+                const bool q8 = o.kv == "int8" || o.kv == "q4_0" || o.kv == "k8v4";
+                const uint64_t per_cell = (uint64_t) g.n_head_kv * (uint64_t) g.head_dim * (q8 ? 2u : 4u) + 64u;
+                const uint64_t host_kv = (uint64_t) o.max_context * (uint64_t) g.n_qsa_layers() * per_cell;
+                const bool ram_ok = !fec && experts > 0 && installed > experts + (32ull << 30) + host_kv;
+                if ((sv == nullptr || sv[0] != '0') && ram_ok) {
+                    o.kv_resident = 32768;
+                    strata::core::qsa_set_kv_resident(o.kv_resident);
+                    std::fprintf(stderr, "strata generate: KV streaming by default (one GPU, %lld-token context, %.1f GiB "
+                                         "installed): --no-kv-stream keeps the whole K/V in VRAM\n",
+                                 (long long) o.max_context, (double) installed / 1073741824.0);
+                }
+            }
             // (--batch: the main session's K/V is elastic as without it; the batch slots carve theirs whole, with the
             // elastic switch off while they and their drafters are made - this fork, parallel dialogs.  Before, --batch
             // turned the elastic K/V off and the main session's 262K K/V took 3.35 GiB of the expert cache for good.)
-            const bool on = asked && !multi_gpu && o.kv_resident <= 0 &&
-                            !o.expert_profile.empty() && !o.resident_cpu_experts && o.expert_cache != 0 && !remote &&
-                            strata::core::vmm_available() &&
-                            // --vram-elastic's cache is not one VMM range
-                            !o.vram_elastic && o.peer_device < 0 &&
-                            // upstream 0.1.44's --prefill-head-alias lends from slot 1: no gap for the K/V to grow into
-                            !o.prefill_head_alias;
+            const bool on = asked && o.kv_resident <= 0 && vmm_cache_ok;
             if (asked && !on && (o.kv_grow_given || (ev != nullptr && ev[0] != '\0') || o.prefill_head_alias))
                 std::fprintf(stderr, "strata generate: --kv-grow is off (one GPU, a profile, the whole K/V in VRAM, "
                                      "every expert in RAM, no --vram-elastic, --peer-device or --prefill-head-alias)\n");
             const char* iv = std::getenv("STRATA_KV_GROW_INIT");
             strata::core::qsa_set_kv_elastic(on, iv != nullptr && std::atoll(iv) > 0 ? std::atoll(iv) : 16384);
-            strata::core::ExpertCache::set_vmm(on);
+            // the cache in one VMM range with KV streaming too (0.2.15-nvfp4.3): the elastic K/V is off there, and
+            // the plain arena it fell back to made every GPU stage of a window 20-60% slower and erratic under WDDM
+            // (2K: 177 and 102 tok/s against 190 with it; --no-kv-grow alone shows the same). STRATA_CACHE_VMM=0 = the old arena
+            const char* cv = std::getenv("STRATA_CACHE_VMM");
+            strata::core::ExpertCache::set_vmm(on || (o.kv_resident > 0 && vmm_cache_ok && (cv == nullptr || cv[0] != '0')));
         }
         if (cudaMalloc(&sbuf, strata::core::session_bytes(g, o.max_context, K, 0, hi0)) != cudaSuccess) {
             std::fprintf(stderr, "strata generate: session state allocation failed\n");

@@ -301,12 +301,15 @@ def config_for(inp: SetupInputs, lib) -> SetupConfig:
     # --kv-streaming on|off overrides the RAM test (the owner's rule); WSL stays off - it cannot stream.
     stream_need = kv_streaming_need_gb(model, ctx, kv)
     stream_fits = ram >= stream_need
+    kv_stream_off = False   # strata-nvfp4 0.2.15-nvfp4.3: the engine streams long contexts by default; an "off" here says so
     if is_wsl() and ctx >= 65536:
+        kv_stream_off = True
         ok("WSL: KV streaming off (the driver pins only about 1 GB of RAM); the KV cache stays in VRAM")
         if a.kv_streaming == "on":
             warn("--kv-streaming on: WSL cannot stream the KV cache (its RAM copy must be pinned, and the driver pins "
                  "only about 1 GB there): off")
     elif ctx >= 65536 and a.kv_streaming == "off":
+        kv_stream_off = True
         ok("KV streaming off, as you chose (--kv-streaming off): the KV cache stays in VRAM")
     elif ctx >= 65536 and (stream_fits or a.kv_streaming == "on"):
         args += ["--kv-resident", "32768"]
@@ -324,6 +327,7 @@ def config_for(inp: SetupInputs, lib) -> SetupConfig:
             warn(f"the KV cache's {kv_ram_gb:.1f} GB of RAM come on top of your {budget:g} GiB RAM budget (setup "
                  f"would take them out of it: {resident_budget_gib(model, ram, kv_ram_gb)} GiB); kept as you chose")
     elif ctx >= 65536:   # #620: say why, so a regenerated config that lost --kv-resident is not a surprise
+        kv_stream_off = True
         ok(f"KV streaming off: it needs ~{stream_need:.0f} GB of RAM for {model} (its experts, the room beside them "
            f"and the {kv_ram_gb:.1f} GB cache), and this PC has {ram:.0f}; the KV cache stays in VRAM (fewer cached experts). --kv-streaming on "
            "turns it on anyway")
@@ -473,6 +477,8 @@ def config_for(inp: SetupInputs, lib) -> SetupConfig:
             ok(f"rocBLAS tuning tables for {gpu['arch']}: {', '.join(rocblas_tables)} (the engine takes the one of its rocBLAS build)")
         if resident:   # ROCm: large page-locked host allocations can fail or be slow for the CPU; keep the copy pageable
             cfg.setdefault("env", {})["STRATA_RESIDENT_PIN"] = "0"
+    if kv_stream_off:   # setup's "off" stays off with an engine that streams long contexts by default
+        cfg.setdefault("env", {})["STRATA_KV_STREAM"] = "0"
     if gpu["count"] > 1 or a.gpu is not None:
         cfg["gpu"] = gpu["index"]                      # the engine is told this card (issue #51)
         cfg["gpus_asked"] = True                       # chosen at setup: not asked again at start
