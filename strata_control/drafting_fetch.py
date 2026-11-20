@@ -329,6 +329,55 @@ def ensure_for(data_dir: str | Path, *, model_name: str | None, backend: str | N
     return ensure(data_dir, progress=progress, cancel=cancel)       # a set with no tuned entry: the stock drafter exactly as before
 
 
+def ensure_fork_tuned_mtp(mtp_dir: str | Path, *, progress: Progress | None = None, cancel: threading.Event | None = None,
+                          base_url: str | None = None, files=None) -> Path:
+    """strata-nvfp4 0.2.15-nvfp4.4: Basalt's self-distilled draft layer into <mtp>/rt-tuned (drafting.FORK_MTP_TUNED_*): dense.bin and
+    dense.txt from this fork's GPTQ repository at the pinned revision, each checked against its size and SHA-256; experts.bin and
+    draft_vocab.bin are the set's own (drafting.sync_fork_tuned_mtp: linked, else copied).  Files already here and checked are kept;
+    a stopped download resumes.  ``base_url`` / ``files`` are for tests."""
+    report = progress or (lambda *_: None)
+    mtp = Path(mtp_dir)
+    missing_own = [n for n in drafting.FORK_MTP_TUNED_SHARED if not (mtp / n).is_file()]
+    if missing_own:
+        raise DraftingError(f"The model's own draft layer is not complete in {mtp} ({', '.join(missing_own)} missing), so the tuned layer "
+                            "is not set up. Run setup again to repair the model's files.")
+    out = mtp / drafting.FORK_MTP_TUNED
+    spec = tuple(files if files is not None else drafting.FORK_MTP_TUNED_FILES)
+    base = base_url or drafting.FORK_MTP_TUNED_BASE_URL
+
+    def checked(name: str, size: int, sha: str) -> bool:
+        path = out / name
+        return path.is_file() and path.stat().st_size == size and transfer.sha256_file(path) == sha
+
+    todo = [(n, s, h) for n, s, h in spec if not checked(n, s, h)]
+    if todo:
+        acquisition.require("the tuned draft layer", "strata drafting fetch")
+        if not _reachable(base):
+            raise OfflineError("There is no internet connection, so the tuned draft layer can't be downloaded now.")
+        out.mkdir(parents=True, exist_ok=True)
+        total = sum(s for _n, s, _h in todo)
+        done_before = 0
+        for name, size, sha in todo:
+            (out / name).unlink(missing_ok=True)         # an older or broken copy: replaced only by the checked download
+            partial = out / (name + ".part")
+            try:
+                transfer.download(base + name, partial, size=size, sha256=sha, cancel=cancel, what="the tuned draft layer",
+                                  progress=lambda d, _s, b=done_before: report("Downloading the tuned draft layer…", b + d, total))
+            except transfer.Unreachable as exc:
+                raise DraftingError(str(exc)) from None
+            except transfer.ChecksumMismatch:
+                raise DraftingError("The downloaded draft layer did not pass the safety check, so it was deleted. Try again; the model "
+                                    "drafts with its own layer meanwhile.") from None
+            except transfer.TransferError as exc:
+                raise DraftingError(f"The draft layer download did not finish: {exc}. Try again; it continues where it stopped.") from None
+            os.replace(partial, out / name)
+            done_before += size
+    if not drafting.sync_fork_tuned_mtp(mtp):
+        raise DraftingError(f"The tuned draft layer in {out} could not be completed from the model's own files.")
+    report("The tuned draft layer is ready.", 1, 1)
+    return out
+
+
 def ensure(data_dir: str | Path, *, progress: Progress | None = None, cancel: threading.Event | None = None,
            base_url: str | None = None, files=None) -> Path:
     """Make the packed drafter exist under ``data_dir`` and return its path. A pack that is there is kept. Resumable: an interrupted

@@ -27,6 +27,7 @@ import json
 import mmap
 import os
 import re
+import shutil
 import struct
 import sys
 import time
@@ -421,11 +422,20 @@ def fork_gptq_mtp(backend: str | None, model_name: str | None, archs: Any = None
 #: the CPU-served MB per expert, which the engine knows once the expert cache is sized) and Basalt's window of 8, with the self-distilled draft
 #: layer (FORK_MTP_TUNED) where one is on this computer, else the set's own layer.  On CUDA, one request at a time, one card's layers (not a split),
 #: with an engine that takes the flags (FORK_MTP_MARK); STRATA_AUTO_NEW_MTP=0 keeps the old Auto.  The person's own --spec stays.
-#: The tuned layer is Basalt's published retraining: check its licence before it ships with a setup.
 FORK_MTP_FLAGS = ("--mtp-head", "proxy", "--mtp-cum", "auto")
 FORK_MTP_SPEC = 8
 FORK_MTP_TUNED = "rt-tuned"                                   # <model data>/mtp/rt-tuned, then STRATA_MTP_TUNED_DIR
-FORK_MTP_DEV_TUNED = r"D:\Projects\Strata-data\mtp\rt-tuned"     # the dev location until the licence check (not shipped)
+#: 0.2.15-nvfp4.4: the self-distilled draft layer of Basalt (github.com/jesdga95/basalt, Jesus Gulfo; jesdga/Qwen3.8-Flash-Next-Basalt),
+#: Qwen Community License 1.0 like the model, on this fork's GPTQ repository under mtp/rt-tuned/.  Only dense.bin differs from the set's
+#: own layer (the same tensors and layout, values retrained); experts.bin and draft_vocab.bin are the set's (linked, else copied).
+#: Setup, update and prepare-model.cmd fetch it for FORK_GPTQ_SETS only (measured there): drafting_fetch.ensure_fork_tuned_mtp.
+FORK_MTP_TUNED_REPO = "Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata"
+FORK_MTP_TUNED_REVISION = "346744eb39b93e3d45b79dfb476a59043504adc6"
+FORK_MTP_TUNED_BASE_URL = f"https://huggingface.co/{FORK_MTP_TUNED_REPO}/resolve/{FORK_MTP_TUNED_REVISION}/mtp/{FORK_MTP_TUNED}/"
+FORK_MTP_TUNED_FILES = (("dense.bin", 116099072, "dfe18647e0c95d05302907be88f021590119645a1567fcd770c8d309df852d75"),
+                        ("dense.txt", 1880, "8773c81ebb0986e37fe94a8a9933e87be48b1fabc6889a0106bcdab179d1c2ac"))
+FORK_MTP_TUNED_SHARED = ("experts.bin", "draft_vocab.bin")    # the set's own files, beside the tuned dense.bin
+FORK_MTP_TUNED_GB = 0.12
 FORK_MTP_MARK = b"--mtp-cum auto"
 _mtp_marks: dict[tuple[str, int, int], bool] = {}
 
@@ -458,7 +468,7 @@ def fork_new_mtp(backend: str | None, engine: str | os.PathLike[str] | None = No
 
 def fork_tuned_mtp_dir(args: list[Any], data_dir: str | Path | None) -> Path | None:
     """The self-distilled draft layer, if one is on this computer: beside the set's layer (<mtp>/rt-tuned, or the rt folder's sibling), <model
-    data>/mtp/rt-tuned, STRATA_MTP_TUNED_DIR, the dev folder."""
+    data>/mtp/rt-tuned, STRATA_MTP_TUNED_DIR.  A folder counts once it has every file the engine reads (fork_tuned_mtp_complete)."""
     cands: list[Path] = []
     folder = _flag_value(args, "--mtp")
     if folder and not folder.isdigit():
@@ -468,14 +478,61 @@ def fork_tuned_mtp_dir(args: list[Any], data_dir: str | Path | None) -> Path | N
     env = os.environ.get("STRATA_MTP_TUNED_DIR")
     if env:
         cands.append(Path(env))
-    cands.append(Path(FORK_MTP_DEV_TUNED))
     for c in cands:
+        if fork_tuned_mtp_complete(c):
+            return c
+    return None
+
+
+def fork_tuned_mtp_complete(folder: str | Path) -> bool:
+    """Has this folder every file of a draft layer (dense.bin, dense.txt, experts.bin, draft_vocab.bin)?  A download still in progress
+    (dense.bin.part) does not count."""
+    try:
+        return all((Path(folder) / n).is_file() for n in ("dense.bin", "dense.txt", *FORK_MTP_TUNED_SHARED))
+    except OSError:
+        return False
+
+
+def fork_tuned_wanted(model_name: str | None) -> bool:
+    """Is the self-distilled draft layer fetched for this set (setup, update, prepare-model.cmd)?  This fork's GPTQ set (FORK_GPTQ_SETS, with
+    and without the uncensoring projection), where it was measured; the NVIDIA, mix and Q8_0 sets keep their own layer."""
+    return set_of(model_name) in FORK_GPTQ_SETS
+
+
+def sync_fork_tuned_mtp(mtp_dir: str | Path) -> bool:
+    """Give <mtp>/rt-tuned the set's own experts.bin and draft_vocab.bin (a hard link, a copy on a drive without links), and again when
+    the set's file changed (another draft vocabulary chosen).  Nothing is downloaded.  -> the folder is complete.  No rt-tuned folder:
+    nothing is made."""
+    mtp = Path(mtp_dir)
+    out = mtp / FORK_MTP_TUNED
+    if not out.is_dir():
+        return False
+    for name in FORK_MTP_TUNED_SHARED:
+        src, dst = mtp / name, out / name
+        if not src.is_file():
+            continue
         try:
-            if (c / "experts.bin").is_file() and (c / "dense.bin").is_file():
-                return c
+            if dst.is_file() and (os.path.samefile(src, dst) or
+                                  (dst.stat().st_size == src.stat().st_size and _sha256(dst) == _sha256(src))):
+                continue
+            tmp = dst.with_name(dst.name + ".tmp")
+            tmp.unlink(missing_ok=True)
+            try:
+                os.link(src, tmp)
+            except OSError:
+                shutil.copyfile(src, tmp)
+            os.replace(tmp, dst)
         except OSError:
             continue
-    return None
+    return fork_tuned_mtp_complete(out)
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 24), b""):
+            h.update(block)
+    return h.hexdigest()
 
 
 def fork_mtp_args(args: list[str], user_args: list[Any], data_dir: str | Path | None) -> list[str]:

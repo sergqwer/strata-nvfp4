@@ -67,6 +67,30 @@ def drafter(root: Path = ROOT, check_only: bool = False) -> int:
     return 0
 
 
+def tuned_mtp(root: Path = ROOT, check_only: bool = False) -> int:
+    """strata-nvfp4 0.2.15-nvfp4.4: Basalt's self-distilled draft layer into models/qwen-nvfp4-gptq/mtp/rt-tuned (pinned, checked:
+    strata_control/drafting_fetch.py ensure_fork_tuned_mtp), which Auto's MTP drafts with on CUDA.  A failure is a message: the model's
+    own layer drafts until a later run gets it.  -> 1 only for --check with the layer missing."""
+    sys.path.insert(0, str(root))
+    from strata_control import drafting
+    mtp = root / MODEL_DIR / "mtp"
+    if drafting.fork_tuned_mtp_complete(mtp / drafting.FORK_MTP_TUNED) and drafting.sync_fork_tuned_mtp(mtp):
+        print("Tuned draft layer: here")
+        return 0
+    if check_only:
+        print(f"  missing: the tuned draft layer ({MODEL_DIR}/mtp/{drafting.FORK_MTP_TUNED}, {drafting.FORK_MTP_TUNED_GB:g} GB to download)")
+        return 1
+    from strata_control import drafting_fetch
+    print(f"Tuned draft layer: Basalt's self-distilled layer from {drafting.FORK_MTP_TUNED_REPO} ({drafting.FORK_MTP_TUNED_GB:g} GB)", flush=True)
+    try:
+        out = drafting_fetch.ensure_fork_tuned_mtp(mtp)
+    except Exception as exc:  # noqa: BLE001 - the model's own layer drafts until a later run gets it
+        print(f"The tuned draft layer could not be prepared ({exc}). The model drafts with its own layer; run prepare-model.cmd again to retry.")
+        return 0
+    print(f"Tuned draft layer: ready in {out}")
+    return 0
+
+
 def sha256_file(p: Path) -> str:
     h = hashlib.sha256()
     with open(p, "rb") as f:
@@ -184,6 +208,7 @@ def main(argv=None) -> int:
     rc = prepare(check_only=a.check)
     if rc == 0 or a.check:                          # the model's files first: the drafter is for a model that is here
         rc = max(rc, drafter(check_only=a.check))
+        rc = max(rc, tuned_mtp(check_only=a.check))
     return rc
 
 

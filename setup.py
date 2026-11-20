@@ -7734,6 +7734,7 @@ def update_install(have: list, a) -> int:
         cfg = upgrade_config(cfg_path, json.loads(cfg_path.read_text(encoding="utf-8-sig")))
         if not own_path_config(cfg):
             refresh_shared_draft_vocab(cfg, mtp_done)
+            fork_tuned_update(cfg, mtp_done)            # strata-nvfp4: the GPTQ set's tuned draft layer (0.2.15-nvfp4.4)
         if cfg.get("backend") == "hip" and WIN:
             hip_runtime_beside_exe(Path(cfg["exe"]).parent)   # #468 #461
         ok(f"{cfg.get('model_name', cfg_path.stem)}: up to date")
@@ -7822,6 +7823,7 @@ def _start(cfg_path: Path, port: int | None, gpu: int | list | None = None, open
         refresh_draft_vocab(Path(cfg["args"][cfg["args"].index("--mtp") + 1]), cfg.get("draft_vocab", "cjk"))
         from strata_control import drafting
         refresh_dflash2_vocab(drafting.data_dir_of(cfg["args"]), cfg.get("draft_vocab", "cjk"))
+        drafting.sync_fork_tuned_mtp(Path(cfg["args"][cfg["args"].index("--mtp") + 1]))   # its vocabulary follows the set's (no download)
     cmd = [sys.executable, str(ROOT / "serve" / "server.py"), "--engine", "strata", "--config", str(cfg_path),
            "--port", str(port or cfg.get("port", 8080))]
     if cfg.get("backend") == "hip":                    # AMD, numbered as HIP numbers them (setup's KFD order)
@@ -9112,6 +9114,33 @@ def nvfp4_fetch_dflash2(data: Path, exe: Path) -> None:
     ok(f"DFlash2 drafter: {pack} (Auto drafts with it on this card; the MTP stays as its fallback)")
 
 
+def nvfp4_fetch_tuned_mtp(mtp: Path) -> None:
+    """strata-nvfp4 0.2.15-nvfp4.4: Basalt's self-distilled draft layer into <mtp>/rt-tuned for this fork's GPTQ set
+    (strata_control/drafting_fetch.py ensure_fork_tuned_mtp: pinned, checked; experts and vocabulary linked from <mtp>).  Auto's MTP
+    drafts with it on CUDA.  A failure is a warning: the model drafts with its own layer until setup or update runs again."""
+    from strata_control import drafting, drafting_fetch
+    try:
+        out = drafting_fetch.ensure_fork_tuned_mtp(mtp)
+    except Exception as exc:  # noqa: BLE001 - any failure: the set's own layer drafts, and the person is told
+        warn(f"the tuned draft layer is not here ({exc}): the model drafts with its own layer until setup or update runs again")
+        return
+    ok(f"tuned draft layer: {out} (Basalt's self-distilled layer, {drafting.FORK_MTP_TUNED_REPO})")
+
+
+def fork_tuned_update(cfg: dict, done: set) -> None:
+    """update_install: this fork's GPTQ set gets (or keeps) the tuned draft layer beside its MTP folder, once per folder."""
+    from strata_control import drafting
+    args = [str(x) for x in cfg.get("args") or []]
+    if "--mtp" not in args[:-1] or not drafting.fork_tuned_wanted(cfg.get("model_name")):
+        return
+    mtp = Path(args[args.index("--mtp") + 1])
+    key = ("rt-tuned", os.path.normcase(os.path.abspath(mtp)))
+    if key in done or not (mtp / "experts.bin").is_file():
+        return
+    done.add(key)
+    nvfp4_fetch_tuned_mtp(mtp)
+
+
 def nvfp4_engine_plan(a) -> str:
     """--dry-run: where the engine would come from."""
     eng = engine_dir(13)
@@ -9328,6 +9357,9 @@ def nvfp4_install(a, family: str, gpu: dict, multi: list, cuda_tk: int, ram: flo
     df2 = nvfp4_dflash2(f"{fam['name']}-{nvfp4_size(family).lower()}", nvfp4_args(paths, ctx, kv, vision, scaling, rope_scale, extra), gpu)
     if df2 and not drafting.pack_ready(paths["pack"].parent):
         need += drafting.DOWNLOAD_GB                   # the source file is fetched, packed and removed (about 0.9 GB stays)
+    tuned_mtp = drafting.fork_tuned_wanted(f"{fam['name']}-{nvfp4_size(family).lower()}")
+    if tuned_mtp and not drafting.fork_tuned_mtp_complete(paths["mtp"] / drafting.FORK_MTP_TUNED):
+        need += drafting.FORK_MTP_TUNED_GB
     if a.dry_run:
         say()
         say("Plan (--dry-run: nothing is downloaded, installed or written):")
@@ -9350,6 +9382,10 @@ def nvfp4_install(a, family: str, gpu: dict, multi: list, cuda_tk: int, ram: flo
         if df2:
             say(f"  drafter  DFlash2 ({drafting.REPO}, {drafting.DOWNLOAD_GB:g} GB once): Auto drafts with it on this card, the MTP stays as "
                 "its fallback" + (" (already here)" if drafting.pack_ready(paths["pack"].parent) else ""))
+        if tuned_mtp:
+            say(f"  tuned    Basalt's self-distilled draft layer ({drafting.FORK_MTP_TUNED_REPO}, {drafting.FORK_MTP_TUNED_GB:g} GB): "
+                f"{paths['mtp'] / drafting.FORK_MTP_TUNED}" +
+                (" (already here)" if drafting.fork_tuned_mtp_complete(paths["mtp"] / drafting.FORK_MTP_TUNED) else ""))
         say(f"  config   {cfg_path.name}, start script run-{tag.lower()}.{'bat' if WIN else 'sh'}; the engine's arguments:")
         line = []
         for x in nvfp4_args(paths, ctx, kv, vision, scaling, rope_scale, extra):
@@ -9398,6 +9434,8 @@ def nvfp4_install(a, family: str, gpu: dict, multi: list, cuda_tk: int, ram: flo
     draft_vocab = a.draft_vocab or saved_draft_vocab(cfg_path)
     refresh_draft_vocab(paths["mtp"], draft_vocab or "cjk")
     ok(f"MTP draft layer: {paths['mtp']} (the fine-tune's own draft head)")
+    if tuned_mtp:
+        nvfp4_fetch_tuned_mtp(paths["mtp"])
     if df2:
         nvfp4_fetch_dflash2(paths["pack"].parent, eng / EXE)
 

@@ -49,7 +49,9 @@ Source, measurements and how it works: https://github.com/sergqwer/strata-nvfp4
    at the revision `model-files.json` pins (the same files setup.py installs: the expert pack, the dense GGUF, the
    FP8 n-gram table, the BF16 embedding, the MTP draft head) and the image encoder, 129.7 GB into `models\`. Every
    file is checked against its SHA-256; nothing is converted. If it stops, run it again and it resumes;
-   `prepare-model.cmd --check` only says what is there.
+   `prepare-model.cmd --check` only says what is there. It also fetches Basalt's self-distilled draft layer
+   (0.12 GB, `models\qwen-nvfp4-gptq\mtp\rt-tuned`, Qwen Community License 1.0), which the MTP drafts with on
+   NVIDIA cards; after `update.cmd` from an older release, run `prepare-model.cmd` once to get it.
 2. **`start-server.cmd`** — loads the model and serves it on **http://127.0.0.1:8080**:
    - a chat page at `http://127.0.0.1:8080/`
    - OpenAI API at `/v1/chat/completions`, Anthropic API at `/v1/messages` (Claude Code can point at it)

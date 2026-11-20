@@ -62,7 +62,7 @@ class ForkGptq(unittest.TestCase):
         self.env = mock.patch.dict("os.environ", {"STRATA_AUTO_NEW_MTP": ""})
         self.env.start()
         # owner 2026-11-19: Auto on CUDA is the MTP with Basalt's drafting (two-stage head, --mtp-cum auto, --spec 8) for every set, every card
-        with mock.patch.object(drafting, "FORK_MTP_DEV_TUNED", str(Path(self.tmp.name) / "none")):
+        with mock.patch.dict("os.environ", {"STRATA_MTP_TUNED_DIR": ""}):
             for name in NAMES + OTHERS:
                 for vram in (32607, 16303):
                     decision, args = self.start(name, vram)
@@ -76,8 +76,8 @@ class ForkGptq(unittest.TestCase):
                     self.assertEqual(args.count("--spec"), 1)
             tuned = self.data / "mtp" / drafting.FORK_MTP_TUNED
             tuned.mkdir()
-            (tuned / "experts.bin").write_bytes(b"x")
-            (tuned / "dense.bin").write_bytes(b"x")
+            for name in ("experts.bin", "dense.bin", "dense.txt", "draft_vocab.bin"):
+                (tuned / name).write_bytes(b"x")
             decision, args = self.start(NAMES[0], 32607)
             self.assertEqual(args[args.index("--mtp") + 1], str(tuned))                         # the tuned layer where it is here
         self.assertEqual(self.start(NAMES[1], 32607, drafting_choice="dflash2")[0].drafter, "dflash2")    # a named DFlash2 still wins

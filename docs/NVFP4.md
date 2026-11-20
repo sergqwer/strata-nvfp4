@@ -442,8 +442,12 @@ run of each in the same hour: a JSON answer (long draft windows), a chat, Englis
 - Auto now drafts with the MTP layer and Basalt's drafting on CUDA with one request at a time: its two-stage draft
   head (`--mtp-head proxy`), its cumulative window rule with a threshold set from how many MB per expert the CPU
   serves (`--mtp-cum auto`, 0.399:0.285 on this PC) and a window of 8. `STRATA_AUTO_NEW_MTP=0` keeps the old Auto.
-- **These runs used Basalt's self-distilled draft layer, which this fork does not ship yet** (its licence is not
-  checked). Without it Auto uses the set's own MTP layer, which accepts fewer drafts.
+- **These runs used Basalt's self-distilled draft layer.** 0.2.15-nvfp4.4 ships it for the GPTQ set (Qwen Community
+  License 1.0, Basalt's model card): `mtp/rt-tuned/dense.bin` in this fork's GPTQ repository, pinned and checked by
+  `strata_control/drafting_fetch.py` (`ensure_fork_tuned_mtp`); setup, update and `prepare-model.cmd` put it beside the
+  set's own layer (`<model>/mtp/rt-tuned`, the experts and draft vocabulary linked from `mtp/`). Without it Auto uses
+  the set's own MTP layer, which accepts fewer drafts. The NVIDIA, mix and Q8_0 sets keep their own layer (not
+  measured with it).
 - The last three switches in the table below came after these runs: prose 259 -> 271 tokens/s in two rounds (Basalt
   276 in the same hour), Ukrainian and chat windows 1-2% shorter, JSON the same.
 

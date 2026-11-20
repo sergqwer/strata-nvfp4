@@ -71,7 +71,8 @@ files by hand.
   ([Credits](#credits)) plus kernels of our own, on by default on RTX 50 cards only. RTX 5090, tokens/s against
   0.2.15-nvfp4.3: a JSON answer 487 vs 330 (+48%), a chat 269 vs 219 (+23%), English prose 261 vs 205 (+27%),
   Ukrainian 241 vs 154 (+56%); Basalt in the same hour 475 / 248 / 276 / 235. These decode runs used Basalt's
-  self-distilled draft layer, which is not shipped yet; without it the drafts are accepted less often. A 64K prompt
+  self-distilled draft layer, which now ships for the GPTQ set: setup, `UPDATE.bat` and `prepare-model.cmd` fetch it
+  (0.12 GB, checked) into the model's `mtp\rt-tuned`; without it the drafts are accepted less often. A 64K prompt
   reads in 6.2 s instead of 7.8 s, 128K in 12.5 s instead of 14.5 s. Accuracy: KL 0.015 against the base engine,
   whose own runs differ by 0.012. `STRATA_NVFP4_SM120=0` turns all of it off
   ([measurements](docs/NVFP4.md#rtx-50-decode-and-prompt-kernels-after-basalt-2026-11-20-release-0215-nvfp44)).
@@ -706,7 +707,9 @@ checks.
 
 - [Basalt](https://github.com/jesdga95/basalt) by Jesús Gulfo (MIT), a Strata fork for RTX 50 cards: this fork's RTX 50
   decode kernels (the int8 tensor-core dense GEMV, the 8-bit hyper-connection read, staged INT8 attention, the
-  persistent DeltaNet layer, the attention layer's placement) and its MTP drafting are ported from it.
+  persistent DeltaNet layer, the attention layer's placement) and its MTP drafting are ported from it. Its
+  self-distilled MTP draft layer (Qwen Community License 1.0, like the model) ships for the GPTQ set as
+  `mtp/rt-tuned` in [our model repository](https://huggingface.co/Maximilian228/Qwen3.8-Flash-Next-NVFP4-GPTQ-Strata).
 - [Geode](https://play.google.com/store/apps/details?id=xyz.tifu.geode) ([source](https://github.com/sergqwer/geode)),
   this fork's author's engine that runs big models on Android phones; several of this fork's ideas came from it.
 
