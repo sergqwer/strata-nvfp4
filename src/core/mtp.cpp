@@ -31,6 +31,10 @@
 #include "strata/kernels/sampler.hpp"
 #include "strata/kernels/shared_expert.hpp"
 #include "strata/kernels/verify_kernels.hpp"
+#include "strata/kernels/draft_proxy.hpp"
+#include "strata/kernels/pdl.hpp"
+#include "strata/kernels/mtp_cond.hpp"
+#include "strata/kernels/mtp_route.hpp"
 #include "strata/kernels/ngram.hpp"
 #include "strata/kernels/gfx_arch.hpp"
 
@@ -91,6 +95,7 @@ bool mtp_draft(int T, const int32_t* tokens, int64_t p, int a, int max_steps, in
 namespace strata::core {
 namespace {
 
+int& mtp_node_prio();   // STRATA_MTP_HIGH_PRIO (below)
 constexpr float EPS = 1e-6f;
 
 // #783 PR-i: STRATA_MTP_CATCHUP_ALL=1 catches the drafter's K/V up for the whole verified window, rejected rows included
@@ -176,6 +181,7 @@ MtpDrafter::~MtpDrafter() {
     for (auto& e : step_exec_) if (e) cudaGraphExecDestroy(e);
     for (auto& e : round_exec_c_) if (e) cudaGraphExecDestroy(e);
     for (auto& e : step_exec_c_) if (e) cudaGraphExecDestroy(e);
+    for (auto& e : cond_exec_) if (e) cudaGraphExecDestroy(e);
     if (cparams_) cudaFree(cparams_);
     if (cring_) cudaFree(cring_);
     if (dinv_) cudaFree(dinv_);
@@ -187,12 +193,18 @@ MtpDrafter::~MtpDrafter() {
     if (side_) cudaStreamDestroy(side_);
     if (sh_fork_) cudaEventDestroy(sh_fork_);
     if (sh_join_) cudaEventDestroy(sh_join_);
+    if (q0_join_) cudaEventDestroy(q0_join_);
+    if (ov_fork_) cudaEventDestroy(ov_fork_);
+    if (ov_join_) cudaEventDestroy(ov_join_);
+    if (pre_join_) cudaEventDestroy(pre_join_);
     if (owns_weights_ && dense_) {
         for (const auto& t : tensors_)   // the STRATA_MTP_Q8_SM60 registrations first (a no-op for the rest)
             if (t.kind == "q8_0") strata::kernels::native_q8_0_sm60_release(dense_ + t.off);
         cudaFree(dense_);
     }
     if (owns_weights_ && experts_) cudaFree(experts_);
+    if (owns_weights_)
+        for (auto& r : hc8_) for (const void*& q : r) { if (q) cudaFree(const_cast<void*>(q)); q = nullptr; }
     if (experts_host_) cudaFreeHost(experts_host_);   // the prompt room's host snapshot (the device copy never left)
     if (state_arena_) cudaFree(state_arena_);
     if (arena_) cudaFree(arena_);
@@ -203,6 +215,9 @@ MtpDrafter::~MtpDrafter() {
         cudaFree(dhead_);
     }
     if (owns_draft_head_ && dvocab_) cudaFree(dvocab_);
+    if (proxy_) cudaFree(proxy_);
+    if (proxy_scratch_) cudaFree(proxy_scratch_);
+    if (h_xids_) cudaFreeHost(h_xids_);
     if (ev_chain_) cudaEventDestroy(ev_chain_);
     for (cudaEvent_t e : ev_step_) if (e) cudaEventDestroy(e);
     void* hosts[] = {h_tok_, h_step_, h_pos_, h_row_, h_out_, h_prob_, h_force_, h_floor_};
@@ -259,6 +274,61 @@ bool MtpDrafter::make_q4_dense(const std::vector<uint8_t>& blob, std::string& er
     (void) blob;
     err = "mtp: --mtp-q4 needs a build with native experts (ggml)";
     return false;
+#endif
+}
+
+// STRATA_MTP_HC8=1: the draft layer's three hyper-connection reads on 8-bit copies of their down / up matrices (Q8_0 with
+// ggml's reference rounding, repacked in place for hc8_read.cuh: the main model's STRATA_HC_Q8 read on sm_120).  Basalt's
+// drafter reads its hyper-connections the same way (8-bit copies).  The drafts change in near ties (the target verifies
+// every one: the output does not); the bf16 rows stay for the paths hc8 does not take.  Unset, it follows the main model's
+// STRATA_HC_Q8 (on in the sm_120 table): serve A/B 2026-11-20, draft ms/window struct 1.24 -> 1.14, conv 0.70 -> 0.65,
+// prose 0.67 -> 0.66, uk 0.50 -> 0.46, acceptance unchanged (NOTES-draft.md, round 2); STRATA_MTP_HC8=0 turns it off.
+static bool mtp_hc8_env() {
+#if defined(STRATA_USE_HIP) || defined(STRATA_GPU_METAL)
+    return false;
+#else
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_MTP_HC8");
+        if (v != nullptr) return std::atoi(v) != 0;
+        const char* m = std::getenv("STRATA_HC_Q8");
+        return m != nullptr && std::atoi(m) != 0;
+    }();
+    return on;
+#endif
+}
+bool MtpDrafter::make_hc8(std::string& err) {
+#if defined(STRATA_USE_HIP) || defined(STRATA_GPU_METAL)
+    (void) err;
+    return true;
+#else
+    if (!mtp_hc8_env() || !strata::kernels::fused_gr_hc8_on() ||
+        !strata::kernels::fused_gr_supported(g_->n_embd, g_->hc, g_->hc_lr))
+        return true;
+    static const char* const pre[3] = {"attn_hyper_connection.", "mlp_hyper_connection.", "hyper_connection_mixer."};
+    static const char* const suf[2] = {"input_mix_weight_down.weight", "input_mix_weight_up.weight"};
+    uint64_t bytes = 0;
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 2; ++j) {
+            const std::string name = std::string(pre[i]) + suf[j];
+            const Tensor* tt = nullptr;
+            for (const auto& t : tensors_) if (t.name == name && t.kind == "bf16") tt = &t;
+            if (tt == nullptr || (tt->rows * tt->cols) % 32 != 0) { err = "mtp (STRATA_MTP_HC8): " + name + " is not a bf16 matrix"; return false; }
+            const int64_t nb = tt->rows * tt->cols / 32;
+            void* q = nullptr;
+            if (cudaMalloc(&q, (size_t) nb * 34) != cudaSuccess) { err = "mtp (STRATA_MTP_HC8): the 8-bit copies do not fit"; return false; }
+            strata::kernels::fused_gr_quantize_q8_0((const uint16_t*) (dense_ + tt->off), (uint8_t*) q, nb, nullptr);
+            if (cudaDeviceSynchronize() != cudaSuccess || !strata::kernels::fused_gr_hc8_repack(q, nb)) {
+                cudaFree(q);
+                err = "mtp (STRATA_MTP_HC8): the hc8 copy of " + name + " failed";
+                return false;
+            }
+            hc8_[i][j] = q;
+            bytes += (uint64_t) nb * 34;
+        }
+    vram_ += bytes;
+    std::fprintf(stderr, "strata mtp: STRATA_MTP_HC8=1: the draft layer's hyper-connection reads on 8-bit copies (%.1f MiB)\n",
+                 (double) bytes / 1048576.0);
+    return true;
 #endif
 }
 
@@ -377,6 +447,11 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
                               "self_attn.v_proj.weight", "self_attn.o_proj.weight", "mlp.shared_expert.gate_proj.weight",
                               "mlp.shared_expert.up_proj.weight", "mlp.shared_expert.down_proj.weight"};
     for (const char* n : required) if (!q8(n)) { err = std::string("mtp: ") + n + " is missing (q8_0)"; return false; }
+    if (shared != nullptr) {
+        for (int i = 0; i < 3; ++i) for (int j = 0; j < 2; ++j) hc8_[i][j] = shared->hc8_[i][j];
+    } else if (!make_hc8(err)) {
+        return false;
+    }
     // STRATA_MTP_Q8_SM60=1: the projections on the Pascal GEMV (--batch's shared drafters read the same pointers), as
     // packed copies like the main model's: the prompt path's draft_kv reads four of them in the GGUF layout (MMQ);
     // --mtp-q4 reads its Q4_0 copies instead
@@ -448,7 +523,7 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
     if (!ok) { err = "mtp: mapped staging failed"; return false; }
     if (h_force_ != nullptr) for (int j = 0; j < 16; ++j) h_force_[j] = -1;
     auto carve = [&](Bump& b) {
-        tok_ = b.take<int32_t>(T); step_ = b.take<int32_t>(R2 * 4); pos_ = b.take<int32_t>(R2 * NH); row_ = b.take<int32_t>(4);
+        tok_ = b.take<int32_t>(T); step_ = b.take<int32_t>(R2 * 4); pos_ = b.take<int32_t>(R2 * NH); row_ = b.take<int32_t>(8);
         ident_ = b.take<int32_t>(T * (uint64_t) cap_);
         Rin_ = b.take<float>(T * HC * N); R_ = b.take<float>(T * HC * N);
         emb_ = b.take<float>(T * N); en_ = b.take<float>(T * N); e2_ = b.take<float>(T * N);
@@ -457,6 +532,7 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
         lo_ = b.take<float>(T * (uint64_t) g.hc_lr); rs_ = b.take<float>(T * HC); bo_ = b.take<float>(T * N);
         xn_ = b.take<float>(T * HC * N);
         xq_ = b.take<uint8_t>(strata::kernels::native_q8_1_bytes((int) (NH * HD), 8));
+        xq2_ = b.take<uint8_t>(strata::kernels::native_q8_1_bytes((int) N, (int) std::max<uint64_t>(T, HC)));
         qfull_ = b.take<float>(T * NH * 2 * HD); qcur_ = b.take<float>(T * NH * HD);
         kcur_ = b.take<float>(T * NKV * HD); vcur_ = b.take<float>(T * NKV * HD);
         attn_ = b.take<float>(T * NH * HD); attn32_ = b.take<float>(T * NH * HD);
@@ -478,6 +554,7 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
         x_bf16_ = b.take<uint16_t>(N);
         out_ids_ = b.take<int32_t>(T + 4);
         probs_ = b.take<float>(T + 4);
+        cond_hist_ = b.take<float>(16);
         arg_scratch_ = b.take<uint8_t>(strata::kernels::argmax_rows_scratch_bytes((int) T));
         top_scratch_ = b.take<uint8_t>(strata::kernels::row_top_prob_scratch_bytes((int) T));
         dummy_inj_ = b.take<float>(HC);
@@ -502,8 +579,12 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
 #if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)   // (HIP, Metal: the default priority)
     static const bool hi_prio = [] { const char* v = std::getenv("STRATA_MTP_PRIORITY"); return v == nullptr || std::atoi(v) != 0; }();
     int prio_lo = 0, prio_hi = 0;
-    if (force_on_ && hi_prio && cudaDeviceGetStreamPriorityRange(&prio_lo, &prio_hi) == cudaSuccess)
+    // STRATA_MTP_HIGH_PRIO=1 (CUDA): the draft streams at the highest priority in every mode, as STRATA_MTP_HIP_PRIO on HIP -
+    // the round no longer waits behind the commit graph the verifier launched just before it (its 6912-block GDN commit)
+    static const bool cuda_hi = [] { const char* v = std::getenv("STRATA_MTP_HIGH_PRIO"); return v != nullptr && std::atoi(v) != 0; }();
+    if ((force_on_ && hi_prio || cuda_hi) && cudaDeviceGetStreamPriorityRange(&prio_lo, &prio_hi) == cudaSuccess)
         prio = cudaStreamCreateWithPriority(&cs_, cudaStreamNonBlocking, prio_hi) == cudaSuccess;
+    if (prio && cuda_hi) mtp_node_prio() = prio_hi;   // (the captured graphs' kernel nodes too: finish_capture)
     cudaGetLastError();
 #endif
 #if defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906)
@@ -527,10 +608,20 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
     }
 #endif
     if (!prio && cudaStreamCreateWithFlags(&cs_, cudaStreamNonBlocking) != cudaSuccess) { err = "mtp: stream"; return false; }
+#if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)
+    const int side_prio = prio ? prio_hi : 0;   // (the draft graphs' side branches at the draft stream's priority)
+#else
+    const int side_prio = 0;
+#endif
 #if !defined(STRATA_USE_HIP)
-    if (cudaStreamCreateWithFlags(&side_, cudaStreamNonBlocking) != cudaSuccess ||
+    if ((side_prio != 0 ? cudaStreamCreateWithPriority(&side_, cudaStreamNonBlocking, side_prio)
+                        : cudaStreamCreateWithFlags(&side_, cudaStreamNonBlocking)) != cudaSuccess ||
         cudaEventCreateWithFlags(&sh_fork_, cudaEventDisableTiming) != cudaSuccess ||
-        cudaEventCreateWithFlags(&sh_join_, cudaEventDisableTiming) != cudaSuccess) {
+        cudaEventCreateWithFlags(&sh_join_, cudaEventDisableTiming) != cudaSuccess ||
+        cudaEventCreateWithFlags(&q0_join_, cudaEventDisableTiming) != cudaSuccess ||
+        cudaEventCreateWithFlags(&ov_fork_, cudaEventDisableTiming) != cudaSuccess ||
+        cudaEventCreateWithFlags(&ov_join_, cudaEventDisableTiming) != cudaSuccess ||
+        cudaEventCreateWithFlags(&pre_join_, cudaEventDisableTiming) != cudaSuccess) {
         err = "mtp: streams";
         return false;
     }
@@ -651,7 +742,15 @@ bool MtpDrafter::experts_reclaim(std::string& err) {
 
 uint64_t MtpDrafter::bind_bytes(uint64_t head_row_bytes, int64_t n_vocab) const {
     uint64_t bytes = head_logits_ ? 0 : (uint64_t) max_t_ * (uint64_t) n_vocab * sizeof(float);
-    if (dhead_ == nullptr && owns_draft_head_ && !full_head_env()) {
+    if (proxy_req_ && dhead_ == nullptr && owns_draft_head_ && !full_head_env()) {   // the 2-bit copy, its scratch and the map
+        if (FILE* f = std::fopen(vocab_file().c_str(), "rb")) {
+            std::fseek(f, 0, SEEK_END);
+            const long size = std::ftell(f);
+            std::fclose(f);
+            const int64_t n = size / 4 + 512;
+            bytes += strata::kernels::draft_proxy_bytes(n) + strata::kernels::draft_proxy_scratch_bytes(n) + (uint64_t) n * 4;
+        }
+    } else if (dhead_ == nullptr && owns_draft_head_ && !full_head_env()) {
         if (FILE* f = std::fopen(vocab_file().c_str(), "rb")) {
             std::fseek(f, 0, SEEK_END);
             const long size = std::ftell(f);
@@ -815,8 +914,11 @@ bool MtpDrafter::bind(const WeightTable& wt, const NativeHead* head, const float
         n_dvocab_ = shared->n_dvocab_;
         owns_draft_head_ = false;
     }
+    // --mtp-head proxy: the two-stage scan over the main head's rows (no gathered copy)
+    if (proxy_req_ && dhead_ == nullptr && shared == nullptr && !full_head_env() && !proxy_on_ && !bind_proxy(head, err))
+        return false;
     // the draft head's token subset, when tools/draft_vocab.py wrote one
-    if (dhead_ == nullptr && shared == nullptr && !full_head_env()) {
+    if (dhead_ == nullptr && shared == nullptr && !full_head_env() && !proxy_on_) {
         std::vector<uint8_t> raw;
         if (read_file(vocab_file(), raw) && raw.size() >= 4 && raw.size() % 4 == 0) {
             n_dvocab_ = (int64_t) (raw.size() / 4);
@@ -843,8 +945,7 @@ bool MtpDrafter::bind(const WeightTable& wt, const NativeHead* head, const float
                            cudaMalloc((void**) &dv, raw.size()) == cudaSuccess &&
                            cudaMemcpy(dv, raw.data(), raw.size(), cudaMemcpyHostToDevice) == cudaSuccess;
                     if (ok_x) {
-                        strata::kernels::gather_rows((const uint8_t*) head->weights(), row_bytes, dv, n_dvocab_,
-                                                     (uint8_t*) tmp, nullptr);
+                        head->gather(dv, n_dvocab_, tmp, nullptr);   // (the GGUF's layout whatever the head holds)
                         ok_x = cudaDeviceSynchronize() == cudaSuccess;
                     }
                 }
@@ -856,7 +957,7 @@ bool MtpDrafter::bind(const WeightTable& wt, const NativeHead* head, const float
                 }
                 if (!ok_x) { err = "mtp: the draft head's rows could not be copied from the head's card"; return false; }
             } else {
-                strata::kernels::gather_rows((const uint8_t*) head->weights(), row_bytes, dvocab_, n_dvocab_, dhead_, nullptr);
+                head->gather(dvocab_, n_dvocab_, dhead_, nullptr);   // (the GGUF's layout whatever the head holds)
             }
             cudaDeviceSynchronize();
             vram_ += (uint64_t) (n_dvocab_ * row_bytes) + raw.size();
@@ -883,6 +984,141 @@ bool MtpDrafter::bind(const WeightTable& wt, const NativeHead* head, const float
     }
     if (coupled_draft_env() && cparams_ == nullptr && !setup_coupled(err)) return false;
     return true;
+}
+
+// ---- --mtp-head proxy (Basalt's draft head: src/models/qwen4exp/decode/mtp/head.cpp and context.cpp, MIT)
+namespace {
+constexpr int64_t kXcap = 512;         // context rows after the base rows
+constexpr int64_t kXcapPrompt = 384;   // of them, the rows a prompt's tokens may take
+constexpr int kTier2Rounds = 32;       // rounds on the whole subset after a token only the added rows hold
+}  // namespace
+
+bool MtpDrafter::bind_proxy(const NativeHead* head, std::string& err) {
+    const int64_t row_bytes = (int64_t) head->row_bytes();
+    if (head->type() != GGML_Q8_0 || g_->n_embd != 2560 || row_bytes != 2720 || (head->device() >= 0 && head->device() != device_) ||
+        q4_head_ || coupled_draft_env()) {
+        std::fprintf(stderr, "strata mtp: --mtp-head proxy needs a Q8_0 head of 2560 columns on the drafter's card (and no "
+                             "--mtp-q4 head or STRATA_SPEC_COUPLED); the plain draft head runs\n");
+        return true;
+    }
+    std::vector<uint8_t> raw;
+    if (!read_file(vocab_file(), raw) || raw.size() < 4 || raw.size() % 4 != 0) {
+        std::fprintf(stderr, "strata mtp: --mtp-head proxy: no draft vocabulary (%s); the plain draft head runs\n",
+                     vocab_file().c_str());
+        return true;
+    }
+    const int64_t n_raw = (int64_t) (raw.size() / 4);
+    const int32_t* ids = (const int32_t*) raw.data();
+    for (int64_t i = 0; i < n_raw; ++i)
+        if (ids[i] < 0 || ids[i] >= n_vocab_) { err = "mtp: the draft vocabulary holds a token id outside the vocabulary"; return false; }
+    int64_t n_base = n_raw;   // the base rows: the leading ids up to the first descent (added ids follow in id order)
+    for (int64_t i = 1; i < n_raw; ++i)
+        if (ids[i] < ids[i - 1]) { n_base = i; break; }
+    n_xcap_ = kXcap;
+    xbase_ = n_base;
+    n_dvocab_ = n_raw + n_xcap_;
+    n_tier1_ = n_base + n_xcap_;
+    std::vector<int32_t> map((size_t) n_dvocab_);
+    std::copy(ids, ids + n_base, map.begin());
+    std::fill(map.begin() + n_base, map.begin() + n_base + n_xcap_, -1);
+    std::copy(ids + n_base, ids + n_raw, map.begin() + n_base + n_xcap_);
+    const size_t pb = strata::kernels::draft_proxy_bytes(n_dvocab_), sb = strata::kernels::draft_proxy_scratch_bytes(n_dvocab_);
+    if (cudaMalloc((void**) &dvocab_, map.size() * 4) != cudaSuccess || cudaMalloc(&proxy_, pb) != cudaSuccess ||
+        cudaMalloc(&proxy_scratch_, sb) != cudaSuccess ||
+        cudaHostAlloc((void**) &h_xids_, (size_t) n_xcap_ * 4, cudaHostAllocDefault) != cudaSuccess) {
+        err = "mtp: the draft head's 2-bit copy does not fit";
+        return false;
+    }
+    cudaMemcpy(dvocab_, map.data(), map.size() * 4, cudaMemcpyHostToDevice);
+    cudaMemset(proxy_, 0, pb);
+    strata::kernels::draft_proxy_pack(head->weights(), head->planes(), dvocab_, 0, n_dvocab_, proxy_, n_dvocab_, nullptr);
+    if (cudaDeviceSynchronize() != cudaSuccess) {
+        err = std::string("mtp: packing the draft head's 2-bit copy: ") + cudaGetErrorString(cudaGetLastError());
+        return false;
+    }
+    vram_ += map.size() * 4 + pb + sb;
+    dvocab_host_ = map;
+    in_sub_.assign((size_t) n_vocab_, 0);
+    for (int64_t i = 0; i < n_raw; ++i) in_sub_[(size_t) ids[i]] = 1;
+    tier2_.clear();
+    if (n_base < n_raw) {
+        tier2_.assign((size_t) n_vocab_, 0);
+        for (int64_t i = n_base; i < n_raw; ++i) tier2_[(size_t) ids[i]] = 1;
+        for (int64_t i = 0; i < n_base; ++i) tier2_[(size_t) ids[i]] = 0;
+    }
+    h_row_[4] = (int32_t) n_tier1_;
+    proxy_on_ = true;
+    std::fprintf(stderr, "strata mtp: draft head over %lld tokens as a two-stage scan (a 2-bit copy, %.1f MiB, rows rescored "
+                         "from the main head): %lld base rows + %lld context rows, %lld added rows read for %d rounds after "
+                         "an added token\n",
+                 (long long) n_dvocab_, (double) pb / 1048576.0, (long long) n_base, (long long) n_xcap_,
+                 (long long) (n_raw - n_base), kTier2Rounds);
+    return true;
+}
+
+void MtpDrafter::ctx_note(int64_t t) {
+    if (n_xcap_ == 0 || t < 0 || t >= n_vocab_ || in_sub_[(size_t) t]) return;
+    if ((int64_t) xlist_.size() + (int64_t) xpend_.size() >= n_xcap_) return;
+    in_sub_[(size_t) t] = 1;
+    xpend_.push_back((int32_t) t);
+}
+
+void MtpDrafter::ctx_begin(const int64_t* prompt, int64_t n) {
+    if (!proxy_on_) return;
+    const OnDevice on_device(device_);
+    if (cs_) cudaStreamSynchronize(cs_);
+    for (int32_t t : xlist_) in_sub_[(size_t) t] = 0;
+    for (int32_t t : xpend_) in_sub_[(size_t) t] = 0;
+    if (n_xused_ > 0) cudaMemsetAsync(dvocab_ + xbase_, 0xff, (size_t) n_xused_ * 4, cs_);   // ids -1
+    xlist_.clear();
+    xpend_.clear();
+    n_xused_ = 0;
+    tier2_recent_ = 0;
+    // a prompt with more such tokens than its share of the rows keeps its latest ones (the reply likelier repeats them)
+    const int64_t cap = std::min(n_xcap_, kXcapPrompt);
+    int64_t from = 0, distinct = 0;
+    for (int64_t i = n - 1; i >= 0; --i) {
+        const int64_t t = prompt[i];
+        if (t < 0 || t >= n_vocab_ || in_sub_[(size_t) t] != 0) continue;
+        if (distinct == cap) { from = i + 1; break; }
+        in_sub_[(size_t) t] = 2;
+        ++distinct;
+    }
+    for (int64_t i = from; i < n; ++i)
+        if (prompt[i] >= 0 && prompt[i] < n_vocab_ && in_sub_[(size_t) prompt[i]] == 2) in_sub_[(size_t) prompt[i]] = 0;
+    for (int64_t i = from; i < n; ++i) ctx_note(prompt[i]);
+    // a prompt in the added rows' script starts the reply on the whole subset
+    if (!tier2_.empty())
+        for (int64_t i = std::max<int64_t>(0, n - 256); i < n; ++i)
+            if (prompt[i] >= 0 && prompt[i] < n_vocab_ && tier2_[(size_t) prompt[i]]) { tier2_recent_ = kTier2Rounds; break; }
+}
+
+// The queued tokens' ids into the next free context rows and their 2-bit rows, ahead of the draft graphs on the same stream.
+void MtpDrafter::ctx_flush(cudaStream_t cs) {
+    if (xpend_.empty()) return;
+    const int64_t n = (int64_t) xpend_.size();
+    const int64_t at = xbase_ + n_xused_;
+    cudaStreamSynchronize(cs);   // h_xids_ may still be read by the previous flush's copy
+    std::copy(xpend_.begin(), xpend_.end(), h_xids_);
+    cudaMemcpyAsync(dvocab_ + at, h_xids_, (size_t) n * 4, cudaMemcpyHostToDevice, cs);
+    strata::kernels::draft_proxy_pack(head_->weights(), head_->planes(), dvocab_, at, n, proxy_, n_dvocab_, cs);
+    for (int64_t i = 0; i < n; ++i) dvocab_host_[(size_t) (at + i)] = xpend_[(size_t) i];
+    xlist_.insert(xlist_.end(), xpend_.begin(), xpend_.end());
+    n_xused_ += n;
+    xpend_.clear();
+}
+
+void MtpDrafter::proxy_round(const int32_t* tokens, int T, int a) {
+    for (int t = 0; t <= a && t < T; ++t) ctx_note(tokens[t]);   // the window's committed picks may hold names the subset lacks
+    ctx_flush(cs_);
+    if (!tier2_.empty()) {   // every row for a while after a token only the added rows hold
+        for (int t = 0; t < T; ++t)
+            if (tokens[t] >= 0 && tokens[t] < (int32_t) tier2_.size() && tier2_[(size_t) tokens[t]]) tier2_recent_ = kTier2Rounds;
+        h_row_[4] = (int32_t) (tier2_recent_ > 0 ? n_dvocab_ : n_tier1_);
+        if (tier2_recent_ > 0) --tier2_recent_;
+    } else {
+        h_row_[4] = (int32_t) n_dvocab_;
+    }
 }
 
 // STRATA_MTP_PROFILE=1 (measurement only): GPU stamps between the draft layer's stages in the round graph and in every
@@ -1002,6 +1238,102 @@ void mtp_list_nodes(cudaGraph_t graph, const char* what) {
 #endif
 }
 
+// STRATA_MTP_OVERLAP=0 keeps the one-row passes on one stream (on by default on CUDA; HIP: off, its side stream may not exist)
+bool mtp_overlap_on() {
+#if defined(STRATA_USE_HIP)
+    return false;
+#else
+    static const bool on = [] { const char* v = std::getenv("STRATA_MTP_OVERLAP"); return v == nullptr || std::atoi(v) != 0; }();
+    return on;
+#endif
+}
+
+// the step graphs start from the hidden input the graph before them made (needs that every round and step graph makes it:
+// one-row rounds and steps under STRATA_MTP_OVERLAP, and no STRATA_FUSE_HEAD_GR); STRATA_MTP_PRE_NEXT=0 turns it off
+bool pre_next_on() {
+    static const bool on = [] {
+        const char* f = std::getenv("STRATA_FUSE_HEAD_GR");
+        if (f != nullptr && std::atoi(f) != 0) return false;
+        const char* v = std::getenv("STRATA_MTP_PRE_NEXT");
+        return v == nullptr || std::atoi(v) != 0;
+    }();
+    return on && mtp_overlap_on();
+}
+
+// The round graph copies every step row and position from the mapped staging (the host fills them all before the round:
+// draft and chain_launch), so a chain step starts with its first kernel; STRATA_MTP_STEP_COPY=1 keeps the copy per step
+bool mtp_steps_from_round() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_MTP_STEP_COPY"); return !(v != nullptr && std::atoi(v) != 0); }();
+    return on;
+}
+
+// The chain's select (the next row's residual and token, the draft to the host): over 16 blocks on CUDA
+// (mtp_select_wide, the same values); STRATA_MTP_SELECT_WIDE=0 or HIP keeps mtp_select's one block
+void mtp_select_d(const float* R_src, int64_t R_stride, const int32_t* ids, const int32_t* row_dev, float* R_dst, int32_t* tok_dst,
+                  int32_t* out, int j, cudaStream_t cs, const float* probs, float* out_p) {
+#if !defined(STRATA_USE_HIP)
+    static const bool wide = [] { const char* v = std::getenv("STRATA_MTP_SELECT_WIDE"); return v == nullptr || std::atoi(v) != 0; }();
+    if (wide && R_stride % 4 == 0 && ((uintptr_t) R_src | (uintptr_t) R_dst) % 16 == 0) {
+        strata::kernels::mtp_select_wide(R_src, R_stride, ids, row_dev, R_dst, tok_dst, out, j, cs, probs, out_p);
+        return;
+    }
+#endif
+    strata::kernels::mtp_select(R_src, R_stride, ids, row_dev, R_dst, tok_dst, out, j, cs, probs, out_p);
+}
+
+// STRATA_MTP_AHEAD=1[:P_PREV[:P_MIN]] (MtpDrafter::draft): launch chain step j + 1 before draft j is back when draft j - 1
+// had probability >= P_PREV (0.99) and the cum rule keeps draft j for any probability >= P_MIN (0.95)
+struct MtpAhead { bool on = false; float p_prev = 0.99f, p_min = 0.95f; mutable long long launched = 0, wasted = 0; };
+const MtpAhead& mtp_ahead() {
+    static const MtpAhead a = [] {
+        MtpAhead r;
+        const char* v = std::getenv("STRATA_MTP_AHEAD");
+        if (v == nullptr || std::atoi(v) == 0) return r;
+        r.on = true;
+        float pp = 0.0f, pm = 0.0f;
+        const int k = std::sscanf(v, "%*d:%f:%f", &pp, &pm);
+        if (k >= 1) r.p_prev = pp;
+        if (k >= 2) r.p_min = pm;
+        std::fprintf(stderr, "strata mtp: STRATA_MTP_AHEAD: step j+1 launched early when p(j-1) >= %.3f and the cum rule keeps j at p >= %.3f\n",
+                     r.p_prev, r.p_min);
+        return r;
+    }();
+    return a;
+}
+
+// STRATA_MTP_HIGH_PRIO: the priority finish_capture gives the draft graphs' kernel nodes (0: left as captured)
+int& mtp_node_prio() { static int p = 0; return p; }
+
+// STRATA_MTP_ROUTE_GROUP=0 keeps the router, the grouping and the q8_0 input as three launches on the routed path
+bool mtp_route_group_on() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_MTP_ROUTE_GROUP"); return v == nullptr || std::atoi(v) != 0; }();
+    return on;
+}
+
+// STRATA_MTP_COND=1: the --mtp-cum chain as one conditional graph (mtp_cond.hpp; the same kernels, so the same drafts)
+// instead of one graph launch per chain step.  Opt-in: on the RTX 5090 under WDDM it removed the ~21 us host gap between
+// steps (9 us left) but every kernel inside a conditional body started ~0.3 us later, +11 us a step, and the round ->
+// step 1 gap grew to 35-50 us: no gain (NOTES-draft.md, round 2)
+bool mtp_cond_on() {
+#if defined(STRATA_USE_HIP) || !defined(CUDART_VERSION) || CUDART_VERSION < 12040
+    return false;
+#else
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_MTP_COND");
+        return v != nullptr && std::atoi(v) != 0 && strata::kernels::mtp_cond_supported();
+    }();
+    return on;
+#endif
+}
+
+// A projection of the draft layer: one Q8_0 row through native_q8_0_mmvq_pf (the same bits as native_mmvq, its first
+// weights loaded before the PDL wait); anything else through native_mmvq.  STRATA_MTP_GEMV_PF=0 keeps native_mmvq.
+void mtp_gemv(int type, const void* w, const void* xq, float* y, int n_in, int n_out, int T, cudaStream_t cs) {
+    static const bool pf = [] { const char* v = std::getenv("STRATA_MTP_GEMV_PF"); return v == nullptr || std::atoi(v) != 0; }();
+    if (pf && T == 1 && type == GGML_Q8_0) strata::kernels::native_q8_0_mmvq_pf(w, xq, y, n_in, n_out, cs);
+    else strata::kernels::native_mmvq(type, w, xq, y, n_in, n_out, T, cs);
+}
+
 bool mtp_qfuse_hc_on() {
     static const int env = [] {
         // only STRATA_QFUSE_HC (not STRATA_QFUSE, which the gfx1151 table sets): the draft layer's q8_1 images from the hyper-connection
@@ -1047,7 +1379,10 @@ bool MtpDrafter::record_forward(int T, int step_row0, cudaStream_t cs, std::stri
     // step_row0 >= 0: the full layer on step rows [step_row0, +T); step_row0 < 0: K/V only on rows [-1 - step_row0, +T)
     const bool full = step_row0 >= 0;
     if (full && T != 1) { err = "mtp: the full layer runs one row at a time (its attention scratch is sized for one)"; return false; }
-    if (!record_front(T, full ? step_row0 : -1 - step_row0, cs, err)) return false;
+    full_pass_ = full;
+    const bool ok = record_front(T, full ? step_row0 : -1 - step_row0, cs, err);
+    full_pass_ = false;
+    if (!ok) return false;
     return !full || record_rest(step_row0, cs, err);
 }
 
@@ -1069,19 +1404,33 @@ bool MtpDrafter::record_front(int T, int row0, cudaStream_t cs, std::string& err
         const WeightRef* we = wt_->find("token_embd.weight");
         if (!we) { err = "mtp: token_embd.weight is missing"; return false; }
         g_mp.stamp(0, cs);
+        // STRATA_MTP_OVERLAP: a one-row pass runs the embedding branch on side_ beside the hidden one
+        const bool ovl = ovl_ && T == 1 && side_ != nullptr && ov_fork_ != nullptr;
+        cudaStream_t ce = cs;
+        uint8_t* xqe = xq_;
+        if (ovl) {
+            if (cudaEventRecord(ov_fork_, cs) != cudaSuccess || cudaStreamWaitEvent(side_, ov_fork_, 0) != cudaSuccess) {
+                err = "mtp: the embedding branch";
+                return false;
+            }
+            ce = side_;
+            xqe = xq2_;
+        }
         if (const NativeEmbed* ne = native_embed()) {   // plan v0.3 P6: the GGUF-form table
-            ne->gather_dev(tok_, T, emb_, cs);
+            ne->gather_dev(tok_, T, emb_, ce);
         } else {
             const auto* codes = (const uint8_t*) we->data;
             const auto* scales = (const float*) (codes + we->codes_bytes);
             const auto* offsets = we->has_offset ? (const float*) (codes + we->codes_bytes + we->scales_bytes) : nullptr;
             embedding_gather_dev(codes, scales, offsets, tok_, T, we->ne0, we->code_bits, we->code_bias, we->group_elems,
-                                 (uint64_t) (we->ne0 / (8 / we->code_bits)), (uint64_t) (we->ne0 / we->group_elems), emb_, cs);
+                                 (uint64_t) (we->ne0 / (8 / we->code_bits)), (uint64_t) (we->ne0 / we->group_elems), emb_, ce);
         }
-        native_qsa_rms_norm_weighted(emb_, f32("pre_fc_norm_embedding.weight"), en_, (int) N, T, EPS, cs);
-        native_quantize_q8_1(en_, xq_, (int) N, T, cs);
-        native_mmvq(wt_fc_embedding, wp_fc_embedding, xq_, e2_, (int) N, (int) N, T, cs);
+        native_qsa_rms_norm_weighted(emb_, f32("pre_fc_norm_embedding.weight"), en_, (int) N, T, EPS, ce);
+        native_quantize_q8_1(en_, xqe, (int) N, T, ce);
+        mtp_gemv(wt_fc_embedding, wp_fc_embedding, xqe, e2_, (int) N, (int) N, T, ce);
+        if (ovl && cudaEventRecord(ov_join_, side_) != cudaSuccess) { err = "mtp: the embedding branch"; return false; }
         g_mp.stamp(1, cs);
+        if (!(pre_ready_ && T == 1)) {   // (a step whose hidden input the previous graph made beside its head skips it)
         if (hnorm_stream_)   // --mtp-hnorm stream: one RMS per stream, each scaled by its slice of the weight
             native_qsa_rms_norm_grouped(Rin_, f32("pre_fc_norm_hidden.weight"), hn_, (int) N, (int) HC, (int) (T * HC), EPS, cs);
         else
@@ -1091,6 +1440,8 @@ bool MtpDrafter::record_front(int T, int row0, cudaStream_t cs, std::string& err
             native_quantize_q8_1(hn_ + (size_t) c0 * N, xq_, (int) N, nc, cs);
             native_mmvq(wt_fc_hidden, wp_fc_hidden, xq_, h2_ + (size_t) c0 * N, (int) N, (int) N, nc, cs);
         }
+        }
+        if (ovl && cudaStreamWaitEvent(cs, ov_join_, 0) != cudaSuccess) { err = "mtp: the embedding branch's join"; return false; }
         add_streams_broadcast(h2_, e2_, R_, N, (int) HC, T, cs);
         g_mp.stamp(2, cs);
         // ---- the attention hyper-connection
@@ -1103,6 +1454,7 @@ bool MtpDrafter::record_front(int T, int row0, cudaStream_t cs, std::string& err
                 fa[t].w_norm = f32("attn_hyper_connection.hc_norm.weight");
                 fa[t].w_down = bf16("attn_hyper_connection.input_mix_weight_down.weight");
                 fa[t].w_up = bf16("attn_hyper_connection.input_mix_weight_up.weight");
+                fa[t].q8_down = (const uint8_t*) hc8_[0][0]; fa[t].q8_up = (const uint8_t*) hc8_[0][1];   // STRATA_MTP_HC8
                 fa[t].w_inject = bf16("attn_hyper_connection.block_inject_weight.weight");
                 fa[t].eps = EPS; fa[t].lo = lo_ + t * g.hc_lr; fa[t].rs = rs_ + t * HC;
                 fa[t].inject_out = inj_ + t * HC; fa[t].mixed = mixed_ + t * N;
@@ -1113,17 +1465,28 @@ bool MtpDrafter::record_front(int T, int row0, cudaStream_t cs, std::string& err
         g_mp.stamp(3, cs);
         // ---- attention: K/V into the layer's own cache
         if (!q8_attn) native_quantize_q8_1(mixed_, xq_, (int) N, T, cs);
+        // STRATA_MTP_OVERLAP: a full one-row pass appends its K/V on side_ beside the query projection (joined before the
+        // attention, record_rest)
+        const bool kv_side = ovl && full_pass_;
+        cudaStream_t ckv = cs;
+        if (kv_side) {
+            if (cudaEventRecord(ov_fork_, cs) != cudaSuccess || cudaStreamWaitEvent(side_, ov_fork_, 0) != cudaSuccess) {
+                err = "mtp: the K/V branch";
+                return false;
+            }
+            ckv = side_;
+        }
         // STRATA_MMVQ_V2=1: k and v in one launch, the same bits (q is in the attention pass below)
         bool kv_done = false;
         if (strata::kernels::native_mmvq_v2_enabled() && wt_k_proj == 8 && wt_v_proj == 8) {
             const void* gw[2] = {wp_k_proj, wp_v_proj};
             float* gy[2] = {kcur_, vcur_};
             const int go[2] = {(int) (NKV * HD), (int) (NKV * HD)};
-            kv_done = strata::kernels::native_q8_0_mmvq_group(2, gw, gy, go, xq_, (int) N, T, cs);
+            kv_done = strata::kernels::native_q8_0_mmvq_group(2, gw, gy, go, xq_, (int) N, T, ckv);
         }
         if (!kv_done) {
-            native_mmvq(wt_k_proj, wp_k_proj, xq_, kcur_, (int) N, (int) (NKV * HD), T, cs);
-            native_mmvq(wt_v_proj, wp_v_proj, xq_, vcur_, (int) N, (int) (NKV * HD), T, cs);
+            mtp_gemv(wt_k_proj, wp_k_proj, xq_, kcur_, (int) N, (int) (NKV * HD), T, ckv);
+            mtp_gemv(wt_v_proj, wp_v_proj, xq_, vcur_, (int) N, (int) (NKV * HD), T, ckv);
         }
         // #783 PR-d (stuchapin909): the T tokens' K norm, K/V rotation and K/V append each run once over all T rows
         // (every row is independent; the rope keeps its per-token positions). STRATA_NO_BATCH_KV_STEP=1 appends per token.
@@ -1137,37 +1500,41 @@ bool MtpDrafter::record_front(int T, int row0, cudaStream_t cs, std::string& err
         const bool fuse_nr = native_rope_enabled() && native_norm_rope_usable((int) HD, (int) s.n_rot);
         if (T == 1 && fuse_nr) {
             native_qsa_rms_norm_rope(kcur_, (int) HD, f32("self_attn.k_norm.weight"), kcur_, (int) NKV, (int) HD,
-                                     (int) s.n_rot, EPS, rope_scaling(), pos, cs);
+                                     (int) s.n_rot, EPS, rope_scaling(), pos, ckv);
         } else {
-            native_qsa_rms_norm_weighted(kcur_, f32("self_attn.k_norm.weight"), kcur_, (int) HD, (int) (T * NKV), EPS, cs);
+            native_qsa_rms_norm_weighted(kcur_, f32("self_attn.k_norm.weight"), kcur_, (int) HD, (int) (T * NKV), EPS, ckv);
             for (int t = 0; t < T; ++t) {
                 float* kc = kcur_ + t * NKV * HD;
-                if (native_rope_enabled()) native_rope_apply(kc, kc, (int) NKV, (int) HD, (int) s.n_rot, rope_scaling(), pos + t * NH, cs);
-                else rope_neox_apply(kc, kc, (int) NKV, (int) HD, (int) s.n_rot, st_.cos_tab, st_.sin_tab, pos + t * NH, cs);
+                if (native_rope_enabled()) native_rope_apply(kc, kc, (int) NKV, (int) HD, (int) s.n_rot, rope_scaling(), pos + t * NH, ckv);
+                else rope_neox_apply(kc, kc, (int) NKV, (int) HD, (int) s.n_rot, st_.cos_tab, st_.sin_tab, pos + t * NH, ckv);
             }
         }
         if (st_.kv_rot) {   // rotated K and V (kv_q4.hpp): Q4_0, and INT8 unless STRATA_KV_ROT=0 (the fork's default)
-            fwht256_inplace_cuda(kcur_, (int64_t) T * NKV, cs);
-            fwht256_inplace_cuda(vcur_, (int64_t) T * NKV, cs);
+            fwht256_inplace_cuda(kcur_, (int64_t) T * NKV, ckv);
+            fwht256_inplace_cuda(vcur_, (int64_t) T * NKV, ckv);
         }
         // stored in the state's own format (#293 appended rotated INT8 K/V as Q4_0, into pools INT8 never has)
         if (!no_batch_kv && st_.kv_q4)
-            kv_append_q4_steps(st_.k_q4, st_.v_q4, st_.page_table, step, 4, T, kcur_, vcur_, s, cs, &st_.host);
+            kv_append_q4_steps(st_.k_q4, st_.v_q4, st_.page_table, step, 4, T, kcur_, vcur_, s, ckv, &st_.host);
         else if (!no_batch_kv && st_.kv_int8)
             kv_append_q8_steps(st_.k_q, st_.v_q, st_.k_scale, st_.v_scale, st_.page_table, step, 4, kcur_, vcur_,
-                               (int) (NKV * HD), T, s, cs, &st_.host);
+                               (int) (NKV * HD), T, s, ckv, &st_.host);
         else
             for (int t = 0; t < T; ++t) {
                 if (st_.kv_q4)
                     kv_append_q4_step(st_.k_q4, st_.v_q4, st_.page_table, step + t * 4, kcur_ + t * NKV * HD,
-                                      vcur_ + t * NKV * HD, s, cs, &st_.host);
+                                      vcur_ + t * NKV * HD, s, ckv, &st_.host);
                 else if (st_.kv_int8)
                     kv_append_q8_step(st_.k_q, st_.v_q, st_.k_scale, st_.v_scale, st_.page_table, step + t * 4,
-                                      kcur_ + t * NKV * HD, vcur_ + t * NKV * HD, s, cs, &st_.host);
+                                      kcur_ + t * NKV * HD, vcur_ + t * NKV * HD, s, ckv, &st_.host);
                 else
                     kv_append_step(st_.k_pool, st_.v_pool, st_.page_table, step + t * 4, kcur_ + t * NKV * HD,
-                                   vcur_ + t * NKV * HD, s, cs, &st_.host);
+                                   vcur_ + t * NKV * HD, s, ckv, &st_.host);
             }
+        if (kv_side) {
+            if (cudaEventRecord(ov_join_, side_) != cudaSuccess) { err = "mtp: the K/V branch"; return false; }
+            kv_open_ = true;
+        }
         g_mp.stamp(4, cs);
     } catch (const std::exception& e) {
         err = std::string("mtp: ") + e.what();
@@ -1202,7 +1569,13 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
     const bool fuse_nr = native_rope_enabled() && native_norm_rope_usable((int) HD, (int) s.n_rot);   // #783 PR-f
     try {
         // ---- dense attention over every cell
-        native_mmvq(wt_q_proj, wp_q_proj, xq_, qfull_, (int) N, (int) (NH * 2 * HD), T, cs);
+        // one row: the 33 MB of the query projection read cache-streaming (the same bits), so the layer's other weights
+        // stay in L2 from step to step; STRATA_MTP_QSTREAM=0 reads it the plain way
+        static const bool q_stream = [] { const char* v = std::getenv("STRATA_MTP_QSTREAM"); return v == nullptr || std::atoi(v) != 0; }();
+        if (T == 1 && q_stream && wt_q_proj == GGML_Q8_0)
+            native_q8_0_mmvq_stream(wp_q_proj, xq_, qfull_, (int) N, (int) (NH * 2 * HD), cs);
+        else
+            native_mmvq(wt_q_proj, wp_q_proj, xq_, qfull_, (int) N, (int) (NH * 2 * HD), T, cs);
         // all T tokens' q rows at once (the rows of token t sit at pos[t * NH ..], so row r reads pos[r])
         if (fuse_nr) {
             native_qsa_rms_norm_rope(qfull_, (int) (2 * HD), f32("self_attn.q_norm.weight"), qcur_, (int) (T * NH),
@@ -1217,19 +1590,31 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
         }
         if (st_.kv_rot) fwht256_inplace_cuda(qcur_, (int64_t) T * NH, cs);
         g_mp.stamp(5, cs);
+        if (kv_open_) {   // STRATA_MTP_OVERLAP: the K/V branch before the attention reads the cache
+            if (cudaStreamWaitEvent(cs, ov_join_, 0) != cudaSuccess) { err = "mtp: the K/V branch's join"; return false; }
+            kv_open_ = false;
+        }
         const QsaAttnPools pools = qsa_attn_pools(st_);
         if (floor_on_ && m_floor_ != nullptr)   // KVA: the window (or every cell) from the first real draft cell on
             window_ids_floor(const_cast<int32_t*>(step), T, window_ > 0 ? (int) window_ : 0x7fffffff, ident_, cap_, m_floor_, cs);
         else if (window_ > 0) window_ids(const_cast<int32_t*>(step), T, (int) window_, ident_, cap_, cs);
         // STRATA_QSA_SPLIT_ATTN=1: the draft layer's attention over its window, split the same way
         static const bool split_attn = [] { const char* v = std::getenv("STRATA_QSA_SPLIT_ATTN"); return v != nullptr && std::atoi(v) != 0; }();
-        if (!(split_attn && qsa_decode_attn_split(qcur_, pools, ident_, step, cap_, s, attn_scratch_, (uint64_t) attn_scratch_floats_, attn_, T, cs)))
+        // (one row, INT8 pools: the chunk kernel with its K/V rows staged first, the same bits; STRATA_MTP_ATTN_STAGED=0 off)
+        // (STRATA_MTP_ATTN_GQ: one row - the merge also rotates back, gates and quantizes, the same bits)
+        bool gq = false;
+        if (!(split_attn && qsa_decode_attn_split(qcur_, pools, ident_, step, cap_, s, attn_scratch_, (uint64_t) attn_scratch_floats_, attn_, T, cs)) &&
+            !(T == 1 && (gq = qsa_decode_attn_draft_gq(qcur_, pools, ident_, step, cap_, s, attn_scratch_, attn_, qfull_, attn32_,
+                                                       xq_, st_.kv_rot, cs))) &&
+            !(T == 1 && qsa_decode_attn_draft(qcur_, pools, ident_, step, cap_, s, attn_scratch_, attn_, cs)))
         qsa_decode_attn_batch(qcur_, pools, ident_, step, cap_, s, attn_scratch_, attn_, T, cs);
-        if (st_.kv_rot) fwht256_inplace_cuda(attn_, (int64_t) T * NH, cs);
+        if (st_.kv_rot && !gq) fwht256_inplace_cuda(attn_, (int64_t) T * NH, cs);
         g_mp.stamp(6, cs);
-        native_qsa_gate_apply(attn_, qfull_, attn32_, (int) (T * NH), (int) HD, cs);
-        native_quantize_q8_1(attn32_, xq_, (int) (NH * HD), T, cs);
-        native_mmvq(wt_o_proj, wp_o_proj, xq_, bo_, (int) (NH * HD), (int) N, T, cs);
+        if (!gq) {
+            native_qsa_gate_apply(attn_, qfull_, attn32_, (int) (T * NH), (int) HD, cs);
+            native_quantize_q8_1(attn32_, xq_, (int) (NH * HD), T, cs);
+        }
+        mtp_gemv(wt_o_proj, wp_o_proj, xq_, bo_, (int) (NH * HD), (int) N, T, cs);
         g_mp.stamp(7, cs);
         // ---- the MLP hyper-connection (the attention write folded in)
         const bool qfuse_hc = mtp_qfuse_hc_on();
@@ -1242,6 +1627,7 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
                 fa[t].w_norm = f32("mlp_hyper_connection.hc_norm.weight");
                 fa[t].w_down = bf16("mlp_hyper_connection.input_mix_weight_down.weight");
                 fa[t].w_up = bf16("mlp_hyper_connection.input_mix_weight_up.weight");
+                fa[t].q8_down = (const uint8_t*) hc8_[1][0]; fa[t].q8_up = (const uint8_t*) hc8_[1][1];   // STRATA_MTP_HC8
                 fa[t].w_inject = bf16("mlp_hyper_connection.block_inject_weight.weight");
                 fa[t].eps = EPS; fa[t].lo = lo_ + t * g.hc_lr; fa[t].rs = rs_ + t * HC;
                 fa[t].inject_out = inj2_ + t * HC; fa[t].mixed = mixed_ + t * N;
@@ -1291,10 +1677,26 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
                               shared_ + t * N, N, g.n_ff, 32, sh_cs, mixed_ + t * N, &nsw);
             }
         };
+        // STRATA_MTP_ROUTE_GROUP (one token, the 512-expert top-10, no route-resident): the router's top-10 and the expert
+        // groups in one launch (mtp_route.hpp, the same bits), and the routed experts' q8_0 input made on the shared branch
+        // first (the same kernel, off the router's path)
+        const bool route_group = T == 1 && branch_on && mtp_route_group_on() && native_router_enabled() && g.n_expert == 512 &&
+                                 K == 10 && !(rr_res_ != nullptr && rr_margin_ > 0.0f);
+        if (route_group) {
+            quantize_q8_0_scaled(mixed_, hit_xq_, hit_xs_, (int64_t) T * N, sh_cs);
+            if (cudaEventRecord(q0_join_, side_) != cudaSuccess) { err = "mtp: the shared expert's branch"; return false; }
+        }
         if (branch_on) {
             shared_rows();
             if (cudaEventRecord(sh_join_, side_) != cudaSuccess) { err = "mtp: the shared expert's branch"; return false; }
         }
+        if (route_group) {
+            bf16_gemv_fp32_mmvf(mixed_, bf16("mlp.gate.weight"), logits_, (int) N, (int) g.n_expert, cs);
+            mtp_route_group(logits_, ids_, w_, experts_, (int64_t) strata::kernels::cpu::BLOB, grp_ptr_, grp_start_, grp_counts_,
+                            hit_dst_, hit_slot_, cs);
+            g_mp.stamp(9, cs);
+            if (cudaStreamWaitEvent(cs, q0_join_, 0) != cudaSuccess) { err = "mtp: the shared expert's join"; return false; }
+        } else {
         // #783 PR-c (stuchapin909): a multi-token window routes in two launches (one router GEMV reading the weight once,
         // one top-10 over all rows - each row bitwise the single-token call) and combines in one
         if (T > 1 && native_router_enabled() && g.n_expert == 512 && K == 10) {
@@ -1316,6 +1718,7 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
         moe_group_resident(ids_, (int) (T * K), (int) K, experts_, (int64_t) strata::kernels::cpu::BLOB, grp_ptr_,
                            grp_start_, grp_counts_, hit_dst_, hit_slot_, cs);
         quantize_q8_0_scaled(mixed_, hit_xq_, hit_xs_, (int64_t) T * N, cs);
+        }
         moe_grouped_s2(grp_ptr_, grp_start_, grp_counts_, hit_dst_, hit_slot_, (int64_t) T * K, (int64_t) T * K, hit_xq_,
                        hit_xs_, hit_scratch_, parts_, cs);
         g_mp.stamp(10, cs);
@@ -1346,6 +1749,27 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
         if (!fuse_head_gr && !no_multi_gr)
             gr_write_multi(R_, y_, inj2_, gs, R_, T, cs);
         g_mp.stamp(12, cs);
+        // STRATA_MTP_OVERLAP: R_ row 0 is final here (the mixer read only reads it) and is what mtp_select hands the next step:
+        // its hidden input on side_ (the front's own kernels, so the same bits), beside the mixer read and the head
+        if (ovl_ && T == 1 && !fuse_head_gr && side_ != nullptr && pre_join_ != nullptr) {
+            if (cudaEventRecord(ov_fork_, cs) != cudaSuccess || cudaStreamWaitEvent(side_, ov_fork_, 0) != cudaSuccess) {
+                err = "mtp: the next step's hidden input";
+                return false;
+            }
+            int wt_fc_hidden;
+            const void* wp_fc_hidden = wq("fc_hidden.weight", wt_fc_hidden);
+            if (hnorm_stream_)
+                native_qsa_rms_norm_grouped(R_, f32("pre_fc_norm_hidden.weight"), hn_, (int) N, (int) HC, (int) HC, EPS, side_);
+            else
+                native_qsa_rms_norm_weighted(R_, f32("pre_fc_norm_hidden.weight"), hn_, (int) (HC * N), 1, EPS, side_);
+            for (int c0 = 0; c0 < HC; c0 += 8) {
+                const int nc = (int) std::min<int64_t>(8, HC - c0);
+                native_quantize_q8_1(hn_ + (size_t) c0 * N, xq2_, (int) N, nc, side_);
+                native_mmvq(wt_fc_hidden, wp_fc_hidden, xq2_, h2_ + (size_t) c0 * N, (int) N, (int) N, nc, side_);
+            }
+            if (cudaEventRecord(pre_join_, side_) != cudaSuccess) { err = "mtp: the next step's hidden input"; return false; }
+            pre_open_ = true;
+        }
         // ---- the final mixer and the main model's head
         bool q8_head = false;
         if (fuse_head_gr) {
@@ -1356,6 +1780,7 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
                 fa[t].w_norm = f32("hyper_connection_mixer.hc_norm.weight");
                 fa[t].w_down = bf16("hyper_connection_mixer.input_mix_weight_down.weight");
                 fa[t].w_up = bf16("hyper_connection_mixer.input_mix_weight_up.weight");
+                fa[t].q8_down = (const uint8_t*) hc8_[2][0]; fa[t].q8_up = (const uint8_t*) hc8_[2][1];   // STRATA_MTP_HC8
                 fa[t].w_inject = nullptr;
                 fa[t].eps = EPS; fa[t].lo = lo_ + t * g.hc_lr; fa[t].rs = rs_ + t * HC;
                 fa[t].inject_out = dummy_inj_; fa[t].mixed = sample_ + t * N;
@@ -1370,6 +1795,7 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
                 fa[t].w_norm = f32("hyper_connection_mixer.hc_norm.weight");
                 fa[t].w_down = bf16("hyper_connection_mixer.input_mix_weight_down.weight");
                 fa[t].w_up = bf16("hyper_connection_mixer.input_mix_weight_up.weight");
+                fa[t].q8_down = (const uint8_t*) hc8_[2][0]; fa[t].q8_up = (const uint8_t*) hc8_[2][1];   // STRATA_MTP_HC8
                 fa[t].eps = EPS; fa[t].lo = lo_ + t * g.hc_lr; fa[t].rs = rs_ + t * HC; fa[t].mixed = sample_ + t * N;
                 if (qfuse_hc) fa[t].q8_mixed = xq_ + (size_t) t * (N / 32) * 36;
             }
@@ -1383,10 +1809,17 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
         }
         g_mp.stamp(13, cs);
         if (!q8_head) native_quantize_q8_1(sample_, xq_, (int) N, T, cs);
+        if (proxy_on_ && !coupled_rec_) {   // --mtp-head proxy: the token id and its probability straight from the scan
+            strata::kernels::draft_proxy_top1(proxy_, head_->weights(), head_->planes(), xq_, row_ + 4, n_dvocab_, dvocab_, out_ids_, probs_,
+                                              proxy_scratch_, cs);
+            g_mp.stamp(14, cs);
+            g_mp.stamp(15, cs);
+            return true;
+        }
         const bool sub = dhead_ != nullptr;
         const int64_t nv = sub ? n_dvocab_ : n_vocab_;
-        native_mmvq(sub ? dhead_type_ : head_->type(), sub ? dhead_ : head_->weights(), xq_, head_logits_, (int) N,
-                    (int) nv, T, cs);
+        if (sub) native_mmvq(dhead_type_, dhead_, xq_, head_logits_, (int) N, (int) nv, T, cs);
+        else head_->mmvq(xq_, head_logits_, T, cs);   // the whole head (bit planes or not: the Q8_0 head's bits)
         g_mp.stamp(14, cs);
         if (coupled_rec_) {
             // coupled draft sampling: the target's chain and Philox draw for the row that will verify this draft
@@ -1420,6 +1853,35 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
 }
 
 namespace {
+// STRATA_MTP_PDL=1: the draft graphs' kernels that support it start while the one before them finishes (pdl.hpp: they
+// read only weights before their wait, so the drafts are the same bits)
+struct MtpPdl {
+    bool prev;
+    MtpPdl() : prev(strata::kernels::pdl_scope()) {
+        static const bool on = [] { const char* e = std::getenv("STRATA_MTP_PDL"); return e != nullptr && e[0] == '1'; }();
+        strata::kernels::pdl_scope() = on && strata::kernels::pdl_supported();
+    }
+    ~MtpPdl() { strata::kernels::pdl_scope() = prev; }
+};
+// STRATA_MTP_COND: a capture into a conditional node's body (cc->body) or into a new graph handed back in cc->out
+bool begin_capture_cc(cudaStream_t cs, cudaGraph_t body) {
+#if !defined(STRATA_USE_HIP) && defined(CUDART_VERSION) && CUDART_VERSION >= 12040
+    if (body != nullptr)
+        return cudaStreamBeginCaptureToGraph(cs, body, nullptr, nullptr, 0, cudaStreamCaptureModeThreadLocal) == cudaSuccess;
+#endif
+    return cudaStreamBeginCapture(cs, cudaStreamCaptureModeThreadLocal) == cudaSuccess;
+}
+bool end_capture_cc(cudaStream_t cs, bool ok, cudaGraph_t body, unsigned long long keep_h, int keep_j, cudaGraph_t* out,
+                    const float* probs, const int32_t* row, float* hist) {
+    // the keep kernel reads the draft's probability (probs[row[1]], as mtp_select) and the threshold's bits (row[2])
+    if (ok && keep_j >= 0) ok = strata::kernels::mtp_cond_keep(keep_h, probs, row + 1, row + 2, hist, keep_j, cs);
+    cudaGraph_t g = nullptr;
+    const bool ended = cudaStreamEndCapture(cs, &g) == cudaSuccess;
+    if (body != nullptr) return ok && ended;   // the body belongs to its node
+    if (!ok || !ended) { if (g) cudaGraphDestroy(g); return false; }
+    *out = g;
+    return true;
+}
 bool finish_capture(cudaStream_t cs, bool ok, cudaGraphExec_t& exec, const char* what, std::string& err) {
     cudaGraph_t graph = nullptr;
     const cudaError_t ce = cudaStreamEndCapture(cs, &graph);
@@ -1427,6 +1889,23 @@ bool finish_capture(cudaStream_t cs, bool ok, cudaGraphExec_t& exec, const char*
         if (graph) cudaGraphDestroy(graph);
         return false;
     }
+#if !defined(STRATA_USE_HIP)
+    if (ce == cudaSuccess && graph != nullptr && mtp_node_prio() != 0) {   // STRATA_MTP_HIGH_PRIO: every kernel node's priority
+        size_t nn = 0;
+        if (cudaGraphGetNodes(graph, nullptr, &nn) == cudaSuccess && nn > 0) {
+            std::vector<cudaGraphNode_t> nodes(nn);
+            if (cudaGraphGetNodes(graph, nodes.data(), &nn) == cudaSuccess)
+                for (cudaGraphNode_t nd : nodes) {
+                    cudaGraphNodeType ty;
+                    if (cudaGraphNodeGetType(nd, &ty) != cudaSuccess || ty != cudaGraphNodeTypeKernel) continue;
+                    cudaLaunchAttributeValue v{};
+                    v.priority = mtp_node_prio();
+                    (void) cudaGraphKernelNodeSetAttribute(nd, cudaLaunchAttributePriority, &v);
+                }
+        }
+        (void) cudaGetLastError();
+    }
+#endif
     cudaGraphExec_t got = nullptr;   // (a failed instantiate leaves nothing in the member)
     const cudaError_t ie = ce != cudaSuccess ? ce : cudaGraphInstantiate(&got, graph, 0);
     if (ie != cudaSuccess) {
@@ -1462,15 +1941,16 @@ bool MtpDrafter::capture_prefill_dev(int T, std::string& err) {
     return finish_capture(cs_, ok, prefill_dev_exec_[T], "prefill (device inputs)", err);
 }
 
-bool MtpDrafter::capture_round(int T, bool coupled, std::string& err) {
+bool MtpDrafter::capture_round(int T, bool coupled, std::string& err, CondCap* cc) {
     cudaGraphExec_t& exec = coupled ? round_exec_c_[T] : round_exec_[T];
-    if (exec) return true;
+    if (exec && cc == nullptr) return true;
     using namespace strata::kernels;
     const int64_t HCN = g_->hc * g_->n_embd;
     g_mp.init();   // (its allocation before the capture)
-    if (cudaStreamBeginCapture(cs_, cudaStreamCaptureModeThreadLocal) != cudaSuccess) { err = "mtp: begin capture"; return false; }
+    if (!begin_capture_cc(cs_, cc ? cc->body : nullptr)) { err = "mtp: begin capture"; return false; }
     g_mp.base = 0;
     bool ok = true;
+    const MtpPdl pdl_round;
     // coupled: the request's chain and the penalty history's base, for this round's drafts
     if (coupled) coupled_draft_stage(m_cparams_, m_chist_, cparams_, cring_, kCoupledHistCap, cs_);
     // the catch-up: the layer's front for the window's T cells (their K/V), then its rest for row a only, on row
@@ -1480,10 +1960,20 @@ bool MtpDrafter::capture_round(int T, bool coupled, std::string& err) {
     const int64_t N = g_->n_embd, NH = g_->n_head;
     // the draft round's seven inputs in one launch (STRATA_MTP_MULTI_COPY=0 keeps the separate copies)
     const MappedCopy in[7] = {{tok_, m_tok_, T}, {step_, m_step_, (int64_t) 2 * T * 4}, {pos_, m_pos_, 2 * T * NH},
-                              {row_, m_row_, 2}, {Rin_, window_R_, T * HCN}, {step_ + ra * 4, m_step_ + ra * 4, 4},
+                              {row_, m_row_, 5}, {Rin_, window_R_, T * HCN}, {step_ + ra * 4, m_step_ + ra * 4, 4},
                               {pos_ + ra * NH, m_pos_ + ra * NH, NH}};
-    copy_from_mapped_multi(in, 7, cs_);
+    if (mtp_steps_from_round()) {
+        // every row the round and its chain read (the host stages them all before the round): the step graphs copy nothing
+        const MappedCopy all[5] = {{tok_, m_tok_, T}, {step_, m_step_, (int64_t) 2 * max_t_ * 4}, {pos_, m_pos_, 2 * max_t_ * NH},
+                                   {row_, m_row_, 5}, {Rin_, window_R_, T * HCN}};
+        copy_from_mapped_multi(all, 5, cs_);
+    } else {
+        copy_from_mapped_multi(in, 7, cs_);
+    }
+    ovl_ = mtp_overlap_on();
+    full_pass_ = T == 1;   // a one-row round: its rest follows on the same row's q8_1 rows (the K/V branch may run beside it)
     ok = record_front(T, 0, cs_, err);
+    full_pass_ = false;
     if (ok) {
         if (T > 1) {
             copy_row_to_first(row_, R_, HCN, inj_, g_->hc, mixed_, N, cs_);
@@ -1494,36 +1984,112 @@ bool MtpDrafter::capture_round(int T, bool coupled, std::string& err) {
         ok = record_rest(ra, cs_, err);
         coupled_rec_ = false;
     }
-    if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, 0, cs_, probs_, m_prob_);
+    const bool pre_made = pre_open_;
+    ovl_ = false;
+    if (kv_open_) { cudaStreamWaitEvent(cs_, ov_join_, 0); kv_open_ = false; }
+    if (pre_open_) { cudaStreamWaitEvent(cs_, pre_join_, 0); pre_open_ = false; }
+    if (ok && pre_next_on() && !pre_made) {
+        err = "mtp: the round did not make the next step's hidden input";   // the step graphs count on it
+        ok = false;
+    }
+    if (ok) mtp_select_d(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, 0, cs_, probs_, m_prob_);
     if (ok) g_mp.stamp(16, cs_);
     g_mp.base = -1;
     if (ok && force_on_ && !coupled) force_token(tok_, m_force_, 0, cs_);   // chain_launch: step 1's input
+    if (cc != nullptr) return end_capture_cc(cs_, ok, cc->body, cc->keep_h, cc->keep_j, &cc->out, probs_, row_, cond_hist_);
     return finish_capture(cs_, ok, exec, coupled ? "round (coupled)" : "round", err);
 }
 
 // Chain step j (1..max_t-2): one row at the cell staged in step row `max_t + j - 1`, from the previous step's
 // residual and token (left in Rin_[0] / tok_[0] by mtp_select); draft j and its probability to the mapped outputs.
-bool MtpDrafter::capture_step(int j, bool coupled, std::string& err) {
+bool MtpDrafter::capture_step(int j, bool coupled, std::string& err, CondCap* cc) {
     cudaGraphExec_t& exec = coupled ? step_exec_c_[j] : step_exec_[j];
-    if (exec) return true;
+    if (exec && cc == nullptr) return true;
     using namespace strata::kernels;
     const int64_t HCN = g_->hc * g_->n_embd;
     const int row = max_t_ + j - 1;
     g_mp.init();
-    if (cudaStreamBeginCapture(cs_, cudaStreamCaptureModeThreadLocal) != cudaSuccess) { err = "mtp: begin capture"; return false; }
+    if (!begin_capture_cc(cs_, cc ? cc->body : nullptr)) { err = "mtp: begin capture"; return false; }
     const MappedCopy in[2] = {{step_ + row * 4, m_step_ + row * 4, 4},
                               {pos_ + row * g_->n_head, m_pos_ + row * g_->n_head, g_->n_head}};
-    copy_from_mapped_multi(in, 2, cs_);
+    if (!mtp_steps_from_round()) copy_from_mapped_multi(in, 2, cs_);   // (else the round graph copied this row)
     coupled_rec_ = coupled;
     coupled_j_ = j;
     g_mp.base = j < kMpGraphs ? j : -1;
+    ovl_ = mtp_overlap_on();
+    pre_ready_ = ovl_ && pre_next_on();
+    const MtpPdl pdl_step;
     bool ok = record_forward(1, row, cs_, err);
+    pre_ready_ = false;
+    const bool pre_made = pre_open_;
+    ovl_ = false;
+    if (kv_open_) { cudaStreamWaitEvent(cs_, ov_join_, 0); kv_open_ = false; }
+    if (pre_open_) { cudaStreamWaitEvent(cs_, pre_join_, 0); pre_open_ = false; }
+    if (ok && mtp_overlap_on() && pre_next_on() && !pre_made) { err = "mtp: a step did not make the next one's hidden input"; ok = false; }
     coupled_rec_ = false;
-    if (ok) mtp_select(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, j, cs_, probs_, m_prob_);
+    if (ok) mtp_select_d(R_, HCN, out_ids_, row_ + 1, Rin_, tok_, m_out_, j, cs_, probs_, m_prob_);
     if (ok) g_mp.stamp(16, cs_);
     g_mp.base = -1;
     if (ok && force_on_ && !coupled) force_token(tok_, m_force_, j, cs_);   // chain_launch: step j+1's input
+    if (cc != nullptr) return end_capture_cc(cs_, ok, cc->body, cc->keep_h, cc->keep_j, &cc->out, probs_, row_, cond_hist_);
     return finish_capture(cs_, ok, exec, coupled ? "step (coupled)" : "step", err);
+}
+
+// STRATA_MTP_COND: [round, keep(0) -> h1] -> IF h1 [step 1, keep(1) -> h2] -> IF h2 [...] ... -> IF h_{steps-1} [step steps-1]
+// (Basalt's conditional.cpp, MIT).  Each handle is reset to 0 at every launch, so a skipped step skips every later one.
+bool MtpDrafter::capture_cond(int T, int steps) {
+#if defined(STRATA_USE_HIP) || !defined(CUDART_VERSION) || CUDART_VERSION < 12040
+    (void) T; (void) steps;
+    return false;
+#else
+    cudaGraphExec_t& exec = cond_exec_[T];
+    if (exec && cond_steps_[T] == steps) return true;
+    if (exec) { cudaGraphExecDestroy(exec); exec = nullptr; }
+    std::string err;
+    cudaGraph_t top = nullptr;
+    cudaGraphConditionalHandle h[16] = {};
+    bool ok = steps >= 2 && steps <= 15 && cudaGraphCreate(&top, 0) == cudaSuccess;
+    for (int j = 1; ok && j < steps; ++j)
+        ok = cudaGraphConditionalHandleCreate(&h[j], top, 0, cudaGraphCondAssignDefault) == cudaSuccess;
+    cudaGraphNode_t prev = nullptr;
+    if (ok) {
+        CondCap cc;
+        cc.keep_h = (unsigned long long) h[1];
+        cc.keep_j = 0;
+        ok = capture_round(T, false, err, &cc);
+        ok = ok && cudaGraphAddChildGraphNode(&prev, top, nullptr, 0, cc.out) == cudaSuccess;
+        if (cc.out) cudaGraphDestroy(cc.out);
+    }
+    for (int j = 1; ok && j < steps; ++j) {
+        cudaGraphNodeParams np{};
+        np.type = cudaGraphNodeTypeConditional;
+        np.conditional.handle = h[j];
+        np.conditional.type = cudaGraphCondTypeIf;
+        np.conditional.size = 1;
+        cudaGraphNode_t node = nullptr;
+        ok = cudaGraphAddNode(&node, top, &prev, nullptr, 1, &np) == cudaSuccess;
+        if (!ok) break;
+        CondCap cb;
+        cb.body = np.conditional.phGraph_out[0];
+        if (j + 1 < steps) { cb.keep_h = (unsigned long long) h[j + 1]; cb.keep_j = j; }
+        ok = capture_step(j, false, err, &cb);
+        prev = node;
+    }
+    if (ok) ok = cudaGraphInstantiate(&exec, top, 0) == cudaSuccess;
+    if (top) cudaGraphDestroy(top);
+    if (ok) ok = cudaGraphUpload(exec, cs_) == cudaSuccess && cudaStreamSynchronize(cs_) == cudaSuccess;
+    if (!ok) {
+        const cudaError_t e = cudaGetLastError();
+        std::fprintf(stderr, "strata mtp: the conditional draft graph failed (%s%s%s); one graph per step from now on\n",
+                     cudaGetErrorString(e), err.empty() ? "" : ", ", err.c_str());
+        if (exec) cudaGraphExecDestroy(exec);
+        exec = nullptr;
+        cond_off_ = true;
+        return false;
+    }
+    cond_steps_[T] = steps;
+    return true;
+#endif
 }
 
 void MtpDrafter::kv_restore(int64_t upto) {
@@ -1730,6 +2296,21 @@ struct DraftTiming {
     }
 };
 DraftTiming g_dt;
+
+// STRATA_MTP_DUMP=FILE (measurement only): every round's cell, drafts and their probabilities' bits, one line a round, so two
+// builds' drafts can be compared exactly
+void mtp_dump_round(int64_t p, int a, const int32_t* drafts, const float* probs, int n) {
+    static FILE* f = [] { const char* e = std::getenv("STRATA_MTP_DUMP"); return e != nullptr && *e ? std::fopen(e, "w") : nullptr; }();
+    if (f == nullptr) return;
+    std::fprintf(f, "%lld %d %d", (long long) p, a, n);
+    for (int j = 0; j < n; ++j) {
+        uint32_t u;
+        std::memcpy(&u, &probs[j], 4);
+        std::fprintf(f, " %d:%08x", drafts[j], u);
+    }
+    std::fputc(10, f);
+    std::fflush(f);
+}
 }  // namespace
 
 bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* drafts, std::string& err,
@@ -1764,6 +2345,10 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
     const int max_steps = (int) std::min<int64_t>(std::min(max_t_ - 1, max_drafts_), st_.max_cells - (p + a));
     for (int j = 1; j < max_steps; ++j)
         if (!capture_step(j, cp, err)) return false;
+    // STRATA_MTP_COND: the --mtp-cum chain as one graph (the host applies the same rule to the same probabilities, so it
+    // only waits for the drafts the graph makes)
+    const bool cond = !cp && !cond_off_ && mtp_cond_on() && cum_on() && !chain_rule_ && !force_on_ && !g_mp.on &&
+                      max_steps >= 2 && capture_cond(T, max_steps);
     const Clock::time_point t0 = Clock::now();
     const int64_t NH = g_->n_head;
     auto put = [&](int row, int64_t cell) {
@@ -1783,6 +2368,7 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
     for (int j = 0; j < max_steps; ++j) ((volatile int32_t*) h_out_)[j] = -1;
     h_row_[0] = a;
     h_row_[1] = 0;
+    if (proxy_on_) proxy_round(tokens, T, a);
     if (h_force_ != nullptr) for (int j = 0; j < 16; ++j) h_force_[j] = -1;   // the forcing kernels: no-ops here
     std::atomic_thread_fence(std::memory_order_seq_cst);
     if (!stage_source_R(T, err)) return false;
@@ -1804,7 +2390,8 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
     };
 
     int n = 0;
-    if (min_p <= 0.0f && !chain_rule_ && max_steps > 0) {
+    cum_used_ = cum_on() ? cum_.th() : 0.0f;   // --mtp-cum: this window's threshold (the window rule reads it back)
+    if (min_p <= 0.0f && !chain_rule_ && cum_used_ <= 0.0f && max_steps > 0) {
         if (cudaGraphLaunch(cp ? round_exec_c_[T] : round_exec_[T], cs_) != cudaSuccess) {
             err = std::string("mtp draft: ") + cudaGetErrorString(cudaGetLastError());
             return false;
@@ -1846,7 +2433,12 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
         if (dt) g_dt.pre_ms += hms(t0);
         if (dt) cudaEventRecord(g_dt.eb[0], cs_);
         Clock::time_point tl = Clock::now();
-        if (cudaGraphLaunch(cp ? round_exec_c_[T] : round_exec_[T], cs_) != cudaSuccess) {
+        const bool cond_w = cond && cum_used_ > 0.0f;   // (the cum rule decides this window's chain)
+        if (cond_w) {
+            std::memcpy(&h_row_[2], &cum_used_, sizeof(float));   // the keep kernels' threshold (the round copies row_)
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+        }
+        if (cudaGraphLaunch(cond_w ? cond_exec_[T] : cp ? round_exec_c_[T] : round_exec_[T], cs_) != cudaSuccess) {
             err = std::string("mtp draft: ") + cudaGetErrorString(cudaGetLastError());
             return false;
         }
@@ -1870,9 +2462,15 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
         if (dt) g_dt.wait0_ms += hms(tl);
         drafts[0] = ((volatile int32_t*) h_out_)[0];
         float pj = ((volatile float*) h_prob_)[0];
+        float pr[16] = {};
+        pr[0] = pj;
         if (probs) probs[0] = pj;
         n = 1;
-        for (int j = 1; j < max_steps && (chain_rule_ ? chain_rule_(j - 1, pj) : pj >= min_p); ++j) {
+        auto keep = [&](int i) {   // whether draft i stays in the window, so draft i + 1 is worth making
+            if (cum_used_ > 0.0f) return strata::spec::draft_cum_keep(pr, i, cum_used_);
+            return chain_rule_ ? chain_rule_(i, pr[i]) : pr[i] >= min_p;
+        };
+        auto launch_step = [&](int j) {
             if (dt) cudaEventRecord(g_dt.eb[j], cs_);
             tl = Clock::now();
             if (cudaGraphLaunch(cp ? step_exec_c_[j] : step_exec_[j], cs_) != cudaSuccess) {
@@ -1882,15 +2480,48 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
             if (dt) g_dt.launch_ms += hms(tl);
             if (dt) cudaEventRecord(g_dt.ea[j], cs_);
             (void) cudaStreamQuery(cs_);
+            return true;
+        };
+        // STRATA_MTP_AHEAD (mtp_ahead()): step j + 1 is launched before draft j is back when the cum rule keeps draft j for
+        // any probability in the top bins and draft j - 1 was that sure; a launched step the rule then drops only costs its
+        // GPU time (its draft is not used, its K/V cell is written again before any read), so the drafts are the same
+        const MtpAhead& ah = mtp_ahead();
+        auto ahead_ok = [&](int j) {
+            if (!ah.on || cum_used_ <= 0.0f || cond_w || j < 1 || j + 1 >= max_steps || j >= 16 || pr[j - 1] < ah.p_prev)
+                return false;
+            float c = 1.0f;
+            for (int i = 0; i < j; ++i) c = c * strata::spec::draft_cum_acc(pr[i]);
+            return c * strata::spec::draft_cum_acc(ah.p_min) >= cum_used_;
+        };
+        int launched = 0;   // the last step graph launched (0: the round)
+        for (int j = 1; j < max_steps && keep(j - 1); ++j) {
+            if (!cond_w && launched < j) {
+                if (!launch_step(j)) return false;
+                launched = j;
+            }
+            if (launched == j && ahead_ok(j)) {
+                if (!launch_step(j + 1)) return false;
+                launched = j + 1;
+                ++ah.launched;
+            }
             prefetch_ple(drafts[j - 1]);
             tl = Clock::now();
             wait_step(j);
             if (dt) g_dt.waitj_ms += hms(tl);
+            if (cond_w && ((volatile int32_t*) h_out_)[j] < 0) {   // (cannot happen: the device applies the host's rule)
+                err = "mtp draft: the conditional chain stopped before the host's rule";
+                return false;
+            }
             drafts[j] = ((volatile int32_t*) h_out_)[j];
             pj = ((volatile float*) h_prob_)[j];
+            if (j < 16) pr[j] = pj;
             if (probs) probs[j] = pj;
             ++n;
         }
+        if (launched > n - 1) ++ah.wasted;   // the step after the last kept draft ran
+        if (ah.on && dt && g_dt.rounds % 300 == 299)
+            std::fprintf(stderr, "strata mtp ahead: %lld steps launched early, %lld of them past the chain's end\n",
+                         ah.launched, ah.wasted);
         if (chain_rule_ && n >= max_steps) (void) chain_rule_(n - 1, pj);   // the last step of a full chain
         prefetch_ple(drafts[n - 1]);
         const Clock::time_point t_pre_sync = Clock::now();
@@ -1901,8 +2532,8 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
         if (dt) {
             float ms = 0;
             double r = 0, s = 0, gp = 0;
-            if (cudaEventElapsedTime(&ms, g_dt.eb[0], g_dt.ea[0]) == cudaSuccess) r = ms;
-            for (int j = 1; j < n; ++j) {
+            if (cudaEventElapsedTime(&ms, g_dt.eb[0], g_dt.ea[0]) == cudaSuccess) r = ms;   // (cond: the whole chain)
+            for (int j = 1; j < n && !cond_w; ++j) {
                 if (cudaEventElapsedTime(&ms, g_dt.eb[j], g_dt.ea[j]) == cudaSuccess) s += ms;
                 if (cudaEventElapsedTime(&ms, g_dt.ea[j - 1], g_dt.eb[j]) == cudaSuccess) gp += ms;
             }
@@ -1917,6 +2548,7 @@ bool MtpDrafter::draft(int T, const int32_t* tokens, int64_t p, int a, int32_t* 
             if (g_mp.n[0] % 300 == 0) g_mp.report();
         }
     }
+    if (probs != nullptr) mtp_dump_round(p, a, drafts, probs, n);
     for (int j = n; j < max_t_ - 1; ++j) { drafts[j] = 0; if (probs) probs[j] = 0.0f; }
     if (n_drafts) *n_drafts = n;
     if (result) *result = {n, max_steps};
@@ -2009,6 +2641,7 @@ bool MtpDrafter::chain_launch(int T, const int32_t* tokens, int64_t p, int a, co
     for (int j = 0; j < 16; ++j) h_force_[j] = j < n_force ? force[j] : -1;
     h_row_[0] = a;
     h_row_[1] = 0;
+    if (proxy_on_) proxy_round(tokens, T, a);
     std::atomic_thread_fence(std::memory_order_seq_cst);
     if (!stage_source_R(T, err)) return false;
     chain_early_ = std::max(0, std::min(n_early, n_out));

@@ -355,6 +355,11 @@ public:
     double ms_gate = 0;   ///< host time spent holding a layer's plan for the adaptive copies (decode timing prints it)
     cudaStream_t stream() const { return cs_; }
     int device() const { return device_; }
+    /// dec/host: run() calls `f` once, on its own thread, as soon as the host has served the window's last layer (the
+    /// GPU still finishes the window: everything queued on stream() afterwards runs after it).  One window only; not
+    /// called when run() fails before that point, nor on a layer split's chained windows.
+    void set_served_hook(std::function<void()> f) { served_hook_ = std::move(f); }
+    std::function<void()> served_hook_;
     /// Capture every window size and the commit graph now (a capture syncs the stream: never with a window in flight).
     bool capture_all(std::string& err);
     bool pl_launch(int T, const int32_t* tokens, int64_t pos0, std::string& err);
@@ -631,6 +636,16 @@ private:
     bool prof_on_ = false;
     unsigned long long* prof_ = nullptr;              // device: n_layers * kProfPer + 4 stamps
     std::vector<unsigned long long> prof_h_;
+    // dec/host STRATA_HOST_TL=<file> (with STRATA_VERIFY_PROFILE): per step the host's clock (steady_clock ns) as it saw
+    // the doorbell, published the plan, queued the PCIe share, returned from the pool, raised the CPU flag, raised flag B
+    // directly; written beside the step's GPU stamps after the window (bench-host/tl.py lines the two clocks up)
+    static constexpr int kTlPer = 6;
+    std::FILE* tl_file_ = nullptr;
+    std::vector<long long> tl_h_;
+    long long tl_launch_ = 0, tl_sync_ = 0;
+    int64_t tl_windows_ = 0;
+    void tl_mark(int i);
+    void tl_write(int T, int64_t pos0);
     double prof_sum_[2][kProfPer] = {};   // [GDN / QSA layers][stage]
     int64_t prof_windows_ = 0;
     double prof_t_sum_[strata::kernels::kVerifyLongT + 1][2][kProfPer] = {};   // the same per window size T (1..16), for profile_by_t_report
@@ -674,6 +689,18 @@ private:
     // fork b063c13 (STRATA_SIDE_MIXER=2): a second branch for the GDN gate projection and the QSA queries' chain
     cudaStream_t side2_ = nullptr;
     cudaEvent_t pfork_ = nullptr, pjoin_ = nullptr;
+    cudaEvent_t gjoin_ = nullptr, gfork_ = nullptr;   // dec/int STRATA_QPROJ_HALF: the QSA gate rows' fork (after the K/V append) and join (before the gate)
+    // STRATA_L2PF: the next layer's weights read into L2 on a branch while the window waits for the CPU pool's rows
+    cudaStream_t l2pf_s_ = nullptr;
+    cudaEvent_t l2pf_fork_ = nullptr, l2pf_join_ = nullptr;
+    // dec/host STRATA_PCIE_BRANCH: the PCIe share's staging copy (--pcie-mode kernel) on a branch beside the VRAM hits
+    cudaStream_t pcb_s_ = nullptr;
+    cudaEvent_t pcb_fork_ = nullptr, pcb_join_ = nullptr, pcb_plan_ = nullptr;
+    // dec/front STRATA_EARLY_READ: the next layer's first HC read on a branch forked before the CPU-row wait, gated on the
+    // combine's count; er_cnt_ = [layer][2] (the combine's block count, the read's pass count), zero between uses
+    cudaStream_t er_s_ = nullptr;
+    cudaEvent_t er_fork_ = nullptr, er_join_ = nullptr;
+    unsigned* er_cnt_ = nullptr;
     bool capture_oom_ = false;          // the last capture's instantiate found no VRAM (prepare)
     cudaGraphExec_t commit_exec_ = nullptr;
 
@@ -730,7 +757,11 @@ private:
     static void fetch_dma(void* ctx, const uint8_t* const* src, int n, size_t bytes);
     static void raise_flag(uint32_t* flag, uint32_t value);
     /// Flag B for `want`, behind every copy queued on copy_ (an empty plan must not overtake an earlier layer's DMA).
-    void raise_flag_b_ordered(uint32_t want);
+    /// `copied`: this step queued copies of its own just now.
+    void raise_flag_b_ordered(uint32_t want, bool copied = false);
+    /// dec/host: set by run() for a one-group window - every step's flag-B wait is behind the GPU's previous steps
+    /// (stream order), so a step's flag needs no host function behind earlier copies (see raise_flag_b_ordered)
+    bool b_direct_ = false;
     int32_t* h_plan_ = nullptr;  int32_t* m_plan_ = nullptr;     // counts | start | dst | tok | ptr (as int32 pairs)
     int64_t plan_i32_ = 0;                                        // int32 words in the plan block
     int64_t dst2_off_ = 0;                                        // its PCIe groups' slot targets (GpuPlanSink::dst2)
@@ -776,6 +807,22 @@ private:
     float* hit_xs_ = nullptr;
     void* hit_scratch_ = nullptr;
     float *head_mixed_ = nullptr, *head_inj_ = nullptr, *head_logits_ = nullptr;
+    // the two-stage head (NativeHead::planes, q80_vhead.hpp): the head's own q8_1 input (kept for an exact pass on
+    // demand), the exact list's length on the device (written before each window: head_keep), the screen's scratch
+    uint8_t* head_xq_ = nullptr;
+    int32_t* head_keep_d_ = nullptr;
+    void* vhead_scratch_ = nullptr;
+    int head_keep_set_ = 0;                ///< the value head_keep_d_ holds (the arena starts zeroed: every row exact)
+    mutable bool head_screened_ = false;   ///< the last window's head left rows outside the exact list at their bounds
+    int last_head_t_ = 0;                  ///< that window's columns
+    uint64_t head_windows_screened_ = 0, head_windows_exact_ = 0;
+    bool head_screen_recorded() const;     ///< the window graphs read head_keep_d_ (planes, the last stage, not a batch)
+    int head_keep() const;                 ///< the list length this request's readers allow: 1, top_k, or 0 (every row)
+    void set_head_keep(int T);             ///< before a window launch: head_keep_d_ and head_screened_
+    bool head_exact_again() const;         ///< a screened window's head again with every row exact (on cs_, synced by the reader)
+    static bool head_check_on();           ///< STRATA_HEAD_SCREEN_CHECK=1: screened against exact in the same window
+    void head_check(int T, int64_t pos0, const int32_t* out);
+    uint64_t hchk_windows_ = 0, hchk_bad_rows_ = 0, hchk_bad_picks_ = 0, hchk_picks_ = 0, hchk_err_ = 0;
     uint16_t* sh_bf16_ = nullptr;
     uint8_t* arg_scratch_ = nullptr;   ///< argmax_rows' partials and counters
     int32_t* one_ = nullptr;           ///< device {1}: the n_keep of a one-token window, which commits itself

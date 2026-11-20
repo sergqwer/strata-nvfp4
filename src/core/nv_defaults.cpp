@@ -92,6 +92,65 @@ std::vector<std::pair<std::string, std::string>> nv_default_env(int major, int m
             // It only changes which drafts are attempted, and every draft is verified, so the answers cannot drift.
             {"STRATA_SPEC_COST", "1"},
         };
+    } else if (mj == 12 && mn == 0) {
+        // strata-nvfp4 (RTX 5090 class, CUDA 12.0): the speed switches the owner accepted on 2026-11-19 ("on by default when they
+        // cost quality not much more than the run-to-run noise"); STRATA_NVFP4_SM120=0 turns the whole table off, each switch's
+        // own =0 turns it off alone.  Measured on an RTX 5090 with the GPTQ pack (dec/int NOTES-int.md, NOTES-hc8.md, NOTES-gdn.md):
+        if (off("STRATA_NVFP4_SM120") || defaults026) return t;
+        t = {
+            // hc8: the 8-bit hyper-connection read (fused_gr.cu hc8_read.cuh).  Decode struct +3.6% (DFlash2) / +5.8% (MTP spec 8);
+            // teacher-forced argmax 96.10% / KL 0.0152 against the noise floor 96.52% / 0.0118, NLL not worse.
+            {"STRATA_HC_Q8", "1"},
+            // equal prompt chunks, a sub-floor tail included: 66,617 tokens 7,825 -> ~7,080 ms; inside the chunk-order noise.
+            {"STRATA_PREFILL_EQUAL", "2"},
+            // the prompt path's GDN scan on tensor cores, conv + l2 fused (the Linux CUDA default since 2026-11-07), and the
+            // one-pass f16 products of the 2-tile scan: 64K read -2.5% / -0.6% / -2%; first-token KL ~0.001.
+            {"STRATA_GDN_TC", "1"},
+            {"STRATA_GDN_CONVL2", "2"},
+            {"STRATA_GDN_TC_NP", "1"},
+            // the prompt path's smaller buffers (NOTES-gdn.md, the end-of-prompt refill): one expert group's gate/up rows and the
+            // HC scratch in the attention/MoE region with xn16 outside it - fewer borrowed slots (64K 3,663 -> 2,744), refill
+            // 205 -> 154 ms at 64K, 16K -2.1%; same bits by construction (NOTES-int.md: checked)
+            {"STRATA_PF_GROUP_SCRATCH", "1"},
+            {"STRATA_PF_HC_REGION", "2"},
+            // the serve tier as dec/host round 2 measured it (NOTES-host.md R2.3-R2.5, "x3p"): the PCIe share admits AND the tier
+            // ranks every layer's misses against every layer's coldest slots, a lower candidate floor, a slower decay, and the PCIe
+            // share fixed at 0.45 (PcieAuto settles at 0.35).  Struct +10.4%, prose +3.9%, conv +2.7%; misses 4.80 -> 3.91 a layer-window.
+            // It moves experts between GPU and CPU arithmetic, not the numerics (NOTES-int.md: KL against the noise floor).
+            {"STRATA_ADAPT_FETCH", "1"},
+            {"STRATA_ADAPT_ACROSS", "1"},
+            {"STRATA_ADAPT_CAND_MIN", "1.5"},
+            {"STRATA_ADAPT_DECAY", "0.96"},
+            {"STRATA_PCIE_FIXED", "0.45"},   // fixed beat PcieAuto + 0.10 (STRATA_PCIE_AUTO_ADD) on struct and conv
+            // dense_tc (Basalt's int8 tensor-core Q8_0 GEMV, MIT): every dense Q8_0 matrix of a 1..8-row window, exact int32 per
+            // 32-value block, so a column's value does not depend on the window width.  Struct T=8 17.66 -> 17.29 ms/window
+            // (+2.0%), prose unchanged; teacher-forced KL 0.0117-0.0130 against the noise floor 0.0120, NLL not worse.
+            {"STRATA_DENSE_TC", "1"},
+            // staged INT8 attention chunks (Basalt's attn_chunk_v2, MIT): bitwise the Daily kernel's partials, K/V staged by cp.async,
+            // two blocks per SM.  Chunk pass 14.6 -> 7.5 us an attention layer (T~3), conv/prose/uk -0.6..-1.3% ms/window, struct flat.
+            {"STRATA_ATTN_STAGED", "1"},
+            // gdn_mid (host rounds 6-7, Basalt's k_mid structure on our arithmetic): the GDN middle in one persistent launch,
+            // bitwise the chain (gdn_parity section 8; needs DENSE_TC=1); GDN front 81.8 -> 78.4 us a layer (prose).
+            {"STRATA_GDN_MID", "1"},
+            // attention-layer layout (round 8, Basalt's qhalf placement): the q rows of q|gate first, the gate rows on the
+            // queries' branch after the q post on 48 persistent blocks (GATE_GRID; the full grid starved the indexer and K/V
+            // chains), the window graph's nodes at their streams' priorities (indexer branch highest).  Bitwise (dense_tc_rows);
+            // attention front 89 -> 84 us, ms/window struct -1.4%, prose -1.6%, uk -0.5%, conv 0.
+            {"STRATA_QPROJ_HALF", "1"},
+            {"STRATA_QPROJ_GATE_AT", "3"},
+            {"STRATA_QPROJ_GATE_GRID", "48"},
+            {"STRATA_GRAPH_PRIO", "1"},
+            // PDL edges in the doorbell graphs too (until now the all-resident graph only; E21's -1.6..-4.5% there is gone):
+            // bitwise; prose 8.99 -> 8.70 ms/window, struct 15.96 -> 16.03, 16 GB budget struct 48.98 -> 48.42.
+            {"STRATA_DF_PDL", "1"},
+            // dec/front (the layer front at T~3): the next layer's first HC read launched before the CPU-row wait and gated on the
+            // combine's count (with the next attention layer's indexer-tail snapshot on that branch); gdn_mid's tile copies after
+            // its grid wait (their flood held the read up); route + doorbell in one launch, the rows first.  All bitwise;
+            // nsys prose front GDN 77.6 -> ~72, attention 79.1 -> ~75 us.
+            {"STRATA_EARLY_READ", "1"},
+            {"STRATA_GDN_MID_HEAD", "2"},
+            {"STRATA_ROUTE_DB", "2"},
+        };
     }
     return t;
 }
@@ -111,12 +170,14 @@ std::vector<std::string> apply_nv_defaults(int major, int minor) {
     if (!set.empty()) {
         const bool sm86 = mj == 8;
         const bool sm121 = mj == 12 && mn == 1;
+        const bool sm120 = mj == 12 && mn == 0;
         // sm_86 / sm_60: bit-exact switches.  sm_121: the fused prompt path and the FP4-activation NVFP4 prompt round differently from the
         // paths they replace (24 of 24 greedy answers were identical on the Spark; no KL run), so the line does not say "exact".
         std::fprintf(stderr, "strata: %s: %zu %sspeed switches on by default (%s=0 turns them off%s; a switch you set is kept): ",
-                     sm86 ? "sm_86 (Ampere)" : sm121 ? "sm_121 (GB10)" : "sm_60 (Pascal)", set.size(), sm121 ? "" : "exact ",
-                     sm86 ? "STRATA_SM86_PERF" : sm121 ? "STRATA_SM121_PERF" : "STRATA_SM60_PERF",
-                     sm121 ? ", as does STRATA_DEFAULTS=026" : "");
+                     sm86 ? "sm_86 (Ampere)" : sm121 ? "sm_121 (GB10)" : sm120 ? "sm_120 (strata-nvfp4)" : "sm_60 (Pascal)", set.size(),
+                     (sm121 || sm120) ? "" : "exact ",
+                     sm86 ? "STRATA_SM86_PERF" : sm121 ? "STRATA_SM121_PERF" : sm120 ? "STRATA_NVFP4_SM120" : "STRATA_SM60_PERF",
+                     (sm121 || sm120) ? ", as does STRATA_DEFAULTS=026" : "");
         for (size_t i = 0; i < set.size(); ++i) std::fprintf(stderr, "%s%s", i ? " " : "", set[i].c_str() + 7);
         std::fprintf(stderr, "\n");
     }

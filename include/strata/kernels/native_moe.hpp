@@ -25,6 +25,12 @@ void native_moe_combine_multi_hits_added(const float* parts, const float* hits, 
                                          int n_tok, void* stream);
 void native_moe_combine_multi(const float* parts, const float* weights, const float* shared, float* output,
                               int64_t n_embd, int64_t k, int n_tok, void* stream);
+/// dec/front STRATA_EARLY_READ: native_moe_combine_multi's k = 10 vec4 kernel (the same lines, the same values) whose
+/// blocks each add one to *sig after their stores; `_sig_blocks` = the count it adds (0: the call cannot take that path).
+unsigned native_moe_combine_multi_sig_blocks(const float* parts, const float* shared, const float* output, int64_t n_embd,
+                                             int64_t k, int n_tok);
+void native_moe_combine_multi_sig(const float* parts, const float* weights, const float* shared, float* output,
+                                  int64_t n_embd, int64_t k, int n_tok, unsigned* sig, void* stream);
 /// STRATA_VERIFY_RESIDENT: the same, reading every part as `0.0f + hit[i]` - bitwise what a zeroed part row plus
 /// moe_hit_add (parts += hit) gave, without the zero fill and the add launch.
 void native_moe_combine_multi_hits(const float* hits, const float* weights, const float* shared, float* output,

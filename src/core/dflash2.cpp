@@ -1,5 +1,6 @@
 // src/core/dflash2.cpp - see include/strata/core/dflash2.hpp.
 #include "strata/core/dflash2.hpp"
+#include "strata/kernels/q80_vhead.hpp"
 
 #include "strata/core/native_head.hpp"
 #include "strata/core/on_device.hpp"
@@ -363,7 +364,7 @@ bool Dflash2Drafter::bind(const WeightTable& wt, const NativeHead* head, const s
                 return false;
             }
             cudaMemcpy(dv, vocab.data(), vocab.size() * 4, cudaMemcpyHostToDevice);
-            kernels::gather_rows((const uint8_t*) hw, row_bytes, dv, (int64_t) vocab.size(), tmp, nullptr);
+            head->gather(dv, (int64_t) vocab.size(), tmp, nullptr);   // (the GGUF's layout whatever the head holds)
             cudaDeviceSynchronize();
             cudaFree(dv);
         }
@@ -386,7 +387,7 @@ bool Dflash2Drafter::bind(const WeightTable& wt, const NativeHead* head, const s
             return false;
         }
         cudaMemcpy(dv, vocab.data(), vocab.size() * 4, cudaMemcpyHostToDevice);
-        kernels::gather_rows((const uint8_t*) hw, row_bytes, dv, (int64_t) vocab.size(), dhead_, nullptr);
+        head->gather(dv, (int64_t) vocab.size(), dhead_, nullptr);   // (the GGUF's layout whatever the head holds)
         cudaDeviceSynchronize();
         cudaFree(dv);
         vram_ += (uint64_t) ((int64_t) vocab.size() * row_bytes);
@@ -394,6 +395,7 @@ bool Dflash2Drafter::bind(const WeightTable& wt, const NativeHead* head, const s
         head_rows = (int64_t) vocab.size();
     }
     if (!bind_raw(embed, hw, head->type(), head_rows, vocab, err)) return false;
+    head_planes_ = hw == head->weights() && head->planes();   // read in place (STRATA_DF2_HEAD=native, or no vocabulary file)
     std::fprintf(stderr, "strata dflash2: %lld-token draft head (%.1f MiB%s), drafter %.0f MiB of VRAM (%s weights)\n", (long long) n_dvocab_,
                  (double) (n_dvocab_ * row_bytes) / 1048576.0, dhead_shared_ ? ", the MTP drafter's copy, no second one" : "", (double) vram_ / 1048576.0, q4_ ? "Q4_0" : "Q8_0");
     // the pack's selector codebooks as Q4_0 rows (tools/dflash2_pack.py --q4_0-selector; strata_control/drafting.py reads this text from the program to know it can use that pack)
@@ -522,7 +524,9 @@ bool Dflash2Drafter::record_block(cudaStream_t cs, std::string& err, bool rope) 
         if (!skip_part("head")) {
             // the verify window's head kernel (interleaved activations, rows a warp by the card's table): bitwise native_mmvq's output, so the drafts are the same
             static const bool il_on = [] { const char* e = std::getenv("STRATA_DF2_HEAD_IL"); return !(e && e[0] == '0'); }();
-            if (il_on && native_mmvq_il_supported(head_type_, ndraft_, (int) n_dvocab_)) {
+            if (head_planes_) {   // the target's head read in place, as bit planes: the same bits as native_mmvq on its Q8_0 rows
+                q80p_mmvq(head_w_, xq_, logits_, N_, (int) n_dvocab_, ndraft_, cs);
+            } else if (il_on && native_mmvq_il_supported(head_type_, ndraft_, (int) n_dvocab_)) {
                 native_q8_1_interleave(xq_, xil_, N_, ndraft_, cs);
                 native_mmvq_il(head_type_, head_w_, xq_, xil_, logits_, N_, (int) n_dvocab_, ndraft_, cs);
             } else
@@ -595,7 +599,7 @@ bool Dflash2Drafter::clone_alloc(const Dflash2Drafter& parent, std::string& err)
 bool Dflash2Drafter::clone_bind(const Dflash2Drafter& parent, std::string& err) {
     if (!parent.bound_ || !blob_shared_) { err = "dflash2: the parent drafter is not bound"; return false; }
     const OnDevice on_device(device_);
-    embed_ = parent.embed_; head_w_ = parent.head_w_; head_type_ = parent.head_type_; n_dvocab_ = parent.n_dvocab_;
+    embed_ = parent.embed_; head_w_ = parent.head_w_; head_type_ = parent.head_type_; head_planes_ = parent.head_planes_; n_dvocab_ = parent.n_dvocab_;
     dvocab_ = parent.dvocab_; dhead_ = parent.dhead_; dhead_shared_ = true;
     ndraft_ = parent.ndraft_;
     if (cudaMalloc((void**) &logits_, (size_t) kDrafts * (size_t) n_dvocab_ * 4) != cudaSuccess) { err = "dflash2: the slot drafter's draft logits do not fit"; return false; }

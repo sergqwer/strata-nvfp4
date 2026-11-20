@@ -772,10 +772,10 @@ __global__ void force_token_kernel(int32_t* tok, const int32_t* force, int j) {
 }  // namespace
 
 void fetch_blobs(const unsigned long long* src, const int32_t* n, uint8_t* dst, int64_t blob_bytes, int cap, void* stream,
-                 const unsigned long long* dst2) {
+                 const unsigned long long* dst2, int blocks) {
     if (cap <= 0) return;
     if (blob_bytes % 16 != 0) { std::fprintf(stderr, "fetch_blobs: blob size must be a multiple of 16\n"); std::exit(1); }
-    fetch_blobs_kernel<<<48 * 8, 256, 0, (cudaStream_t) stream>>>(src, n, (uint4*) dst, (long long) (blob_bytes / 16), dst2);
+    fetch_blobs_kernel<<<blocks > 0 ? blocks : 48 * 8, 256, 0, (cudaStream_t) stream>>>(src, n, (uint4*) dst, (long long) (blob_bytes / 16), dst2);
     check("fetch_blobs");
 }
 void fetch_blobs(const unsigned long long* src, const int32_t* n, uint8_t* dst, int64_t blob_bytes, int cap, void* stream) {
@@ -1689,6 +1689,53 @@ void wait_copy_i32_from_mapped(const uint32_t* flag, uint32_t value, int32_t* ds
 void wait_flag_ge(const uint32_t* flag, uint32_t value, void* stream) {
     wait_flag_ge_kernel<<<1, 1, 0, (cudaStream_t) stream>>>(flag, value);
     check("wait_flag_ge");
+}
+
+namespace {
+// One thread a block: step k of block b covers bytes [(k * blocks + b) * kStep, + kStep) of the ranges laid end to end.
+// After a step's requests the block reads the step's last 16 bytes (they land once that part is in L2), then looks at
+// the flag again.  Basalt's read-ahead does the same (128 KiB steps, 32 KiB requests).
+constexpr unsigned long long kL2pfStep = 128ull << 10;
+__device__ uint32_t g_l2pf_sink;   // (a static, not an allocation: the launch is recorded inside a graph capture)
+__global__ void l2_prefetch_until_kernel(L2Prefetch pf, const volatile uint32_t* flag, uint32_t value) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900 && !defined(__HIPCC__)
+    if (threadIdx.x != 0 || *flag >= value) return;
+    unsigned long long total = 0;
+    for (int r = 0; r < kL2pfRanges; ++r) total += pf.n[r];
+    uint32_t acc = 0;
+    for (unsigned long long o0 = (unsigned long long) blockIdx.x * kL2pfStep; o0 < total;
+         o0 += (unsigned long long) gridDim.x * kL2pfStep) {
+        const unsigned long long o1 = min(o0 + kL2pfStep, total);
+        const char* last = nullptr;
+        for (unsigned long long o = o0; o < o1;) {
+            int r = 0;
+            unsigned long long ro = o;
+            while (r < kL2pfRanges - 1 && ro >= pf.n[r]) { ro -= pf.n[r]; ++r; }
+            const unsigned long long take = min(min(o1 - o, pf.n[r] - ro), 32768ull);
+            const char* src = (const char*) pf.p[r] + ro;
+            if (take >= 16) {
+                asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" ::"l"(src), "r"((unsigned) (take & ~15ull)) : "memory");
+                last = src + (take & ~15ull) - 16;
+            }
+            o += take;
+        }
+        if (last != nullptr) {
+            const uint4 w = __ldcg((const uint4*) last);
+            acc ^= w.x ^ w.y ^ w.z ^ w.w;
+        }
+        if (*flag >= value) break;
+    }
+    if (acc == 0x9e3779b9u) g_l2pf_sink = acc;   // keeps the reads (practically never written)
+#else
+    (void) pf; (void) flag; (void) value;
+#endif
+}
+}  // namespace
+
+void l2_prefetch_until(const L2Prefetch& pf, const uint32_t* flag, uint32_t value, int blocks, void* stream) {
+    if (pf.n[0] == 0 || blocks <= 0) return;
+    l2_prefetch_until_kernel<<<blocks, 32, 0, (cudaStream_t) stream>>>(pf, flag, value);
+    check("l2_prefetch_until");
 }
 
 void wait_flag_ge_stamped(const uint32_t* flag, uint32_t value, unsigned long long* t_in, unsigned long long* t_out,

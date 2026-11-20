@@ -68,6 +68,8 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
                           src/kernels/cuda/elementwise.cu
                           src/kernels/cuda/bf16_gemv.cu
                           src/kernels/cuda/native_mmvq.cu
+                          src/kernels/cuda/q80_vhead.cu
+                          src/kernels/cuda/dense_tc.cu   # strata-nvfp4: Basalt's int8 tensor-core dense (STRATA_DENSE_TC)
                           src/kernels/cuda/native_bf16.cu
                           src/kernels/cuda/native_gr_norm.cu
                           src/kernels/cuda/native_moe.cu
@@ -96,6 +98,10 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
                           src/kernels/cuda/qsa_pattn.cu
                           src/kernels/cuda/verify_kernels.cu
                           src/kernels/cuda/dflash2.cu
+                          src/kernels/cuda/draft_proxy.cu
+                          src/kernels/cuda/gdn_mid.cu   # dec/host round 6: Basalt's k_mid structure (STRATA_GDN_MID)
+                          src/kernels/cuda/mtp_cond.cu   # strata-nvfp4: the MTP chain as one conditional graph
+                          src/kernels/cuda/mtp_route.cu   # strata-nvfp4: the MTP router + its groups in one launch
                           src/kernels/cuda/iq_kernels.cu
                           src/kernels/ngram.cpp
                           src/ngram/ple_reader.cpp
@@ -234,7 +240,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   target_include_directories(strata_kernels PRIVATE third_party/ggml)
   # Match the pinned llama.cpp CUDA arithmetic contract for this adapter only.
   if(STRATA_ENABLE_CUDA)
-    set_source_files_properties(src/kernels/cuda/native_mmvq.cu src/kernels/cuda/native_bf16.cu
+    set_source_files_properties(src/kernels/cuda/native_mmvq.cu src/kernels/cuda/q80_vhead.cu src/kernels/cuda/native_bf16.cu
       src/kernels/cuda/native_gr_norm.cu
       src/kernels/cuda/native_moe.cu
       src/kernels/cuda/native_gdn.cu
@@ -247,6 +253,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
       src/kernels/cuda/native_flash_attn.cu
       src/kernels/cuda/native_qsa_indexer.cu
       src/kernels/cuda/native_qsa_score.cu
+      src/kernels/cuda/mtp_route.cu
       PROPERTIES COMPILE_OPTIONS "$<IF:$<BOOL:${STRATA_HIP_GFX906}>,,--use_fast_math>")
   elseif(STRATA_ENABLE_HIP)
     # Keep Q8_K's multiply and magic-bias rounding as separate FP32 operations on HIP; contraction to an
@@ -852,7 +859,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
       set_tests_properties(dma_batch_registered_parity PROPERTIES TIMEOUT 120)
     endif()
     add_executable(gdn_rec_parity src/prefill/gdn_rec_parity.cu)
-    target_link_libraries(gdn_rec_parity PRIVATE ${_strata_gpu_runtime_target})
+    target_link_libraries(gdn_rec_parity PRIVATE strata_prefill ${_strata_gpu_runtime_target})   # strata-nvfp4: the split plan's NP variants
     add_test(NAME gdn_rec_parity COMMAND gdn_rec_parity)
     # STRATA_GDN_TC=1: the tensor-core helpers of the scan, each on one warp against a double-precision reference.  Any sm_80+
     # card runs them; the scan itself needs 122 KB of shared memory a block (sm_80, sm_90), where gdn_rec_parity prints
@@ -992,6 +999,11 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   target_include_directories(gr_v4_check PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(gr_v4_check PRIVATE strata_kernels ${_strata_gpu_runtime_target})
   add_test(NAME gr_v4_check COMMAND gr_v4_check --selftest)
+  # hc8 (STRATA_HC_Q8=1 on CUDA): window invariance, graphs and accuracy against fp64; --bench: time per read
+  add_executable(gr_hc8_check src/kernels/gr_hc8_check.cpp)
+  target_include_directories(gr_hc8_check PRIVATE ${_strata_gpu_include_directories})
+  target_link_libraries(gr_hc8_check PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+  add_test(NAME gr_hc8_check COMMAND gr_hc8_check --selftest)
 
   add_executable(gdn_parity src/kernels/gdn_parity.cpp)
   target_include_directories(gdn_parity PRIVATE ${_strata_gpu_include_directories})
@@ -1022,6 +1034,17 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   target_include_directories(s2_gemv_q8_parity PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(s2_gemv_q8_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
   add_test(NAME s2_gemv_q8_parity COMMAND s2_gemv_q8_parity --selftest)
+
+  # the Q8_0 head's bit planes and two-stage verify head against native_mmvq (q80_vhead.hpp)
+  add_executable(q80p_parity src/kernels/q80p_parity.cpp)
+  target_include_directories(q80p_parity PRIVATE ${_strata_gpu_include_directories})
+  target_link_libraries(q80p_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+  add_test(NAME q80p_parity COMMAND q80p_parity --selftest)
+  # the MTP proxy draft head on the bit-plane head against plain Q8_0 rows (draft_proxy.hpp)
+  add_executable(draft_proxy_parity src/kernels/draft_proxy_parity.cpp)
+  target_include_directories(draft_proxy_parity PRIVATE ${_strata_gpu_include_directories})
+  target_link_libraries(draft_proxy_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+  add_test(NAME draft_proxy_parity COMMAND draft_proxy_parity --selftest)
 
   add_executable(sampler_parity src/kernels/sampler_parity.cpp)
   target_include_directories(sampler_parity PRIVATE ${_strata_gpu_include_directories})
@@ -1058,6 +1081,13 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   target_include_directories(rope_parity PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(rope_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
   add_test(NAME rope_parity COMMAND rope_parity --selftest)
+  add_executable(qsa_post_parity src/kernels/qsa_post_parity.cpp)   # dec/int: kv_post_rot_q8
+  target_include_directories(qsa_post_parity PRIVATE ${_strata_gpu_include_directories})
+  target_link_libraries(qsa_post_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+  add_test(NAME qsa_post_parity COMMAND qsa_post_parity)
+  add_executable(q81_div_parity src/kernels/q81_div_parity.cu)   # dec/int: fused vs separate q8_1 division
+  target_include_directories(q81_div_parity PRIVATE ${_strata_gpu_include_directories})
+  target_link_libraries(q81_div_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
 
   add_executable(quantize_act_parity src/kernels/quantize_act_parity.cpp)
   target_include_directories(quantize_act_parity PRIVATE ${_strata_gpu_include_directories})

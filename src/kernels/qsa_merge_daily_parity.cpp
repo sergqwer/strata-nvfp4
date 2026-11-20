@@ -281,6 +281,22 @@ struct Harness {
                 daily_same = false;
             }
         }
+        // dec/int: the staged INT8 chunk kernel (STRATA_ATTN_STAGED) on the same inputs, merged by both mergers
+        if (c.fmt == kFmtInt8) {
+            ck(cudaMemset(scratch, 0xFF, scratch_bytes), "scratch NaN refill");
+            k::qsa_decode_attn_chunks_only(q, pools.view(c.fmt, table), ids, steps, c.cap, s, scratch, c.n_q, 2, nullptr);
+            for (int v2 = 0; v2 < 2; ++v2) {
+                ck(cudaMemset(attn_new, 0x7F, n * 4), "attn_new refill");
+                k::qsa_decode_attn_merge_only(steps, c.cap, s, scratch, attn_new, c.n_q, v2, nullptr);
+                ck(cudaDeviceSynchronize(), "staged chunk sync");
+                ck(cudaMemcpy(b.data(), attn_new, n * 4, cudaMemcpyDeviceToHost), "staged chunk output");
+                if (std::memcmp(a.data(), b.data(), n * 4) != 0) {
+                    std::printf("FAIL staged chunk kernel + %s differs from upstream reference\n",
+                                v2 ? "attn_merge_v2_kernel" : "attn_merge_kernel");
+                    daily_same = false;
+                }
+            }
+        }
         return same && nan == 0 && entry_same && daily_same;
     }
 };
@@ -309,7 +325,9 @@ void bench(Harness& hx, std::mt19937& rng) {
                 ck(cudaDeviceSynchronize(), "bench prepare");
                 double us_ch[3] = {};
                 for (int arm = 0; arm < 3; ++arm) {   // B1 -> A -> B2: Daily, upstream, Daily chunk kernel
-                    const int daily = arm == 1 ? 0 : 1;
+                    // dec/int: STRATA_BENCH_STAGED=1 times the staged INT8 kernel (B) against the Daily's (A)
+                    static const bool bs = std::getenv("STRATA_BENCH_STAGED") != nullptr;
+                    const int daily = bs && fmt == kFmtInt8 ? (arm == 1 ? 1 : 2) : (arm == 1 ? 0 : 1);
                     auto chunks = [&] {
                         k::qsa_decode_attn_chunks_only(hx.q, hx.pools.view(fmt, hx.table), hx.ids, hx.steps, c.cap,
                                                        hx.s, hx.scratch, n_q, daily, nullptr);

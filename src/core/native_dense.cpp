@@ -184,7 +184,26 @@ bool bf16_as_q8_0(const strata::TensorInfo& tensor, const WeightRef& ref) {
            ref.ne0 > 0 && ref.ne0 <= INT_MAX && ref.ne1 > 0 && ref.ne1 <= INT_MAX && ref.ne0 % 32 == 0 &&
            tensor.shape[0] == (uint64_t) ref.ne0 && tensor.shape[1] == (uint64_t) ref.ne1;
 }
-struct DeviceFree { void operator()(void* p) const { if (p) cudaFree(p); } };
+// dec/host round 3, STRATA_DENSE_SLAB (default 1; 0 = one cudaMalloc per matrix as before): `load` places the
+// matrices and their 8-bit hyper-connection copies in one allocation sized by a dry pass over the same rules (Basalt's
+// NativeDense does the same), so no matrix pays the driver's 2 MiB granule rounding.  A pointer inside a slab is
+// never freed on its own: the slab is freed whole by `release`.
+bool dense_slab_on() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_DENSE_SLAB"); return v == nullptr || v[0] != '0'; }();
+    return on;
+}
+std::mutex g_slab_mu;
+std::vector<std::pair<uintptr_t, uintptr_t>> g_slabs;   // [begin, end) of every live slab
+bool in_dense_slab(const void* p) {
+    const uintptr_t a = (uintptr_t) p;
+    std::lock_guard<std::mutex> lk(g_slab_mu);
+    for (const auto& s : g_slabs)
+        if (a >= s.first && a < s.second) return true;
+    return false;
+}
+constexpr uint64_t kSlabAlign = 256;
+uint64_t slab_round(uint64_t b) { return (b + kSlabAlign - 1) / kSlabAlign * kSlabAlign; }
+struct DeviceFree { void operator()(void* p) const { if (p && !in_dense_slab(p)) cudaFree(p); } };
 using DevicePtr = std::unique_ptr<void, DeviceFree>;
 struct Pending {
     WeightRef* ref;
@@ -312,7 +331,19 @@ void NativeDense::release() {
                 if (b != nullptr && std::find(weights_.begin(), weights_.end(), b) != weights_.end()) b = nullptr;
     for (const void* p : packed_keys_) strata::kernels::native_q8_0_packed_unregister(p);
     if (scratch_) cudaFree(scratch_);
-    for (void* p : weights_) cudaFree(p);
+    for (void* p : weights_)
+        if (!in_dense_slab(p)) cudaFree(p);
+    if (slab_ != nullptr) {
+        {
+            std::lock_guard<std::mutex> lk(g_slab_mu);
+            g_slabs.erase(std::remove_if(g_slabs.begin(), g_slabs.end(),
+                                         [&](const std::pair<uintptr_t, uintptr_t>& s) { return s.first == (uintptr_t) slab_; }),
+                          g_slabs.end());
+        }
+        cudaFree(slab_);
+        slab_ = nullptr;
+        slab_cap_ = slab_used_ = 0;
+    }
     scratch_ = nullptr;
     weights_.clear();
     packed_keys_.clear();
@@ -348,6 +379,70 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
         uint64_t split_count = 0, split_tensors = 0;
         std::set<uint64_t> split_numbers;
         bool have_architecture = false;
+        // STRATA_DENSE_SLAB: the bytes the loops below allocate, by their own rules (a dry pass; a shortfall falls back
+        // to cudaMalloc for the rest, a surplus stays unused)
+        if (dense_slab_on()) {
+            uint64_t need = 0;
+            std::set<std::string> dry_seen, dry_hc;
+            for (const auto& path : shards) {
+                const strata::GgufFile gguf(path);
+                for (const auto& tensor : gguf.tensors()) {
+                    if (!eligible(tensor, include_ple_key) || outside(tensor.name)) continue;
+                    if (!in_range(tensor.name) && tensor.name.find("ple") == std::string::npos) continue;
+                    if (!dry_seen.insert(tensor.name).second) continue;
+                    const auto found = table.table_.find(tensor.name);
+                    if (found == table.table_.end()) continue;
+                    const WeightRef& ref = found->second;
+                    if (bf16_as_q8_0(tensor, ref)) { need += slab_round((uint64_t) ref.ne0 * (uint64_t) ref.ne1 / 32 * 34); continue; }
+                    if (!strata::kernels::native_mmvq_supported(tensor.type)) continue;
+                    if (tensor.name == "blk.1.ple_key.weight" && !ref.quantized()) continue;
+                    if (!ref.quantized() || tensor.shape.size() != 2 || ref.ne0 <= 0 || ref.ne1 <= 0) continue;
+                    const uint64_t bytes = strata::kernels::native_mmvq_weight_bytes(tensor.type, (int) ref.ne0, (int) ref.ne1);
+                    need += slab_round(bytes);
+                    if (tensor.type == 8 && tensor.name != "blk.1.ple_key.weight" && strata::kernels::native_q8_0_packed_enabled() &&
+                        strata::kernels::native_q8_0_packed_eligible((int) ref.ne0, (int) ref.ne1))
+                        need += slab_round(bytes);
+                }
+                if (hc_q8_env())
+                    for (const auto& tensor : gguf.tensors()) {
+                        const bool f32_inject = hc_q8_inject_env() && tensor.type == 0 && tensor.name.ends_with("_inject.weight");
+                        if ((tensor.type != 8 && !f32_inject) || !hc_q8_name(tensor.name) || tensor.shape.size() != 2) continue;
+                        if (hc_q8_stage_local() && (outside(tensor.name) || !in_range(tensor.name))) continue;
+                        const auto found = table.table_.find(tensor.name);
+                        if (found == table.table_.end() || found->second.hc_q8 != nullptr || !dry_hc.insert(tensor.name).second) continue;
+                        need += slab_round((uint64_t) tensor.shape[0] / 32 * 34 * (uint64_t) tensor.shape[1]);
+                    }
+            }
+            if (hc_q8_env())
+                for (const auto& [name, ref] : table.table_) {
+                    if (ref.hc_q8 != nullptr || dry_hc.count(name) || name.rfind("blk.", 0) != 0 || !in_range(name) ||
+                        !hc_q8_name(name) || !(name.ends_with("_down.weight") || name.ends_with("_up.weight"))) continue;
+                    if (ref.data == nullptr && ref.resident) continue;
+                    need += slab_round((uint64_t) ref.elements / 32 * 34);
+                }
+            if (need > 0 && slab_ == nullptr) {
+                void* s = nullptr;
+                if (cudaMalloc(&s, need) == cudaSuccess) {
+                    slab_ = s;
+                    slab_cap_ = need;
+                    slab_used_ = 0;
+                    std::lock_guard<std::mutex> lk(g_slab_mu);
+                    g_slabs.emplace_back((uintptr_t) s, (uintptr_t) s + need);
+                } else {
+                    (void) cudaGetLastError();   // no room for one block: the per-matrix allocations as before
+                }
+            }
+        }
+        // a matrix's device memory: from the slab while it has room, else its own cudaMalloc
+        auto dense_alloc = [&](void** p, uint64_t bytes) -> cudaError_t {
+            const uint64_t r = slab_round(bytes);
+            if (slab_ != nullptr && slab_used_ + r <= slab_cap_) {
+                *p = (char*) slab_ + slab_used_;
+                slab_used_ += r;
+                return cudaSuccess;
+            }
+            return cudaMalloc(p, bytes);
+        };
         for (const auto& path : shards) {
             strata::GgufFile gguf(path);
             const auto* count = gguf.get("split.count");
@@ -426,7 +521,7 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
                     const uint64_t n = (uint64_t) ref.ne0 * (uint64_t) ref.ne1;
                     const std::vector<uint8_t> q8 = q8_0_of_bf16((const uint16_t*) gguf.tensor_data(tensor), n);
                     void* allocation = nullptr;
-                    auto status = cudaMalloc(&allocation, q8.size());
+                    auto status = dense_alloc(&allocation, q8.size());
                     DevicePtr data(allocation);
                     if (status == cudaSuccess) status = cudaMemcpy(data.get(), q8.data(), q8.size(), cudaMemcpyHostToDevice);
                     if (status != cudaSuccess) {
@@ -451,7 +546,7 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
                 const auto bytes = strata::kernels::native_mmvq_weight_bytes(
                     tensor.type, (int) ref.ne0, (int) ref.ne1);
                 void* allocation = nullptr;
-                auto status = cudaMalloc(&allocation, bytes);
+                auto status = dense_alloc(&allocation, bytes);
                 DevicePtr data(allocation);
                 if (status == cudaSuccess)
                     status = cudaMemcpy(data.get(), gguf.tensor_data(tensor), bytes, cudaMemcpyHostToDevice);
@@ -478,7 +573,7 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
                     strata::kernels::native_q8_0_pack_host(gguf.tensor_data(tensor), host.data(), (int) ref.ne0,
                                                            (int) ref.ne1);
                     void* packed_allocation = nullptr;
-                    auto packed_status = cudaMalloc(&packed_allocation, bytes);
+                    auto packed_status = dense_alloc(&packed_allocation, bytes);
                     packed.reset(packed_allocation);
                     if (packed_status == cudaSuccess)
                         packed_status = cudaMemcpy(packed.get(), host.data(), bytes, cudaMemcpyHostToDevice);
@@ -524,7 +619,7 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
                     void* p = nullptr;
                     std::vector<uint8_t> q8;
                     if (f32_inject) q8 = q8_0_of((const float*) gguf.tensor_data(tensor), (uint64_t) ref.ne0 * (uint64_t) ref.ne1);
-                    if (cudaMalloc(&p, bytes) != cudaSuccess ||
+                    if (dense_alloc(&p, bytes) != cudaSuccess ||
                         cudaMemcpy(p, f32_inject ? (const void*) q8.data() : gguf.tensor_data(tensor), bytes,
                                    cudaMemcpyHostToDevice) != cudaSuccess) {
                         err = "native dense (STRATA_HC_Q8) upload " + tensor.name; return false;
@@ -552,7 +647,7 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
                 }
                 const uint64_t nb = (uint64_t) ref.elements / 32, bytes = nb * 34;
                 void* p = nullptr;
-                if (cudaMalloc(&p, bytes) != cudaSuccess) { err = "native dense (STRATA_HC_Q8) alloc " + name; return false; }
+                if (dense_alloc(&p, bytes) != cudaSuccess) { err = "native dense (STRATA_HC_Q8) alloc " + name; return false; }
                 weights_.push_back(p);
                 if (skipped) {
                     std::vector<uint16_t> host;
@@ -573,6 +668,25 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
                 err = "native dense (STRATA_HC_Q8): quantizing the projections failed"; return false;
             }
         }
+#if !defined(STRATA_USE_HIP)
+        if (hc_q8_env() && strata::kernels::fused_gr_hc8_on()) {
+            // CUDA: the down / up copies in hc8's layout (int8 codes, then fp16 scales: the same bytes) for the sm_120 read;
+            // STRATA_HC8_NV=0 keeps the Q8_0 blocks and the gfx12-built kernels.  The inject copies stay Q8_0 (hc8 reads
+            // the bf16 inject rows).
+            uint64_t repacked = 0;
+            for (auto& [name, ref] : table.table_) {
+                if (ref.hc_q8 == nullptr || ref.elements % 32 != 0 ||
+                    !(name.ends_with("_down.weight") || name.ends_with("_up.weight"))) continue;
+                if (!strata::kernels::fused_gr_hc8_repack(const_cast<void*>(ref.hc_q8), (int64_t) ref.elements / 32)) {
+                    err = "native dense (STRATA_HC_Q8): the hc8 repack of " + name + " failed"; return false;
+                }
+                ++repacked;
+            }
+            if (repacked)
+                std::fprintf(stderr, "strata: STRATA_HC_Q8: %llu hyper-connection projections repacked for the hc8 read\n",
+                             (unsigned long long) repacked);
+        }
+#endif
         if (hc_q8_env()) {   // the scratches of hc_bf16_view (rows without a bf16 copy), here and not on first use
             uint64_t elems = 0;
             for (const auto& [name, ref] : table.table_)
@@ -618,6 +732,14 @@ bool NativeDense::load(const std::vector<std::string>& shards, WeightTable& tabl
             std::fprintf(stderr, "native dense: STRATA_Q8_PACKED=1 packed %zu Q8_0 matrices for decode (+%.1f MiB)\n",
                          packed_count, packed_bytes / 1048576.0);
         scratch_ = scratch.release();
+        if (std::getenv("STRATA_TRACE") != nullptr) {   // dec/host round 3: where load's device memory went
+            uint64_t sc = 0;
+            for (const auto& [name, ref] : table.table_)
+                if (ref.hc_q8 != nullptr && ref.data == nullptr) sc = (std::max)(sc, (uint64_t) ref.elements);
+            std::fprintf(stderr, "strata trace: native dense slab %.1f of %.1f MiB used; q8_1 scratch %.1f MiB; hc bf16 scratches 4 x %.1f MiB\n",
+                         (double) slab_used_ / 1048576.0, (double) slab_cap_ / 1048576.0,
+                         (double) strata::kernels::native_q8_1_bytes(max_in) / 1048576.0, (double) sc * 2.0 / 1048576.0);
+        }
         bytes_ = total + hc_q8_bytes;
         layer_bytes_ = std::move(per_layer);
         allocated_ = allocated;

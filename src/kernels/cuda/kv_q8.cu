@@ -73,6 +73,82 @@ __global__ void kv_append_q8_kernel(int8_t* __restrict__ k_q, int8_t* __restrict
     }
 }
 
+// dec/int (STRATA_KV_POST): fwht256_kernel (kv_q4.cu) on a row of K or V, then kv_append_q8_kernel<true> on it - both
+// translation units without fast-math, as this one; one block per (row, K / V), 256 threads, the row in shared memory
+__global__ void __launch_bounds__(256) kv_rot_append_q8_kernel(float* __restrict__ kcur, float* __restrict__ vcur,
+        int8_t* __restrict__ k_q, int8_t* __restrict__ v_q, uint16_t* __restrict__ k_scale, uint16_t* __restrict__ v_scale,
+        const int32_t* __restrict__ table, const int32_t* __restrict__ step, int step_stride, int kv_heads, int page_size,
+        KvHostPools host) {
+    constexpr int n_cols = 256;
+    const int tid = threadIdx.x;
+    const int row = blockIdx.x;   // token * kv_heads + head
+    const bool is_v = blockIdx.y == 1;
+    __shared__ float buf[n_cols];
+    __shared__ float warp_max[8];
+    float* grow = (is_v ? vcur : kcur) + (size_t) row * n_cols;
+    if (tid < 32) {
+        constexpr int warp_size = 32, N = 256, el_w = N / warp_size;
+        const int lane = tid;
+        float reg[el_w];
+#pragma unroll
+        for (int i = 0; i < el_w; ++i) reg[i] = grow[i * warp_size + lane] * (1.0f / 16.0f);
+#pragma unroll
+        for (int h = 1; h < warp_size; h *= 2) {
+#pragma unroll
+            for (int j = 0; j < el_w; ++j) {
+                const float val = reg[j];
+                const float val2 = __shfl_xor_sync(0xffffffffu, val, h, warp_size);
+                reg[j] = (lane & h) == 0 ? val + val2 : val2 - val;
+            }
+        }
+#pragma unroll
+        for (int h = warp_size; h < N; h *= 2) {
+            const int stp = h / warp_size;
+#pragma unroll
+            for (int j = 0; j < el_w; j += 2 * stp) {
+#pragma unroll
+                for (int k = 0; k < stp; ++k) {
+                    const float x = reg[j + k];
+                    const float y = reg[j + k + stp];
+                    reg[j + k] = x + y;
+                    reg[j + k + stp] = x - y;
+                }
+            }
+        }
+#pragma unroll
+        for (int i = 0; i < el_w; ++i) buf[i * warp_size + lane] = reg[i];
+    }
+    __syncthreads();
+    const float x = buf[tid];
+    grow[tid] = x;
+    const int tok = row / kv_heads, h = row % kv_heads, g = tid / KV_Q8_GROUP, t = tid % KV_Q8_GROUP;
+    constexpr int groups = n_cols / KV_Q8_GROUP;
+    const long long pos = (long long) __ldg(step + (size_t) tok * step_stride + kStepPos);
+    float a = fabsf(x);
+    for (int o = 16; o > 0; o >>= 1) a = fmaxf(a, __shfl_xor_sync(0xffffffffu, a, o));
+    if ((tid & 31) == 0) warp_max[tid >> 5] = a;
+    __syncthreads();
+    const float amax = fmaxf(warp_max[2 * g], warp_max[2 * g + 1]);
+    const uint16_t sbits = f16_from_f32(amax / 127.0f);
+    const float sf = f32_from_f16(sbits);
+    int q = 0;
+    if (sf > 0.0f) {
+        q = __float2int_rn(x / sf);
+        q = q < -127 ? -127 : (q > 127 ? 127 : q);
+    }
+    const long long page = (long long) table[pos / page_size];
+    if (page >= 0) {
+        const long long r = (page * kv_heads + h) * page_size + (pos % page_size);
+        (is_v ? v_q : k_q)[r * n_cols + g * KV_Q8_GROUP + t] = (int8_t) q;
+        if (t == 0) (is_v ? v_scale : k_scale)[r * groups + g] = sbits;
+    }
+    if (host.k_q != nullptr) {
+        const long long r = ((pos / page_size) * kv_heads + h) * page_size + (pos % page_size);
+        (is_v ? host.v_q : host.k_q)[r * n_cols + g * KV_Q8_GROUP + t] = (int8_t) q;
+        if (t == 0) (is_v ? host.v_scale : host.k_scale)[r * groups + g] = sbits;
+    }
+}
+
 // One thread = 4 consecutive values of one cell and head (as the FP16 gather does with uint2).  This is the gather
 // the ready-made engine runs; the experimental build's 8-wide kernel is below it.
 __global__ void kv_gather_q8_kernel(const int8_t* __restrict__ k_q, const int8_t* __restrict__ v_q,
@@ -200,6 +276,27 @@ void kv_append_q8_steps(int8_t* k_q, int8_t* v_q, uint16_t* k_scale, uint16_t* v
         k_q, v_q, k_scale, v_scale, page_table, step, kcur, vcur, (int) s.n_head_kv, (int) s.head_dim,
         (int) s.page_size, host ? *host : KvHostPools{}, step_stride, cur_stride);
     check("kv_append_q8 (steps) launch");
+}
+
+bool kv_rot_append_q8_usable(int head_dim) {
+    static const bool on = [] { const char* e = std::getenv("STRATA_KV_POST"); return !(e != nullptr && e[0] == '0'); }();
+    return on && head_dim == 256 && KV_Q8_GROUP == 64;
+}
+
+void kv_rot_append_q8(float* kcur, float* vcur, int8_t* k_q, int8_t* v_q, uint16_t* k_scale, uint16_t* v_scale,
+                      const int32_t* page_table, const int32_t* step, int step_stride, int n_tok, const QsaShapes& s,
+                      const KvHostPools* host, void* stream) {
+    validate(s, "kv_rot_append_q8");
+    if (n_tok < 1) return;
+    if (s.head_dim != 256 || n_tok * s.n_head_kv > 65535) {
+        std::fprintf(stderr, "kv_q8: kv_rot_append_q8: head_dim %lld / %d rows not supported\n", (long long) s.head_dim,
+                     (int) (n_tok * s.n_head_kv));
+        std::exit(1);
+    }
+    kv_rot_append_q8_kernel<<<dim3((unsigned) (n_tok * s.n_head_kv), 2u), 256, 0, (cudaStream_t) stream>>>(
+        kcur, vcur, k_q, v_q, k_scale, v_scale, page_table, step, step_stride, (int) s.n_head_kv, (int) s.page_size,
+        host ? *host : KvHostPools{});
+    check("kv_rot_append_q8 launch");
 }
 
 void kv_gather_q8_step(const int8_t* k_q, const int8_t* v_q, const uint16_t* k_scale, const uint16_t* v_scale,

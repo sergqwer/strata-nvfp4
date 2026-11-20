@@ -22,6 +22,8 @@ def tray_args(data: Path) -> list[str]:
 
 class ForkGptq(unittest.TestCase):
     def setUp(self):
+        self.env = mock.patch.dict("os.environ", {"STRATA_AUTO_NEW_MTP": "0"})   # the tests below are the old Auto; test_auto_new_mtp lifts it
+        self.env.start()
         self.tmp = tempfile.TemporaryDirectory()
         self.data = Path(self.tmp.name) / "qwen-nvfp4-gptq"
         (self.data / drafting.FOLDER).mkdir(parents=True)
@@ -32,6 +34,7 @@ class ForkGptq(unittest.TestCase):
         self.ready.start()
 
     def tearDown(self):
+        self.env.stop()
         self.ready.stop()
         self.tmp.cleanup()
 
@@ -53,6 +56,37 @@ class ForkGptq(unittest.TestCase):
         self.assertEqual(drafting.data_dir_of(tray_args(self.data)), self.data)
         up = Path(self.tmp.name) / "up"
         self.assertEqual(drafting.data_dir_of(["--pack", str(up / "packs" / "IQ3_S")]), up)     # upstream's layout unchanged
+
+    def test_auto_new_mtp(self):
+        self.env.stop()
+        self.env = mock.patch.dict("os.environ", {"STRATA_AUTO_NEW_MTP": ""})
+        self.env.start()
+        # owner 2026-11-19: Auto on CUDA is the MTP with Basalt's drafting (two-stage head, --mtp-cum auto, --spec 8) for every set, every card
+        with mock.patch.object(drafting, "FORK_MTP_DEV_TUNED", str(Path(self.tmp.name) / "none")):
+            for name in NAMES + OTHERS:
+                for vram in (32607, 16303):
+                    decision, args = self.start(name, vram)
+                    self.assertEqual(decision.drafter, "mtp", name)
+                    self.assertNotIn("--draft", args)
+                    self.assertNotIn("--spec-min-p", args)
+                    self.assertEqual(args[args.index("--mtp") + 1], str(self.data / "mtp"))          # no tuned layer here: the set's own
+                    self.assertEqual(args[args.index("--mtp-head") + 1], "proxy")
+                    self.assertEqual(args[args.index("--mtp-cum") + 1], "auto")
+                    self.assertEqual(args[args.index("--spec") + 1], "8")
+                    self.assertEqual(args.count("--spec"), 1)
+            tuned = self.data / "mtp" / drafting.FORK_MTP_TUNED
+            tuned.mkdir()
+            (tuned / "experts.bin").write_bytes(b"x")
+            (tuned / "dense.bin").write_bytes(b"x")
+            decision, args = self.start(NAMES[0], 32607)
+            self.assertEqual(args[args.index("--mtp") + 1], str(tuned))                         # the tuned layer where it is here
+        self.assertEqual(self.start(NAMES[1], 32607, drafting_choice="dflash2")[0].drafter, "dflash2")    # a named DFlash2 still wins
+        with mock.patch.object(drafting, "engine_has_fork_mtp", lambda exe: False):              # an engine without the flags: as before
+            decision, args = self.start(NAMES[1], 32607)
+        self.assertEqual(decision.drafter, "dflash2")
+        self.assertNotIn("--mtp-head", args)
+        decision, args = self.start(NAMES[1], 32607, backend="hip", archs=("gfx1201",))        # not CUDA: as before
+        self.assertNotIn("--mtp-head", args)
 
     def test_auto_dflash2_on_the_measured_card(self):
         for name in NAMES:

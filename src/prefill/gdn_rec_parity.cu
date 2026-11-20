@@ -1020,7 +1020,7 @@ double max_rel_f64(const float* a, const double* ref, size_t n) {   // max |a - 
 }
 // a recurrence of gdn_rec_chunked's shape (the FP32 chunked pair, the tensor-core scan) on the inputs given
 using RecLaunch = cudaError_t (*)(float*, const float*, const float*, const float*, float*, int64_t, cudaStream_t);
-int check_variant(const Inputs& in, const char* label, RecLaunch launch, const char* needs) {
+int check_variant(const Inputs& in, const char* label, RecLaunch launch, const char* needs, double tol = 1e-4) {
     const int64_t T = in.T;
     const size_t st = (size_t) S * HV * S, oc_n = (size_t) T * HV * S;
     float* s0 = dalloc<float>(st);
@@ -1039,7 +1039,7 @@ int check_variant(const Inputs& in, const char* label, RecLaunch launch, const c
     ck(e, label);
     ck(cudaDeviceSynchronize(), label);
     const double eo = max_rel(o0, o1, oc_n), es = max_rel(s0, s1, st);
-    const bool bad = !(eo < 1e-4) || !(es < 1e-4);
+    const bool bad = !(eo < tol) || !(es < tol);
     std::printf("%s T=%-6lld %s: output %.2e, state %.2e (max |diff| / max |value|)\n", bad ? "FAIL" : "    ",
                 (long long) T, label, eo, es);
     if (T <= 8192) {   // both against FP64 (its output: 8 bytes a value, so not at 32K)
@@ -1063,6 +1063,32 @@ constexpr const char* kTcNeeds = "sm_80+, 48 SMs, 122 KB a block";
 int check_tc(int64_t T, uint64_t seed) {
     Inputs in(T, seed);
     return check_variant(in, "tc (STRATA_GDN_TC=1)", gdn_rec_tc, kTcNeeds);
+}
+// strata-nvfp4: the split plan of src/prefill/kernels.cu (the 99-KB cards: sm_86 / 89 / 120) with its NP (STRATA_GDN_TC_NP)
+// and tile variants, linked from strata_prefill
+}  // namespace
+namespace strata::prefill {
+cudaError_t gdn_rec_tc_split_for_test(float* state, const float* h, const float* gate, const float* beta, float* y, int64_t T,
+                                      cudaStream_t s, int np, int tiles);
+}
+namespace {
+template <int NP, int TILES>
+cudaError_t split_np(float* state, const float* h, const float* gate, const float* beta, float* y, int64_t T, cudaStream_t s) {
+    return strata::prefill::gdn_rec_tc_split_for_test(state, h, gate, beta, y, T, s, NP, TILES);
+}
+int check_split(int64_t T, uint64_t seed) {
+    // NP 1 / 2 drop split passes of the f16 products (plain f16 operands, FP32 state and gates): about 7e-4 relative
+    // against FP64 on the 5090 (NP 3: 1e-6), the order of Basalt's BF16 scan (~1e-3), so their bound is 2e-3, not 1e-4
+    struct V { const char* label; RecLaunch f; double tol; };
+    const V vs[] = {{"tc split NP 3 (default plan)", split_np<3, 1>, 1e-4}, {"tc split NP 2 (f16, bound 2e-3)", split_np<2, 1>, 2e-3},
+                    {"tc split NP 1 (f16, bound 2e-3)", split_np<1, 1>, 2e-3}, {"tc split NP 3, 2 tiles", split_np<3, 2>, 1e-4},
+                    {"tc split NP 2, 2 tiles (f16, bound 2e-3)", split_np<2, 2>, 2e-3}, {"tc split NP 1, 2 tiles (f16, bound 2e-3)", split_np<1, 2>, 2e-3}};
+    int fails = 0;
+    for (const V& v : vs) {
+        Inputs in(T, seed);
+        fails += check_variant(in, v.label, v.f, "sm_80+, 99 KB a block", v.tol);
+    }
+    return fails;
 }
 // the tensor-core scan on the stress inputs (Inputs): its f16 range handling has a case for each
 int check_tc_stress(int64_t T, uint64_t seed) {
@@ -1844,6 +1870,7 @@ int main(int argc, char** argv) {
     for (const int64_t T : Ts) fails += check_tc(T, seed++);
     for (const int64_t T : {(int64_t) 8192, (int64_t) 32768}) fails += check_tc(T, seed++);
     for (const int64_t T : {(int64_t) 4099, (int64_t) 32768}) { fails += check_tc_stress(T, seed); seed += 8; }
+    for (const int64_t T : {(int64_t) 4099, (int64_t) 8192, (int64_t) 32768}) fails += check_split(T, seed++);
     if (do_long) fails += check_tc(51820, seed++);   // the engine's longest prompt (about 7 GB of inputs and outputs)
     if (do_bench) {
         std::printf("--bench: the prompt path's DeltaNet recurrence\n");

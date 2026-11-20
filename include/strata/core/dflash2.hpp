@@ -202,6 +202,7 @@ private:
     EmbedFn embed_;
     const void* head_w_ = nullptr;
     int head_type_ = -1;
+    bool head_planes_ = false;   // head_w_ is the target's own head in bit planes (NativeHead::planes): its exact kernel
     int64_t n_dvocab_ = 0;
     int32_t* dvocab_ = nullptr;
     uint8_t* dhead_ = nullptr;      ///< the draft vocabulary's head rows (owned), or null with head_w_ the whole head

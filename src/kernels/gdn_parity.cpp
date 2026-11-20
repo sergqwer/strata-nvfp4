@@ -22,6 +22,8 @@
 #include "strata/kernels/fused_gdn.hpp"
 #include "strata/kernels/verify_kernels.hpp"
 #include "strata/kernels/native_mmvq.hpp"
+#include "strata/kernels/dense_tc.hpp"
+#include "strata/kernels/gdn_mid.hpp"
 
 #include <cuda_runtime.h>
 
@@ -553,6 +555,209 @@ int main(int argc, char** argv) {
         std::printf("\n  %-42s %s (%d cases)\n", "gdn_ab_multi T=1..8 == fused_gdn_ab", ab_bad ? "*** NO ***" : "bitwise", ab_n);
         std::printf("  %-42s %s (%d cases)\n", "gdn_step_norm_multi T=1..8 == single-token", sn_bad ? "*** NO ***" : "bitwise", sn_n);
         bad += ab_bad + sn_bad;
+    }
+
+    // ================= 8. dec/host round 6: gdn_mid, bitwise against the chain it replaces =================
+    // native_quantize_q8_1 + dense_tc (qkv, z) + gdn_conv_l2_multi + gdn_ab_multi + gdn_step_norm_multi +
+    // native_quantize_q8_1 + dense_tc (out), Q8_0 weights, T = 1..8; the q8_1 output written over the input (the engine's
+    // xq_); every output memcmp'd, the state left as it was, a second launch on the same counter set the same
+    if (strata::kernels::gdn_mid_supported(8, 8, 8, 2560, h_k, h_v, 1, nullptr, nullptr, nullptr, nullptr)) {
+        const int n_embd = 2560, qk = S * h_k, C = 2 * qk + S * h_v, vd = S * h_v;
+        const float eps = 1e-6f;
+        auto bf16_of = [](float f) { uint32_t u; std::memcpy(&u, &f, 4); return (uint16_t) (u >> 16); };
+        auto dev = [&](size_t bytes) { void* p = nullptr; check(cudaMalloc(&p, bytes), "m8"); return p; };
+        auto up = [&](const void* hp, size_t bytes) { void* p = dev(bytes); check(cudaMemcpy(p, hp, bytes, cudaMemcpyHostToDevice), "u8"); return p; };
+        auto q8w = [&](int rows, int cols) {   // Q8_0 rows: per 32 values a half scale (~2^-9..2^-8) and 32 codes
+            std::vector<uint8_t> w((size_t) rows * (cols / 32) * 34);
+            for (size_t i = 0; i < w.size(); i += 34) {
+                const uint16_t d = (uint16_t) (0x1800 + rng() % 0x400);
+                std::memcpy(&w[i], &d, 2);
+                for (int k = 0; k < 32; ++k) w[i + 2 + k] = (uint8_t) (int8_t) ((int) (rng() % 255) - 127);
+            }
+            return up(w.data(), w.size());
+        };
+        cudaStream_t st8 = nullptr;
+        check(cudaStreamCreate(&st8), "s8");
+        void *d_wq = q8w(C, n_embd), *d_wz = q8w(vd, n_embd), *d_wo = q8w(n_embd, vd);
+        std::vector<uint16_t> wa((size_t) h_v * n_embd), wb((size_t) h_v * n_embd);
+        for (auto& w : wa) w = bf16_of(gauss(rng) * 0.05f);
+        for (auto& w : wb) w = bf16_of(gauss(rng) * 0.05f);
+        std::vector<float> dt((size_t) h_v), ssm_a((size_t) h_v), gamma((size_t) S), cw((size_t) C * 4);
+        for (auto& v : dt) v = gauss(rng);
+        for (auto& v : ssm_a) v = -(0.1f + (float) (rng() % 100) / 50.0f);
+        for (auto& v : gamma) v = 1.0f + 0.1f * gauss(rng);
+        for (auto& v : cw) v = gauss(rng) * 0.5f;
+        const size_t sfl = (size_t) S * h_v * S + (size_t) C * 3;
+        std::vector<float> st0(sfl);
+        for (auto& v : st0) v = gauss(rng) * 0.1f;
+        auto d_wa = (uint16_t*) up(wa.data(), wa.size() * 2), d_wb = (uint16_t*) up(wb.data(), wb.size() * 2);
+        auto d_dt = (float*) up(dt.data(), dt.size() * 4), d_sa = (float*) up(ssm_a.data(), ssm_a.size() * 4);
+        auto d_gm = (float*) up(gamma.data(), gamma.size() * 4), d_cw = (float*) up(cw.data(), cw.size() * 4);
+        auto d_st = (float*) up(st0.data(), sfl * 4);
+        const float* d_hist = d_st + (size_t) S * h_v * S;
+        const size_t xqb = (size_t) (n_embd / 32) * 36, yqb = (size_t) (vd / 32) * 36;
+        int md_bad = 0, md_n = 0;
+        auto same = [&](const void* a, const void* b, size_t bytes) {
+            std::vector<uint8_t> ha(bytes), hb(bytes);
+            check(cudaMemcpy(ha.data(), a, bytes, cudaMemcpyDeviceToHost), "d8");
+            check(cudaMemcpy(hb.data(), b, bytes, cudaMemcpyDeviceToHost), "d8");
+            size_t diff = 0;
+            for (size_t i = 0; i < bytes; ++i) diff += ha[i] != hb[i];
+            return diff;
+        };
+        for (int rep = 0; rep < 3; ++rep)
+        for (int T = 1; T <= 8; ++T) {
+            std::vector<float> x((size_t) T * n_embd);
+            for (auto& v : x) v = gauss(rng) * (rep == 2 ? 4.0f : 1.0f);
+            auto d_x = (float*) up(x.data(), x.size() * 4);
+            float *d_qkv[2], *d_z[2], *d_h[2], *d_g[2], *d_b[2], *d_y[2], *d_bo[2];
+            void* d_q[2];   // [0]: the chain's input q8_1; [1]: gdn_mid's input, then its output q8_1 (written over it)
+            void* d_yq0 = dev((size_t) T * yqb);
+            for (int k = 0; k < 2; ++k) {
+                d_qkv[k] = (float*) dev((size_t) T * C * 4); d_z[k] = (float*) dev((size_t) T * vd * 4);
+                d_h[k] = (float*) dev((size_t) T * C * 4); d_g[k] = (float*) dev((size_t) T * h_v * 4);
+                d_b[k] = (float*) dev((size_t) T * h_v * 4); d_y[k] = (float*) dev((size_t) T * vd * 4);
+                d_bo[k] = (float*) dev((size_t) T * n_embd * 4);
+                d_q[k] = dev((size_t) T * yqb);   // yqb > xqb: holds the input, then the output
+                check(cudaMemset(d_h[k], 0x11, (size_t) T * C * 4), "z8"); check(cudaMemset(d_y[k], 0x22, (size_t) T * vd * 4), "z8");
+                check(cudaMemset(d_q[k], 0x33, (size_t) T * yqb), "z8"); check(cudaMemset(d_bo[k], 0x44, (size_t) T * n_embd * 4), "z8");
+            }
+            check(cudaMemset(d_yq0, 0x33, (size_t) T * yqb), "z8");
+            strata::kernels::native_quantize_q8_1(d_x, d_q[0], n_embd, T, st8);
+            check(cudaMemcpyAsync(d_q[1], d_q[0], (size_t) T * xqb, cudaMemcpyDeviceToDevice, st8), "c8");
+            strata::kernels::dense_tc(8, d_wq, d_q[0], d_qkv[0], n_embd, C, T, st8);
+            strata::kernels::dense_tc(8, d_wz, d_q[0], d_z[0], n_embd, vd, T, st8);
+            strata::kernels::gdn_conv_l2_multi(d_hist, d_qkv[0], d_cw, d_h[0], C, 2 * h_k, eps, T, st8, 0, false);
+            strata::kernels::gdn_ab_multi(d_x, d_wa, d_wb, d_dt, d_sa, d_g[0], d_b[0], n_embd, h_v, T, st8);
+            strata::kernels::gdn_step_norm_multi(d_st, d_h[0], C, d_g[0], d_b[0], d_z[0], d_gm, eps, d_y[0], h_k, h_v, T, nullptr,
+                                                 st8, 0, nullptr);
+            strata::kernels::native_quantize_q8_1(d_y[0], d_yq0, vd, T, st8);
+            strata::kernels::dense_tc(8, d_wo, d_yq0, d_bo[0], vd, n_embd, T, st8);
+            strata::kernels::GdnMidArgs ma;
+            ma.xq = d_q[1]; ma.x = d_x; ma.wq = d_wq; ma.wz = d_wz; ma.wo = d_wo; ma.state = d_st; ma.conv_w = d_cw;
+            ma.wa = d_wa; ma.wb = d_wb; ma.dt = d_dt; ma.ssm_a = d_sa; ma.gamma = d_gm; ma.eps = eps;
+            ma.qkv = d_qkv[1]; ma.h = d_h[1]; ma.gate = d_g[1]; ma.beta = d_b[1]; ma.z = d_z[1]; ma.y = d_y[1];
+            ma.yq = d_q[1]; ma.bo = d_bo[1]; ma.T = T; ma.layer = (rep * 8 + T) % 4;
+            strata::kernels::gdn_mid(ma, st8);
+            check(cudaStreamSynchronize(st8), "sync8");
+            const size_t dq = same(d_qkv[0], d_qkv[1], (size_t) T * C * 4), dz = same(d_z[0], d_z[1], (size_t) T * vd * 4),
+                         dh = same(d_h[0], d_h[1], (size_t) T * C * 4), dg = same(d_g[0], d_g[1], (size_t) T * h_v * 4),
+                         db = same(d_b[0], d_b[1], (size_t) T * h_v * 4), dy = same(d_y[0], d_y[1], (size_t) T * vd * 4),
+                         dyq = same(d_yq0, d_q[1], (size_t) T * yqb), dbo = same(d_bo[0], d_bo[1], (size_t) T * n_embd * 4);
+            std::vector<float> st1(sfl);
+            check(cudaMemcpy(st1.data(), d_st, sfl * 4, cudaMemcpyDeviceToHost), "st8");
+            const bool st_ok = std::memcmp(st1.data(), st0.data(), sfl * 4) == 0;
+            ++md_n;
+            if (dq || dz || dh || dg || db || dy || dyq || dbo || !st_ok) {
+                std::printf("    *** gdn_mid T=%d rep %d differs: bytes qkv %zu z %zu h %zu gate %zu beta %zu y %zu q8_1 %zu bo %zu, state %s ***\n",
+                            T, rep, dq, dz, dh, dg, db, dy, dyq, dbo, st_ok ? "kept" : "WRITTEN");
+                ++md_bad;
+            }
+            if (rep == 0) {   // the same launch again on the same counter set (the counters were cleared by the last CTA)
+                check(cudaMemcpyAsync(d_q[1], d_q[0], (size_t) T * xqb, cudaMemcpyDeviceToDevice, st8), "c8b");
+                check(cudaMemsetAsync(d_bo[1], 0x55, (size_t) T * n_embd * 4, st8), "z8b");
+                strata::kernels::gdn_mid(ma, st8);
+                check(cudaStreamSynchronize(st8), "sync8b");
+                const size_t d2 = same(d_bo[0], d_bo[1], (size_t) T * n_embd * 4) + same(d_yq0, d_q[1], (size_t) T * yqb);
+                ++md_n;
+                if (d2) {
+                    std::printf("    *** gdn_mid T=%d second launch differs: %zu bytes ***\n", T, d2);
+                    ++md_bad;
+                }
+            }
+            cudaFree(d_x); cudaFree(d_yq0);
+            for (int k = 0; k < 2; ++k) {
+                cudaFree(d_qkv[k]); cudaFree(d_z[k]); cudaFree(d_h[k]); cudaFree(d_g[k]); cudaFree(d_b[k]); cudaFree(d_y[k]);
+                cudaFree(d_bo[k]); cudaFree(d_q[k]);
+            }
+        }
+        // timing: the chain vs gdn_mid at T = 1, 3, 8, each launch with a cold L2 (a 256 MB memset before it, as a layer's
+        // weights arrive in the engine); then gdn_mid's phase points (globaltimer, us from the first CTA's entry)
+        {
+            // the flush only reads (a dense_tc over 256 MB of zero Q8_0 rows): no dirty lines left to write back
+            const int fl_rows = (int) (((size_t) 256 << 20) / 2720);
+            void* d_flush = dev((size_t) fl_rows * 2720);
+            check(cudaMemset(d_flush, 0, (size_t) fl_rows * 2720), "f8");
+            float* d_fly = (float*) dev((size_t) fl_rows * 4);
+            for (int T : {1, 3, 8}) {
+                std::vector<float> x((size_t) T * n_embd);
+                for (auto& v : x) v = gauss(rng);
+                auto d_x = (float*) up(x.data(), x.size() * 4);
+                auto d_xq = dev((size_t) T * yqb), d_yq = dev((size_t) T * yqb);
+                auto d_qkv = (float*) dev((size_t) T * C * 4), d_z = (float*) dev((size_t) T * vd * 4), d_h = (float*) dev((size_t) T * C * 4);
+                auto d_g = (float*) dev((size_t) T * h_v * 4), d_b = (float*) dev((size_t) T * h_v * 4), d_y = (float*) dev((size_t) T * vd * 4);
+                auto d_bo = (float*) dev((size_t) T * n_embd * 4);
+                auto d_stamp = (unsigned long long*) dev((size_t) 170 * 16 * 8);
+                strata::kernels::native_quantize_q8_1(d_x, d_xq, n_embd, T, st8);
+                cudaEvent_t e0, e1;
+                check(cudaEventCreate(&e0), "e8"); check(cudaEventCreate(&e1), "e8");
+                strata::kernels::GdnMidArgs ma;
+                ma.xq = d_xq; ma.x = d_x; ma.wq = d_wq; ma.wz = d_wz; ma.wo = d_wo; ma.state = d_st; ma.conv_w = d_cw;
+                ma.wa = d_wa; ma.wb = d_wb; ma.dt = d_dt; ma.ssm_a = d_sa; ma.gamma = d_gm; ma.eps = eps;
+                ma.qkv = d_qkv; ma.h = d_h; ma.gate = d_g; ma.beta = d_b; ma.z = d_z; ma.y = d_y; ma.yq = d_yq; ma.bo = d_bo;
+                ma.T = T; ma.layer = 5;
+                double us_chain = 0, us_mid = 0;
+                const int reps = 10;
+                for (int i = 0; i < reps + 1; ++i) {
+                    float ms = 0;
+                    strata::kernels::dense_tc(8, d_flush, d_xq, d_fly, n_embd, fl_rows, 1, st8);
+                    check(cudaEventRecord(e0, st8), "r8");
+                    strata::kernels::dense_tc(8, d_wq, d_xq, d_qkv, n_embd, C, T, st8);
+                    strata::kernels::dense_tc(8, d_wz, d_xq, d_z, n_embd, vd, T, st8);
+                    strata::kernels::gdn_conv_l2_multi(d_hist, d_qkv, d_cw, d_h, C, 2 * h_k, eps, T, st8, 0, false);
+                    strata::kernels::gdn_ab_multi(d_x, d_wa, d_wb, d_dt, d_sa, d_g, d_b, n_embd, h_v, T, st8);
+                    strata::kernels::gdn_step_norm_multi(d_st, d_h, C, d_g, d_b, d_z, d_gm, eps, d_y, h_k, h_v, T, nullptr, st8, 0, nullptr);
+                    strata::kernels::native_quantize_q8_1(d_y, d_yq, vd, T, st8);
+                    strata::kernels::dense_tc(8, d_wo, d_yq, d_bo, vd, n_embd, T, st8);
+                    check(cudaEventRecord(e1, st8), "r8");
+                    check(cudaEventSynchronize(e1), "s8");
+                    check(cudaEventElapsedTime(&ms, e0, e1), "t8");
+                    if (i > 0) us_chain += ms * 1000.0 / reps;
+                    strata::kernels::dense_tc(8, d_flush, d_xq, d_fly, n_embd, fl_rows, 1, st8);
+                    check(cudaMemsetAsync(d_stamp, 0, (size_t) 170 * 16 * 8, st8), "f8");
+                    ma.stamps = i == reps ? d_stamp : nullptr;
+                    check(cudaEventRecord(e0, st8), "r8");
+                    strata::kernels::gdn_mid(ma, st8);
+                    check(cudaEventRecord(e1, st8), "r8");
+                    check(cudaEventSynchronize(e1), "s8");
+                    check(cudaEventElapsedTime(&ms, e0, e1), "t8");
+                    if (i > 0) us_mid += ms * 1000.0 / reps;
+                }
+                std::printf("  gdn_mid timing T=%d (cold L2 per launch): chain %.1f us, gdn_mid %.1f us\n", T, us_chain, us_mid);
+                std::vector<unsigned long long> stv((size_t) 170 * 16);
+                check(cudaMemcpy(stv.data(), d_stamp, stv.size() * 8, cudaMemcpyDeviceToHost), "st8");
+                unsigned long long t0 = ~0ull;
+                for (int bb = 0; bb < 170; ++bb) if (stv[(size_t) bb * 16] != 0 && stv[(size_t) bb * 16] < t0) t0 = stv[(size_t) bb * 16];
+                std::printf("    phases (mean / max over CTAs, us):");
+                for (int q = 0; q < 11; ++q) {
+                    double sm = 0, mx = 0;
+                    int nn = 0;
+                    for (int bb = 0; bb < 170; ++bb) {
+                        const unsigned long long v = stv[(size_t) bb * 16 + q];
+                        if (v == 0) continue;
+                        const double d = (double) (v - t0) / 1e3;
+                        sm += d; mx = d > mx ? d : mx; ++nn;
+                    }
+                    if (nn) std::printf(" %d:%.1f/%.1f", q, sm / nn, mx);
+                }
+                std::printf("\n");
+                for (int bb : {0, 60, 81, 82, 121, 122, 145, 169}) {   // a few CTAs: pair end, the qkv releases (groups 0 / 1), rec start
+                    auto at = [&](int q) { const unsigned long long v = stv[(size_t) bb * 16 + q]; return v ? (double) (v - t0) / 1e3 : -1.0; };
+                    std::printf("    cta %3d: pair end %.1f, qkv released %.1f / %.1f, rec start %.1f\n", bb, at(3), at(11), at(12), at(4));
+                }
+                cudaEventDestroy(e0); cudaEventDestroy(e1);
+                cudaFree(d_x); cudaFree(d_xq); cudaFree(d_yq); cudaFree(d_qkv); cudaFree(d_z); cudaFree(d_h); cudaFree(d_g); cudaFree(d_b);
+                cudaFree(d_y); cudaFree(d_bo); cudaFree(d_stamp);
+            }
+            cudaFree(d_flush); cudaFree(d_fly);
+        }
+        cudaFree(d_wq); cudaFree(d_wz); cudaFree(d_wo);
+        cudaFree(d_wa); cudaFree(d_wb); cudaFree(d_dt); cudaFree(d_sa); cudaFree(d_gm); cudaFree(d_cw); cudaFree(d_st);
+        cudaStreamDestroy(st8);
+        std::printf("  %-42s %s (%d cases)\n", "gdn_mid == dense_tc+conv+ab+step_norm+q8_1+dense_tc", md_bad ? "*** NO ***" : "bitwise", md_n);
+        bad += md_bad;
+    } else {
+        std::printf("  %-42s skipped (device not covered)\n", "gdn_mid");
     }
 
     // ================= 6. the layer-batched commit (engine-latency), bitwise against the per-layer calls =================

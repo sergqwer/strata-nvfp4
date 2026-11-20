@@ -47,8 +47,23 @@ void qsa_decode_attn_step(const float* q, const QsaAttnPools& pools, const int32
 
 /// Plan v0.3 P5: `n_q` queries at once, each with its own selection: q [n_q, n_head, 256], ids [n_q, cap], steps
 /// [n_q, kStepCount], attn [n_q, n_head, 256]; scratch is `n_q` times the single-query size.
+/// The drafter's one query (n_q = 1) over INT8 pools: qsa_decode_attn_batch's output bit for bit, the chunk's K/V rows
+/// staged into shared memory first.  False (nothing launched) when it does not apply (another KV format, HIP,
+/// STRATA_MTP_ATTN_STAGED=0): the caller runs qsa_decode_attn_batch.
+bool qsa_decode_attn_draft(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps, int64_t cap,
+                           const QsaShapes& s, float* scratch, float* attn, void* stream);
+/// qsa_decode_attn_draft, its merge also applying fwht256_cuda in place (`rot`: the K/V rotation), writing
+/// native_qsa_gate_apply(attn, q_full) into `gated` and that through native_quantize_q8_1 into `xq` (bit for bit the
+/// separate kernels); false (nothing launched) where it does not apply or under STRATA_MTP_ATTN_GQ=0.
+bool qsa_decode_attn_draft_gq(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps, int64_t cap,
+                              const QsaShapes& s, float* scratch, float* attn, const float* q_full, float* gated, void* xq,
+                              bool rot, void* stream);
 void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
                            int64_t cap, const QsaShapes& s, float* scratch, float* attn, int64_t n_q, void* stream);
+/// dec/int (STRATA_KV_POST): qsa_decode_attn_batch with fwht256_inplace_cuda of the output rows folded into the merge
+/// (bitwise the pair: qsa_post_parity).  False (nothing launched) where the merge is not attn_merge_v2_kernel.
+bool qsa_decode_attn_batch_unrot(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
+                                 int64_t cap, const QsaShapes& s, float* scratch, float* attn, int64_t n_q, void* stream);
 
 /// Up to this many queries of different slots in one qsa_decode_attn_slots call.
 constexpr int kQsaAttnMaxSlots = 8;

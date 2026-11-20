@@ -23,6 +23,7 @@
 #include "strata/core/pinned_ring.hpp"
 #include "strata/core/session.hpp"
 #include "strata/kernels/sampler.hpp"
+#include "strata/spec/draft_cum.hpp"
 
 #include <cuda_runtime.h>
 
@@ -57,6 +58,15 @@ public:
     }
     /// At most this many drafts per round (below max_t - 1): a window longer than the MTP's comes from elsewhere.
     void set_max_drafts(int k) { max_drafts_ = k; }
+    /// --mtp-cum BASE[:LO] (spec/draft_cum.hpp): the chain keeps draft j while prod_{i<=j} acc(p_i) >= the request's
+    /// threshold (from BASE toward LO as the request's drafts run better than the table predicts); 0 = off (min_p / chain
+    /// rule).  cum_begin() at a request's start; cum_observe() after each verified MTP window; cum_th() is the threshold the
+    /// last draft() used, which the window rule must use for that window's drafts.
+    void set_cum_rule(float base, float lo) { cum_base_ = base; cum_lo_ = lo; cum_.reset(base, lo); }
+    bool cum_on() const { return cum_base_ > 0.0f; }
+    void cum_begin() { if (cum_on()) cum_.reset(cum_base_, cum_lo_); }
+    void cum_observe(const float* probs, int n, int acc) { if (cum_on()) cum_.observe(probs, n, acc); }
+    float cum_th() const { return cum_used_; }
     /// --mtp-hnorm stream (opt-in; before the first draft or prefill): pre_fc_norm_hidden normalizes each
     /// hyper-connection stream on its own, as llama.cpp's qwen4exp MTP graph does, instead of one RMS over all four.
     void set_hnorm_per_stream(bool on) { hnorm_stream_ = on; }
@@ -68,6 +78,17 @@ public:
     /// --mtp-draft-vocab FILE (opt-in; before bind): the draft head's token subset from FILE instead of
     /// rt/draft_vocab.bin (e.g. data/draft_vocab_en.bin, 40K tokens)
     void set_draft_vocab(const std::string& path) { dvocab_path_ = path; }
+    /// --mtp-head proxy (opt-in; before bind): the draft head as Basalt's two-stage scan (kernels/draft_proxy.hpp) - a 2-bit
+    /// copy of the subset screens every row, the near-best rows are rescored from the main head's Q8_0 rows through the row
+    /// map (no gathered copy of the subset), with TIERS (the subset's base rows - its ids up to the first descent - plus
+    /// 512 CONTEXT rows; the added rows after the base, e.g. the Cyrillic ones, only for 32 rounds after a token of theirs)
+    /// and CONTEXT rows (tokens of the prompt and of the reply the subset lacks).  Needs a Q8_0 head on the drafter's card;
+    /// otherwise the plain subset scan runs.  Drafts only: the verify window decides every token.
+    void set_head_proxy(bool on) { proxy_req_ = on; }
+    bool head_proxy() const { return proxy_on_; }
+    /// --mtp-head proxy: a request's prompt (its tokens the subset lacks take context rows; a prompt token of the added
+    /// rows starts the request on the whole subset).  Between requests.
+    void ctx_begin(const int64_t* prompt, int64_t n);
     /// DFlash2 shares this drafter's gathered draft-head subset when it is the very same bytes (DF-05): the rows of the main head's vocabulary
     /// subset in the main head's own layout, on `dev`, gathered from `vocab_path`.  False (and the DFlash2 gathers its own) for a Q4_0 copy
     /// (--mtp-q4 head), a repacked Q6_K / Q8_0 subset, a head on another card, another vocabulary file or no subset at all.
@@ -246,8 +267,16 @@ private:
     void norm_rope(float* data, const float* gamma, int rows, int cols, const int32_t* p, cudaStream_t cs);
     bool capture_prefill(int T, std::string& err);
     bool capture_prefill_dev(int T, std::string& err);   ///< E-4: without the mapped staging (inputs copied on device)
-    bool capture_round(int T, bool coupled, std::string& err);
-    bool capture_step(int j, bool coupled, std::string& err);
+    /// STRATA_MTP_COND (mtp_cond.hpp): capture_round / capture_step record into `body` (or a new graph, returned in `out`)
+    /// with the keep kernel of draft keep_j setting keep_h at their end, instead of instantiating their own graph.
+    struct CondCap { cudaGraph_t body = nullptr; unsigned long long keep_h = 0; int keep_j = -1; cudaGraph_t out = nullptr; };
+    bool capture_round(int T, bool coupled, std::string& err, CondCap* cc = nullptr);
+    bool capture_step(int j, bool coupled, std::string& err, CondCap* cc = nullptr);
+    bool capture_cond(int T, int steps);   ///< the round and steps 1..steps-1 as one conditional graph (cond_exec_[T])
+    cudaGraphExec_t cond_exec_[9] = {};
+    int cond_steps_[9] = {};
+    bool cond_off_ = false;      ///< a conditional capture failed: the per-step graphs from then on
+    float* cond_hist_ = nullptr; ///< [16] the chain's probabilities on the device (the keep kernels)
     cudaGraphExec_t step_exec_[9] = {};
     // coupled draft sampling: its own round/step graphs (the argmax ones stay as they were), the request's
     // parameters and the penalty ring (mapped staging + device copies), the split scratch, token id -> subset index
@@ -274,6 +303,22 @@ private:
     int max_t_ = 0;
     int device_ = -1;   ///< the device `load` ran on: the public calls switch to it (layer split)
     int max_drafts_ = 1 << 30;
+    float cum_base_ = 0.0f, cum_lo_ = 0.0f, cum_used_ = 0.0f;
+    // --mtp-head proxy: the 2-bit copy and its scratch; the map dvocab_ = [base ids | kXcap context rows (-1 = empty) |
+    // added ids]; the rows scanned (n_tier1_ = base + context, or all) staged in row_[4] by the round graph
+    bool proxy_req_ = false, proxy_on_ = false;
+    void* proxy_ = nullptr;
+    void* proxy_scratch_ = nullptr;
+    int64_t xbase_ = 0, n_xcap_ = 0, n_xused_ = 0, n_tier1_ = 0;
+    std::vector<uint8_t> in_sub_, tier2_;   ///< token id -> in the map / in the added rows only
+    int tier2_recent_ = 0;
+    std::vector<int32_t> xlist_, xpend_;
+    int32_t* h_xids_ = nullptr;             ///< pinned staging of the context rows' ids
+    bool bind_proxy(const NativeHead* head, std::string& err);
+    void ctx_note(int64_t t);
+    void ctx_flush(cudaStream_t cs);
+    void proxy_round(const int32_t* tokens, int T, int a);   ///< the round's tier and context rows (host, before the launch)
+    strata::spec::DraftCumAdapt cum_;
     bool hnorm_stream_ = false;
     bool q4_ = false, q4_head_ = false;
     uint8_t* dense4_ = nullptr;              ///< --mtp-q4: Q4_0 copies of the Q8_0 tensors
@@ -285,6 +330,10 @@ private:
     const void* wq(const char* name, int& type) const;
     bool make_q4_dense(const std::vector<uint8_t>& blob, std::string& err);
     bool make_q4_head(std::string& err);
+    /// STRATA_MTP_HC8=1 (CUDA, the sm_120 hc8 read): the layer's three hyper-connection reads on 8-bit copies of their
+    /// down / up matrices ([attn, mlp, mixer][down, up]; null = the bf16 read)
+    const void* hc8_[3][2] = {};
+    bool make_hc8(std::string& err);
     void record_top2(int j);
     std::vector<int32_t> top2_, dvocab_host_;
     std::vector<float> lg_host_;
@@ -308,6 +357,20 @@ private:
     int64_t pf_cap_ = 0;          ///< its capacity in ints
     cudaStream_t side_ = nullptr;                    // the shared expert's branch of the draft graphs (CUDA)
     cudaEvent_t sh_fork_ = nullptr, sh_join_ = nullptr;
+    cudaEvent_t q0_join_ = nullptr;   ///< STRATA_MTP_ROUTE_GROUP: the routed experts' q8_0 input, made on the shared branch
+    // one-row passes of the round and step graphs (STRATA_MTP_OVERLAP, on by default on CUDA): the embedding branch beside the
+    // hidden one and the K/V projection + append beside the query projection, on side_ (Basalt's draft graphs do the same);
+    // the same kernels on the same inputs, so the same drafts
+    cudaEvent_t ov_fork_ = nullptr, ov_join_ = nullptr;
+    uint8_t* xq2_ = nullptr;   ///< the embedding branch's q8_1 rows
+    bool ovl_ = false;         ///< set by capture_round / capture_step around their records
+    bool kv_open_ = false;     ///< the K/V branch is still to be joined (before the attention)
+    bool full_pass_ = false;   ///< record_front: the rest of the layer follows on the same row
+    // the next chain step's hidden input (rms(R) -> fc_hidden, from this row's final residual) on side_ beside the mixer read
+    // and the head; the step graphs then start from it (Basalt's pre_next)
+    bool pre_ready_ = false;   ///< capture_step: h2_ row 0 already holds this step's hidden input
+    bool pre_open_ = false;    ///< the precompute branch is still to be joined (before the graph ends)
+    cudaEvent_t pre_join_ = nullptr;
     cudaGraphExec_t round_exec_[9] = {};
 
     struct Tensor { std::string name, kind; int64_t rows = 0, cols = 0; uint64_t off = 0, bytes = 0; };

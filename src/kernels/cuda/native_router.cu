@@ -26,6 +26,7 @@
 #include <cfloat>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <stdexcept>
 
 namespace strata::kernels {
@@ -148,6 +149,96 @@ __global__ void route_multi(const float* __restrict__ logits, int32_t* __restric
     const float inverse_selected_sum = 1.0f / selected_sum;
     if (lane < 10) weights[lane] = selected * inverse_selected_sum;
 }
+// dec/host round 5 (STRATA_ROUTE_DB=1): route_multi and doorbell_publish_res (elementwise.cu) in one launch, one block
+// (n_tok <= 8, warp y = token y): the top-10 is route_multi's body verbatim (this file's flags, the same bits), then
+// the doorbell as doorbell_publish_res_kernel: the ids to the host, the rows when any expert is not resident, the ring
+// after a system fence.
+// EARLY (dec/front, STRATA_ROUTE_DB=2): the rows go to the host first, as float4 by every thread, whatever the residency
+// (the host reads them only for a miss), so their PCIe writes overlap the top-10; the ring after the same system fence.
+template <bool EARLY>
+__launch_bounds__(256, 1)
+__global__ void route_doorbell_res_kernel(const float* __restrict__ logits, int32_t* ids,
+                                          float* __restrict__ weights, int n_tok, const float* __restrict__ x,
+                                          const int32_t* __restrict__ d_res, int n_expert, int nx, float* x_out,
+                                          int32_t* ids_out, uint32_t* seq) {
+    const int tk = (int) threadIdx.y;
+    if constexpr (EARLY) {
+        const int t0 = (int) threadIdx.y * 32 + (int) threadIdx.x;
+        for (int i = t0; i < nx / 4; i += 256) reinterpret_cast<float4*>(x_out)[i] = reinterpret_cast<const float4*>(x)[i];
+    }
+    if (tk < n_tok) {
+    const float* logits0 = logits; int32_t* ids0 = ids; float* weights0 = weights;
+    {
+        logits += (size_t) tk * 512; ids += (size_t) tk * 10; weights += (size_t) tk * 10;
+        const int lane = threadIdx.x;
+        float values[16];
+    #pragma unroll
+        for (int i = 0; i < 16; ++i) values[i] = logits[lane + i * 32];
+        __syncwarp();
+        float maximum = -INFINITY;
+    #pragma unroll
+        for (int i = 0; i < 16; ++i) maximum = max(maximum, values[i]);
+        maximum = warp_max(maximum);
+        float sum = 0.0f;
+    #pragma unroll
+        for (int i = 0; i < 16; ++i) {
+            values[i] = expf(values[i] - maximum);
+            sum += values[i];
+        }
+        const float reciprocal = 1.0f / warp_sum(sum);
+    #pragma unroll
+        for (int i = 0; i < 16; ++i) {
+            values[i] *= reciprocal;
+            if (__isnanf(values[i])) values[i] = -FLT_MAX;
+        }
+        float selected = 0.0f, selected_sum = 0.0f;
+        for (int rank = 0; rank < 10; ++rank) {
+            float best = values[0];
+            int expert = lane;
+    #pragma unroll
+            for (int i = 1; i < 16; ++i) {
+                if (values[i] > best) { best = values[i]; expert = lane + i * 32; }
+            }
+    #pragma unroll
+            for (int mask = 16; mask; mask >>= 1) {
+                const float other = __shfl_xor_sync(0xffffffffu, best, mask, 32);
+                const int other_id = __shfl_xor_sync(0xffffffffu, expert, mask, 32);
+                if (other > best || (other == best && other_id < expert)) { best = other; expert = other_id; }
+            }
+            if ((expert & 31) == lane) {
+                values[expert / 32] = -INFINITY;
+                ids[rank] = expert;
+                selected_sum += best;
+            }
+            if (rank == lane) selected = best;
+        }
+        selected_sum = max(warp_sum(selected_sum), 6.103515625e-5f);
+        const float inverse_selected_sum = 1.0f / selected_sum;
+        if (lane < 10) weights[lane] = selected * inverse_selected_sum;
+    }
+    logits = logits0; ids = ids0; weights = weights0;
+    }
+    __syncthreads();   // the ids written above, visible to the block
+    const int tid = (int) threadIdx.y * 32 + (int) threadIdx.x, k = n_tok * 10;
+    int any_miss = 0;
+    if (tid < k) {
+        const int32_t id = ids[tid];
+        ids_out[tid] = id;
+        if (d_res == nullptr || id < 0 || id >= n_expert || d_res[id] < 0) any_miss = 1;
+    }
+    if constexpr (EARLY) {
+        __threadfence_system();
+    } else {
+    if (__syncthreads_or(any_miss)) {
+        for (int i = tid; i < nx; i += 256) x_out[i] = x[i];
+        __threadfence_system();
+    } else if (tid < k) {
+        __threadfence_system();
+    }
+    }
+    __syncthreads();
+    if (tid == 0) *(volatile uint32_t*) seq = *(volatile uint32_t*) seq + 1u;
+}
 // The same contract for other (experts, top-k) shapes - Qwen3.6-35B-A3B's 256 / 8 - one warp per token, n_tok tokens
 // (8 per block).  The 512 / 10 path keeps its own kernels above (the Flash-Next bits), this template is only used
 // for the other shapes.
@@ -230,6 +321,22 @@ void native_router_top10_multi(const float* logits, int32_t* ids, float* weights
         !valid(weights, (size_t) n_tok * 10 * 4))
         throw std::invalid_argument("native router (multi) requires a stream and aligned [n,512]/[n,10] buffers");
     route_multi<<<(unsigned) ((n_tok + 7) / 8), dim3(32, 8), 0, static_cast<cudaStream_t>(stream)>>>(logits, ids, weights, n_tok);
+    const auto error = cudaGetLastError();
+    if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
+}
+void native_route_doorbell_res(const float* logits, int32_t* ids, float* weights, int n_tok, const float* x,
+                                const int32_t* d_res, int n_expert, int64_t nx, float* x_out, int32_t* ids_out, uint32_t* seq,
+                                void* stream) {
+    if (!stream || n_tok < 1 || n_tok > 8 || !valid(logits, (size_t) n_tok * 512 * 4) || !valid(ids, (size_t) n_tok * 10 * 4) ||
+        !valid(weights, (size_t) n_tok * 10 * 4) || nx < 0 || nx > INT32_MAX)
+        throw std::invalid_argument("native route+doorbell requires a stream, 1..8 rows and aligned buffers");
+    static const bool early = [] { const char* v = std::getenv("STRATA_ROUTE_DB"); return v != nullptr && v[0] == '2'; }();
+    if (early && (nx & 3) == 0 && (((uintptr_t) x | (uintptr_t) x_out) & 15u) == 0)
+        route_doorbell_res_kernel<true><<<1, dim3(32, 8), 0, static_cast<cudaStream_t>(stream)>>>(logits, ids, weights, n_tok, x,
+                                                                                                 d_res, n_expert, (int) nx, x_out, ids_out, seq);
+    else
+        route_doorbell_res_kernel<false><<<1, dim3(32, 8), 0, static_cast<cudaStream_t>(stream)>>>(logits, ids, weights, n_tok, x,
+                                                                                                  d_res, n_expert, (int) nx, x_out, ids_out, seq);
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }

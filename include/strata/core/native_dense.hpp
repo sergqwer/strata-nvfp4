@@ -76,5 +76,7 @@ private:
     uint64_t bytes_ = 0;
     uint64_t allocated_ = 0;
     std::vector<uint64_t> layer_bytes_;   ///< uploaded bytes per layer
+    void* slab_ = nullptr;                ///< dec/host round 3 (STRATA_DENSE_SLAB): one allocation holding the matrices
+    uint64_t slab_cap_ = 0, slab_used_ = 0;
 };
 } // namespace strata::core

@@ -204,4 +204,22 @@ struct GuardTab {
 /// replaces the two tail memsets of a group in direct mode.  Nothing is launched when there is nothing to zero.
 void prep_group(const GuardTab& g, size_t guard_bytes, void* tail_gu, void* tail_d, size_t tail_bytes, void* stream);
 
+/// strata-nvfp4 (pfx): STRATA_PF_FP4G, read once - an in-place NVFP4 group of the streamed walk (w4a4x2, gate/up read
+/// per token) on the grouped FP4 tensor-core GEMM of mmq_nvfp4_fp4g.cu (sm_120a only; 0 elsewhere):
+///  0 MMQ (today);
+///  1 gate/up with its two FP4 terms, SwiGLU and H's q8_1 rows in the epilogue (swiglu_quant's bytes for its values);
+///    down stays MMQ w4a8;
+///  2 also down on it: H in floats, two FP4 terms per row (quantize_nvfp4_x2, one row scale), the FP4 GEMM.
+int fp4g_mode();
+/// One group of n <= kGatherGroupMax experts (the n_embd 2560 / n_ff 640 geometry): gu / dn / tail each expert's
+/// gate+up rows, down rows and {s_gate, s_up, s_down, 0}; bounds_gu absolute and bounds_d relative row bounds
+/// (device); rows [r0, r0 + nr); xq / xscale the layer's token rows (x_rows of them) and yrows row -> token; h
+/// (mode 2) H's rows from r0, hq the group's H rows (q8_1 or two FP4 terms), hscale their row scales (mode 2), sd
+/// s_down per row from r0, dm the down output's rows from r0.  Returns 0 when not taken (the caller runs MMQ), 1 when
+/// gate/up ran (Hq and sd are written: the caller runs down), 2 when the whole group ran (sd written).
+int fp4g_group(int n, const void* const* gu, const void* const* dn, const float* const* tail, const int32_t* bounds_gu,
+               const int32_t* bounds_d, int64_t r0, int64_t nr, int64_t max_rows, const void* xq, const float* xscale,
+               const int32_t* yrows, int64_t x_rows, float* h, void* hq, float* hscale, float* sd, float* dm,
+               void* stream);
+
 }  // namespace strata::prefill::mmq

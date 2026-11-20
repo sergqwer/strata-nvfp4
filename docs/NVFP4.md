@@ -378,6 +378,69 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### RTX 50: decode and prompt kernels after Basalt (2026-11-20, main)
+
+[Basalt](https://github.com/jesdga95/basalt) (MIT, copyright Jesús Gulfo) is a Strata fork tuned for this model on
+RTX 50 cards; on the same pack its decode ran 16-55% ahead of this fork's 0.2.15-nvfp4.3. This round ports its decode kernels and its
+MTP drafting, adds kernels of our own for decode and the prompt, and turns them on by default on RTX 50 cards
+(compute capability 12.0) only: other cards run as before. `STRATA_NVFP4_SM120=0` turns the whole set off, each
+switch's own `=0` turns that one off, and a switch you set yourself is kept; the start prints the count.
+
+**Decode**, serve, greedy, RTX 5090 (power limit 510 W), Ryzen 9 9950X3D, 128 GB, the tray's arguments, tokens/s, one
+run of each in the same hour: a JSON answer (long draft windows), a chat, English prose and a Ukrainian answer.
+
+| | 0.2.15-nvfp4.3 (Auto: DFlash2) | this round (Auto) | Basalt |
+| --- | ---: | ---: | ---: |
+| JSON | 329.7 | 486.7 | 474.5 |
+| chat | 218.5 | 269.2 | 248.3 |
+| prose | 205.1 | 261.4 | 276.2 |
+| Ukrainian | 154.3 | 241.3 | 234.9 |
+
+- Auto now drafts with the MTP layer and Basalt's drafting on CUDA with one request at a time: its two-stage draft
+  head (`--mtp-head proxy`), its cumulative window rule with a threshold set from how many MB per expert the CPU
+  serves (`--mtp-cum auto`, 0.399:0.285 on this PC) and a window of 8. `STRATA_AUTO_NEW_MTP=0` keeps the old Auto.
+- **These runs used Basalt's self-distilled draft layer, which this fork does not ship yet** (its licence is not
+  checked). Without it Auto uses the set's own MTP layer, which accepts fewer drafts.
+- The last three switches in the table below came after these runs: prose 259 -> 271 tokens/s in two rounds (Basalt
+  276 in the same hour), Ukrainian and chat windows 1-2% shorter, JSON the same.
+
+**Prompt**, one request, context 140,000, ms:
+
+| prompt tokens | 0.2.15-nvfp4.3 | this round |
+| ---: | ---: | ---: |
+| 3,072 | 924 | 853 |
+| 16,676 | 1,938 | 1,657 |
+| 66,617 | 7,845 | 6,163 |
+| 131,000 | 14,460 | 12,471 |
+
+Basalt read 16K in 1,864 ms and 64K in about 6,150 ms; its context ends at 66K.
+
+**Accuracy**, teacher-forced on this fork's corpus (the same text through both engines, every position): the top
+token matches the base engine's 96.11% of the time with a KL of 0.0150, while two runs of the base engine itself
+differ by 96.52% / 0.0118 (the CPU/GPU split of the experts changes from run to run); the NLL is not worse. Four
+switches change rounding (marked below); every other one leaves the generated text bit-identical, checked by md5 in a
+mode with fixed expert placement.
+
+| switch | what it does | from | output |
+| --- | --- | --- | --- |
+| `STRATA_HC_Q8=1` | the 8-bit hyper-connection read (int8 rows, fp16 scales) | Basalt | rounds (KL 0.0152) |
+| `STRATA_DENSE_TC=1` | an int8 tensor-core GEMV for every Q8_0 dense matrix of a 1-8 token window | Basalt | rounds, the same at every window width |
+| `STRATA_ATTN_STAGED=1` | INT8 attention chunks staged by `cp.async`, two blocks per SM | Basalt | exact |
+| `STRATA_GDN_MID=1` | a DeltaNet layer's middle (q/k/v and z projections, gates, recurrence, norm, output projection) in one persistent kernel | Basalt's structure, our arithmetic | exact |
+| `STRATA_QPROJ_HALF=1`, `QPROJ_GATE_AT=3`, `QPROJ_GATE_GRID=48`, `GRAPH_PRIO=1` | the attention layer's query rows first, the gate rows later on 48 blocks, stream priorities kept in the graphs | Basalt's placement, our grid cap | exact |
+| `STRATA_DF_PDL=1` | programmatic dependent launch in the doorbell graphs too | ours | exact |
+| `STRATA_ADAPT_FETCH=1`, `ADAPT_ACROSS=1`, `ADAPT_CAND_MIN=1.5`, `ADAPT_DECAY=0.96`, `PCIE_FIXED=0.45` | the serve tier admits the PCIe share's experts, ranks misses across all layers, PCIe share fixed at 0.45 | ours | moves experts between GPU and CPU (KL 0.0156) |
+| `STRATA_PREFILL_EQUAL=2` | equal prompt chunks | ours | rounds (chunk order) |
+| `STRATA_GDN_TC=1`, `GDN_CONVL2=2`, `GDN_TC_NP=1` | the prompt's DeltaNet scan on tensor cores | ours | rounds (first-token KL ~0.001) |
+| `STRATA_PF_GROUP_SCRATCH=1`, `PF_HC_REGION=2` | smaller prompt buffers, fewer expert slots borrowed | ours | exact |
+| `STRATA_EARLY_READ=1` | the next layer's first hyper-connection read starts before the combine and waits on its counter | ours | exact |
+| `STRATA_GDN_MID_HEAD=2` | the DeltaNet kernel only prefetches into L2 before its wait, so its weight burst does not stall that read | ours | exact |
+| `STRATA_ROUTE_DB=2` | the router and the doorbell in one kernel | ours | exact |
+
+Also on by default, outside the table: the two-stage head (`STRATA_HEAD_PLANES=0` turns it off), the fused attention
+post (`STRATA_KV_POST=0`), the prompt's grouped FP4 expert GEMM (`STRATA_PF_FP4G=0`), the dense weights in one
+allocation (`STRATA_DENSE_SLAB=0`) and the drafter's kernels; all exact.
+
 ### KV streaming on by default (2026-11-19, release 0.2.15-nvfp4.3)
 
 The elastic K/V (`--kv-grow`, on by default here) takes its VRAM from the expert cache as a dialog grows: 1,239 slots

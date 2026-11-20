@@ -16,6 +16,11 @@ if os.name == "nt" and not any(os.environ.get(k) for k in ("STRATA_GLYPHS", "WT_
     os.environ["STRATA_GLYPHS"] = "unicode"
 
 
+# strata-nvfp4: Auto's MTP with Basalt's drafting (drafting.FORK_MTP_FLAGS) replaces the DFlash2 / plain-MTP Auto these tests were written for;
+# they keep the old Auto (STRATA_AUTO_NEW_MTP=0), test_drafting_fork_gptq.py tests the new one.
+os.environ.setdefault("STRATA_AUTO_NEW_MTP", "0")
+
+
 @pytest.fixture(autouse=True)
 def _no_card_unless_a_test_names_one(request):
     from strata_control import drafting

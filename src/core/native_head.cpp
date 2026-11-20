@@ -4,6 +4,8 @@
 #include "strata/artifact/gguf_reader.hpp"
 #include "strata/kernels/iq_kernels.hpp"
 #include "strata/kernels/native_mmvq.hpp"
+#include "strata/kernels/q80_vhead.hpp"
+#include "strata/kernels/verify_kernels.hpp"
 #include "strata/platform/memory.hpp"
 
 #include <cuda_runtime.h>
@@ -28,6 +30,7 @@ void NativeHead::unload() {
     scratch_ = nullptr;
     weights_ = nullptr;
     host_ = nullptr;
+    planes_ = false;
 }
 
 bool NativeHead::load(const std::vector<std::string>& shards, int64_t n_in, int64_t n_out, std::string& err) {
@@ -108,6 +111,24 @@ bool NativeHead::load(const std::vector<std::string>& shards, int64_t n_in, int6
             strata::kernels::native_q6_k_pack(weights_, n_in_, n_out_, "output head");
         if (type_ == 8)   // STRATA_Q8_SM60=1 (a no-op otherwise); the MTP draft head reads the same matrix
             strata::kernels::native_q8_0_sm60_pack(weights_, n_in_, n_out_, "output head");
+        // STRATA_HEAD_PLANES (default on; =0 keeps the GGUF layout): a Q8_0 head of 2560-wide rows rewritten in place as bit
+        // planes (q80_vhead.hpp), the same bytes per row.  Its exact kernel gives native_mmvq's bits, and the verify
+        // window's two-stage head screens it (verify.cpp, head_keep).  Not with the Pascal repack.
+        {
+            const char* pe = std::getenv("STRATA_HEAD_PLANES");
+            const bool want = (pe == nullptr || pe[0] != '0') && std::getenv("STRATA_Q8_SM60") == nullptr;
+            if (type_ == 8 && want && strata::kernels::q80p_supported(n_in_, 1)) {
+                strata::kernels::q80p_pack(weights_, n_out_, nullptr);
+                const cudaError_t pst = cudaDeviceSynchronize();
+                if (pst != cudaSuccess) {
+                    err = std::string("native head: the bit planes failed: ") + cudaGetErrorString(pst);
+                    unload();
+                    return false;
+                }
+                planes_ = true;
+                std::fprintf(stderr, "strata generate: the Q8_0 output head is held as bit planes (exact; the verify window screens it, STRATA_HEAD_PLANES=0 turns it off)\n");
+            }
+        }
         if (strata::core::manifest::enabled()) {   // STRATA_MANIFEST: what the head holds and where
             namespace mf = strata::core::manifest;
             mf::instance().tensors("head", strata::ggml_type_name((uint32_t) type_), 1, bytes);
@@ -115,7 +136,8 @@ bool NativeHead::load(const std::vector<std::string>& shards, int64_t n_in, int6
                                 host_ != nullptr ? "held in mapped pinned host memory (short of VRAM or STRATA_HEAD_HOST)" : "held in VRAM",
                                 std::string("type ") + strata::ggml_type_name((uint32_t) type_) +
                                     (type_ == 14 && strata::kernels::native_q6_k_packed_enabled() ? ", repacked (STRATA_Q6_PACKED)" : "") +
-                                    (type_ == 8 && std::getenv("STRATA_Q8_SM60") != nullptr ? ", repacked (STRATA_Q8_SM60)" : ""));
+                                    (type_ == 8 && std::getenv("STRATA_Q8_SM60") != nullptr ? ", repacked (STRATA_Q8_SM60)" : "") +
+                                    (planes_ ? ", bit planes (STRATA_HEAD_PLANES)" : ""));
         }
         return true;
     } catch (const std::exception& error) {
@@ -156,7 +178,7 @@ bool NativeHead::run(const float* mixed, float* logits, void* stream, std::strin
             strata::kernels::native_q5_k_f32(weights_, mixed, scratch_, logits, n_in_, n_out_, 1, stream);
         } else {
             strata::kernels::native_quantize_q8_1(mixed, scratch_, n_in_, 1, stream);
-            strata::kernels::native_mmvq(type_, weights_, scratch_, logits, n_in_, n_out_, 1, stream);
+            mmvq(scratch_, logits, 1, stream);
         }
     } catch (const std::exception& error) {
         err = std::string("native head launch: ") + error.what();
@@ -168,6 +190,16 @@ bool NativeHead::run(const float* mixed, float* logits, void* stream, std::strin
         return false;
     }
     return true;
+}
+
+void NativeHead::mmvq(const void* x_q8_1, float* y, int ncols, void* stream) const {
+    if (planes_) strata::kernels::q80p_mmvq(weights_, x_q8_1, y, n_in_, n_out_, ncols, stream);
+    else strata::kernels::native_mmvq(type_, weights_, x_q8_1, y, n_in_, n_out_, ncols, stream);
+}
+
+void NativeHead::gather(const int32_t* ids, int64_t n, void* dst, void* stream) const {
+    strata::kernels::gather_rows((const uint8_t*) weights_, (int64_t) row_bytes(), ids, n, (uint8_t*) dst, stream);
+    if (planes_) strata::kernels::q80p_unpack(dst, n, stream);   // the copy in the GGUF's Q8_0 layout
 }
 
 // ================================ plan v0.3 P6: THE NATIVE EMBEDDING ================================

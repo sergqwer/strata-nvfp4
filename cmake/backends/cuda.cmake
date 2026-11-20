@@ -159,7 +159,8 @@ macro(strata_cuda_mmq)
     # (two steps: CMake before 3.29 rejects a \2 whose optional group did not match, "120" alone)
     list(TRANSFORM _strata_w4a4_archs REPLACE "^(12[0-9])$" "\\1a")
     list(TRANSFORM _strata_w4a4_archs REPLACE "^(12[0-9])-(real|virtual)$" "\\1a-\\2")
-    add_library(strata_mmq_w4a4 STATIC src/prefill/mmq_nvfp4_w4a4.cu src/prefill/mmq_nvfp4_a44.cu)
+    add_library(strata_mmq_w4a4 STATIC src/prefill/mmq_nvfp4_w4a4.cu src/prefill/mmq_nvfp4_a44.cu
+                src/prefill/mmq_nvfp4_fp4g.cu)   # strata-nvfp4 (pfx): the grouped FP4 GEMM, STRATA_PF_FP4G
     set_target_properties(strata_mmq_w4a4 PROPERTIES CUDA_ARCHITECTURES "${_strata_w4a4_archs}")
     target_include_directories(strata_mmq_w4a4 PRIVATE ${_strata_gg}/include ${_strata_gg}/src ${_strata_mmq})
     target_compile_options(strata_mmq_w4a4 PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda -use_fast_math>)
@@ -497,6 +498,9 @@ macro(strata_cuda_prompt_tests)
     if(STRATA_MMQ)
     add_executable(mmq_expert_bench src/prefill/mmq_expert_bench.cpp)
     target_link_libraries(mmq_expert_bench PRIVATE strata_mmq ggml-base CUDA::cudart)
+    # strata-nvfp4 (pfx): the grouped FP4 kernel (STRATA_PF_FP4G) against MMQ on one synthetic group, and its time
+    add_executable(fp4g_parity src/prefill/fp4g_parity.cpp)
+    target_link_libraries(fp4g_parity PRIVATE strata_mmq strata_mmq_w4a4 ggml-base CUDA::cudart)
     endif()
 endmacro()
 

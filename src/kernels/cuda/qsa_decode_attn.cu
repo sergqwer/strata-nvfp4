@@ -724,6 +724,351 @@ __global__ void __launch_bounds__(THREADS) attn_chunk_kernel_pre75(const float* 
 #pragma unroll
     for (int h = 0; h < G; ++h) part_acc[((size_t) slot * G + h) * HD + t] = acc[h];
 }
+#if !defined(__HIPCC__)
+// The drafter's one-query attention over INT8 pools (qsa_decode_attn_draft): attn_chunk_kernel_pre75<1, 2, false>'s
+// arithmetic line for line (the same scores, reduce12, softmax partials and ascending fold; every chunk kernel here
+// writes the same partials), with the chunk's K and V rows and their scales copied into shared memory by cp.async up
+// front.  The plain kernel reads them as it goes: ~20 dependent global round trips per block (4 score passes, 16 value
+// groups), which is what its 16 us per draft step was (latency, not bandwidth: a step reads ~2 MB).
+struct DraftAttnSmem {
+    float sq[G][HD];                              // the query heads, then (after the scores) the cell-major weights
+    float sp[G][CHUNK];
+    long long srow[CHUNK];
+    int8_t k[CHUNK][HD];
+    int8_t v[CHUNK][HD];
+    uint16_t ks[CHUNK][HD / KV_Q8_GROUP];
+    uint16_t vs[CHUNK][HD / KV_Q8_GROUP];
+};
+static_assert(HD % 16 == 0 && (HD / KV_Q8_GROUP) * 2 == 8, "draft attention staging: 16-byte rows, 8-byte scale rows");
+__device__ __forceinline__ void dattn_cp16(void* s, const void* g) {
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"((unsigned) __cvta_generic_to_shared(s)), "l"(g));
+}
+__device__ __forceinline__ void dattn_cp8(void* s, const void* g) {
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 8;\n" ::"r"((unsigned) __cvta_generic_to_shared(s)), "l"(g));
+}
+// The draft kernel's threads: HD (a thread a dimension, every head; measured 9.2 us a struct step) or 2 * HD (two a
+// dimension, half the heads each: 9.7 us); the same bits either way.
+constexpr int DT_THREADS = HD;
+constexpr int DT_WARPS = DT_THREADS / 32;
+constexpr int DT_HPT = G * HD / DT_THREADS;   // heads a thread folds
+static_assert(G * HD % DT_THREADS == 0 && CHUNK % DT_WARPS == 0 && (CHUNK / DT_WARPS) % 2 == 0 && G <= DT_WARPS * 2,
+              "draft attention geometry");
+__global__ void __launch_bounds__(DT_THREADS) attn_chunk_draft_kernel(const float* __restrict__ q, QsaAttnPools p,
+                                                                   const int32_t* __restrict__ ids,
+                                                                   const int32_t* __restrict__ step, int n_kv_heads,
+                                                                   int page_size, float scale, float* __restrict__ part_acc,
+                                                                   float* __restrict__ part_m, float* __restrict__ part_l,
+                                                                   int n_chunks, int bounded) {
+    extern __shared__ __align__(16) unsigned char dattn_raw[];
+    DraftAttnSmem& sm = *reinterpret_cast<DraftAttnSmem*>(dattn_raw);
+    float (*const spt)[G] = reinterpret_cast<float (*)[G]>(&sm.sq[0][0]);
+    const int n_ids = __ldg(step + kStepWidth);
+    const int kvh = blockIdx.x;   // the KV head on x: blocks are dispatched x-fastest, so every head's live chunks come first
+    const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
+    // a block takes chunks blockIdx.y, + gridDim.y, ... (one wave of blocks, sized by the launch; each chunk's partials
+    // are computed exactly as by its own block).  `bounded`: the merge reads only the chunks below the width
+    // (attn_merge_v2_kernel), so the empty ones past it are not written.
+    for (int chunk = blockIdx.y; chunk < n_chunks; chunk += gridDim.y) {
+    const int c0 = chunk * CHUNK;
+    const int n_here = min(CHUNK, n_ids - c0);
+    const int slot = kvh * n_chunks + chunk;
+    if (n_here <= 0) {
+        if (bounded) break;
+        if (t < G) { part_m[slot * G + t] = -FLT_MAX; part_l[slot * G + t] = 0.0f; }
+        continue;
+    }
+    if (t < CHUNK) {
+        long long r = -1;
+        if (t < n_here) {
+            const int cell = ids[c0 + t];
+            const long long page = (long long) p.page_table[cell / page_size];
+            if (page >= 0) r = (page * n_kv_heads + kvh) * page_size + (cell % page_size);
+        }
+        sm.srow[t] = r;
+    }
+    __syncthreads();
+    constexpr int NSEG = HD / 16;   // 16-byte pieces of a row
+    for (int i = t; i < CHUNK * NSEG; i += DT_THREADS) {
+        const int c = i / NSEG, o = (i % NSEG) * 16;
+        const long long r = sm.srow[c];
+        if (r >= 0) {
+            dattn_cp16(&sm.k[c][o], p.k_q + r * HD + o);
+            dattn_cp16(&sm.v[c][o], p.v_q + r * HD + o);
+        }
+    }
+    if (t < CHUNK && sm.srow[t] >= 0) {
+        dattn_cp8(&sm.ks[t][0], p.k_scale + sm.srow[t] * (HD / KV_Q8_GROUP));
+        dattn_cp8(&sm.vs[t][0], p.v_scale + sm.srow[t] * (HD / KV_Q8_GROUP));
+    }
+    asm volatile("cp.async.commit_group;\n" ::);
+    for (int i = t; i < G * HD; i += DT_THREADS) sm.sq[i / HD][i % HD] = q[(size_t) (kvh * G) * HD + i];
+    asm volatile("cp.async.wait_group 0;\n" ::);
+    __syncthreads();
+    // load8_q8's expression on the staged row
+    auto k8 = [&](int c, int d0, float* out) {
+        const float sc = __half2float(__ushort_as_half(sm.ks[c][d0 / KV_Q8_GROUP]));
+        const uint2 raw = *reinterpret_cast<const uint2*>(&sm.k[c][d0]);
+        const int8_t* cc = reinterpret_cast<const int8_t*>(&raw);
+#pragma unroll
+        for (int j = 0; j < 8; ++j) out[j] = (float) cc[j] * sc;
+    };
+    constexpr int NC = 2;
+    const int hd = head_of_lane(lane);
+    for (int i = 0; i < CHUNK / DT_WARPS; i += NC) {
+        int cc[NC];
+        bool all_ok = true;
+#pragma unroll
+        for (int j = 0; j < NC; ++j) {
+            cc[j] = warp + DT_WARPS * (i + j);
+            all_ok = all_ok && cc[j] < n_here && sm.srow[cc[j]] >= 0;
+        }
+        if (all_ok) {
+            float kk[NC][8];
+#pragma unroll
+            for (int j = 0; j < NC; ++j) k8(cc[j], lane * 8, kk[j]);
+            float pp[NC][16];
+#pragma unroll
+            for (int h = 0; h < G; ++h) {
+                const float4 qa = *reinterpret_cast<const float4*>(&sm.sq[h][lane * 8]);
+                const float4 qb = *reinterpret_cast<const float4*>(&sm.sq[h][lane * 8 + 4]);
+#pragma unroll
+                for (int j = 0; j < NC; ++j)
+                    pp[j][h] = kk[j][0] * qa.x + kk[j][1] * qa.y + kk[j][2] * qa.z + kk[j][3] * qa.w +
+                               kk[j][4] * qb.x + kk[j][5] * qb.y + kk[j][6] * qb.z + kk[j][7] * qb.w;
+            }
+#pragma unroll
+            for (int j = 0; j < NC; ++j) {
+#pragma unroll
+                for (int h = G; h < 16; ++h) pp[j][h] = 0.0f;
+                const float sj = reduce12<false>(pp[j], lane);
+                if ((lane & 1) == 0 && hd < G) sm.sp[hd][cc[j]] = sj * scale;
+            }
+        } else {
+            for (int k = 0; k < NC; ++k) {
+                const int c = cc[k];
+                if (c >= n_here || sm.srow[c] < 0) {
+                    if (lane < G) sm.sp[lane][c] = -FLT_MAX;
+                    continue;
+                }
+                float kv8[8];
+                k8(c, lane * 8, kv8);
+                float part[16];
+#pragma unroll
+                for (int h = 0; h < G; ++h) {
+                    const float4 qa = *reinterpret_cast<const float4*>(&sm.sq[h][lane * 8]);
+                    const float4 qb = *reinterpret_cast<const float4*>(&sm.sq[h][lane * 8 + 4]);
+                    part[h] = kv8[0] * qa.x + kv8[1] * qa.y + kv8[2] * qa.z + kv8[3] * qa.w +
+                              kv8[4] * qb.x + kv8[5] * qb.y + kv8[6] * qb.z + kv8[7] * qb.w;
+                }
+#pragma unroll
+                for (int h = G; h < 16; ++h) part[h] = 0.0f;
+                const float s = reduce12<false>(part, lane);
+                if ((lane & 1) == 0 && hd < G) sm.sp[hd][c] = s * scale;
+            }
+        }
+    }
+    __syncthreads();
+    for (int h = warp; h < G; h += DT_WARPS) {
+        const float a = sm.sp[h][lane], b = sm.sp[h][lane + 32];
+        const float m = warp_max_x<false>(fmaxf(a, b));
+        const float ea = (lane < n_here && sm.srow[lane] >= 0) ? __expf(a - m) : 0.0f;
+        const float eb = (lane + 32 < n_here && sm.srow[lane + 32] >= 0) ? __expf(b - m) : 0.0f;
+        spt[lane][h] = ea;
+        spt[lane + 32][h] = eb;
+        const float l = warp_sum_x<false>(ea + eb);
+        if (lane == 0) { part_m[slot * G + h] = m; part_l[slot * G + h] = l; }
+    }
+    __syncthreads();
+    // dimension d of DT_HPT heads a thread (all G with DT_THREADS = HD, as the plain kernel): load_v1<1>'s expression on the
+    // staged rows, each head's fmaf as fold_cell's, in ascending cell order (a masked cell is skipped, weight 0)
+    const int d = t & (HD - 1), h0 = (t / HD) * DT_HPT;
+    float acc[DT_HPT];
+#pragma unroll
+    for (int h = 0; h < DT_HPT; ++h) acc[h] = 0.0f;
+    for (int c = 0; c < n_here; ++c) {
+        if (sm.srow[c] < 0) continue;
+        const float sc = __half2float(__ushort_as_half(sm.vs[c][d / KV_Q8_GROUP]));
+        const float v = (float) sm.v[c][d] * sc;
+        const float* w = &spt[c][h0];
+#pragma unroll
+        for (int h = 0; h < DT_HPT; ++h) acc[h] = fmaf(w[h], v, acc[h]);
+    }
+#pragma unroll
+    for (int h = 0; h < DT_HPT; ++h) part_acc[((size_t) slot * G + h0 + h) * HD + d] = acc[h];
+    __syncthreads();   // the next chunk restages the shared memory
+    }
+}
+// dec/int (STRATA_ATTN_STAGED=1): the verify window's INT8 chunk pass as Basalt's attn_chunk_v2 runs it -
+// attn_chunk_kernel_pre75<1, 2, false>'s operands and order (the same 8-dimension dot products, reduce12, softmax
+// partials and ascending value fold), with the chunk's K and V rows and their scales staged in shared memory by
+// cp.async up front (one memory round trip per block instead of ~20 dependent ones), the lane's query slice read
+// straight into registers, and two blocks per SM (40 KB each), so a T~3 window's 2 x 3 x n_chunks blocks run at once.
+// A masked or missing cell is zero in the staged V rows with weight 0, so the fold needs no branch: fmaf(0, 0, acc)
+// leaves acc unchanged (acc starts at +0 and is never -0).  Each block is one query's, so a row's result does not
+// depend on how many rows the window has.
+struct StagedAttnSmem {
+    alignas(16) int8_t k[CHUNK][HD];
+    alignas(16) int8_t v[CHUNK][HD];
+    alignas(16) uint16_t ks[CHUNK][HD / KV_Q8_GROUP];
+    alignas(16) uint16_t vs[CHUNK][HD / KV_Q8_GROUP];
+    float sp[G][CHUNK];               // scores
+    alignas(16) float spt[CHUNK][G];  // probabilities, cell-major
+    long long srow[CHUNK];
+};
+static_assert(sizeof(StagedAttnSmem) <= 48 * 1024, "staged attention: static shared memory");
+__global__ void __launch_bounds__(THREADS, 2) attn_chunk_staged_kernel(const float* __restrict__ q, QsaAttnPools p,
+                                                                     const int32_t* __restrict__ ids,
+                                                                     const int32_t* __restrict__ step, int n_kv_heads,
+                                                                     int page_size, float scale, float* __restrict__ part_acc,
+                                                                     float* __restrict__ part_m, float* __restrict__ part_l,
+                                                                     int n_chunks, int cap = 0, long long scratch_stride = 0) {
+    __shared__ StagedAttnSmem sm;
+    q += (size_t) blockIdx.z * (size_t) (n_kv_heads * G) * HD;
+    ids += (size_t) blockIdx.z * (size_t) cap;
+    step += (size_t) blockIdx.z * kStepCount;
+    part_acc += (size_t) blockIdx.z * (size_t) scratch_stride;
+    part_m += (size_t) blockIdx.z * (size_t) scratch_stride;
+    part_l += (size_t) blockIdx.z * (size_t) scratch_stride;
+    const int chunk = blockIdx.x, kvh = blockIdx.y;
+    const int t = threadIdx.x, lane = t & 31, warp = t >> 5;
+    const int c0 = chunk * CHUNK;
+    // the cell id is requested before the width is known (in bounds; unused past the width)
+    const int cell = (t < CHUNK && c0 + t < cap) ? __ldg(ids + c0 + t) : 0;
+    const int n_ids = __ldg(step + kStepWidth);
+    const int n_here = min(CHUNK, n_ids - c0);
+    const int slot = kvh * n_chunks + chunk;
+    if (n_here <= 0) {
+        if (t < G) { part_m[slot * G + t] = -FLT_MAX; part_l[slot * G + t] = 0.0f; }
+        return;
+    }
+    if (t < CHUNK) {
+        long long r = -1;
+        if (t < n_here) {
+            const long long page = (long long) p.page_table[cell / page_size];
+            if (page >= 0) r = (page * n_kv_heads + kvh) * page_size + (cell % page_size);
+        }
+        sm.srow[t] = r;
+    }
+    __syncthreads();
+    {
+        constexpr int PER = HD / 16;
+        const unsigned char* kb = reinterpret_cast<const unsigned char*>(p.k_q);
+        const unsigned char* vb = reinterpret_cast<const unsigned char*>(p.v_q);
+        for (int i = t; i < CHUNK * PER; i += THREADS) {
+            const int c = i / PER, j = i % PER;
+            const long long r = sm.srow[c];
+            if (r < 0) {
+                *reinterpret_cast<uint4*>(&sm.v[c][j * 16]) = make_uint4(0, 0, 0, 0);
+                continue;
+            }
+            dattn_cp16(&sm.k[c][j * 16], kb + r * HD + j * 16);
+            dattn_cp16(&sm.v[c][j * 16], vb + r * HD + j * 16);
+        }
+        if (t < 2 * CHUNK) {
+            const int c = t & (CHUNK - 1);
+            const long long r = sm.srow[c];
+            if (r >= 0) {
+                if (t < CHUNK) dattn_cp8(&sm.ks[c][0], p.k_scale + r * (HD / KV_Q8_GROUP));
+                else dattn_cp8(&sm.vs[c][0], p.v_scale + r * (HD / KV_Q8_GROUP));
+            } else if (t >= CHUNK) {
+                *reinterpret_cast<uint2*>(&sm.vs[c][0]) = make_uint2(0, 0);
+            }
+        }
+        asm volatile("cp.async.commit_group;\n" ::);
+    }
+    // the lane's 8 dimensions of the 12 query heads, while the copies are in flight
+    float qr[G][8];
+#pragma unroll
+    for (int h = 0; h < G; ++h) {
+        const float4 qa = __ldg(reinterpret_cast<const float4*>(q + (size_t) (kvh * G + h) * HD + lane * 8));
+        const float4 qb = __ldg(reinterpret_cast<const float4*>(q + (size_t) (kvh * G + h) * HD + lane * 8 + 4));
+        qr[h][0] = qa.x; qr[h][1] = qa.y; qr[h][2] = qa.z; qr[h][3] = qa.w;
+        qr[h][4] = qb.x; qr[h][5] = qb.y; qr[h][6] = qb.z; qr[h][7] = qb.w;
+    }
+    asm volatile("cp.async.wait_group 0;\n" ::);
+    __syncthreads();
+    const int hd = head_of_lane(lane);
+    constexpr int NC = 2;
+#pragma unroll 1
+    for (int i = 0; i < CHUNK / WARPS; i += NC) {
+        int cc[NC];
+        bool ok[NC];
+#pragma unroll
+        for (int j = 0; j < NC; ++j) {
+            cc[j] = warp + WARPS * (i + j);
+            ok[j] = cc[j] < n_here && sm.srow[cc[j]] >= 0;
+        }
+        float kk[NC][8];
+#pragma unroll
+        for (int j = 0; j < NC; ++j) {
+            // load8_q8's expression on the staged row
+            const float sc = __half2float(__ushort_as_half(sm.ks[cc[j]][lane * 8 / KV_Q8_GROUP]));
+            const uint2 raw = *reinterpret_cast<const uint2*>(&sm.k[cc[j]][lane * 8]);
+            const int8_t* cv = reinterpret_cast<const int8_t*>(&raw);
+#pragma unroll
+            for (int e = 0; e < 8; ++e) kk[j][e] = ok[j] ? (float) cv[e] * sc : 0.0f;
+        }
+        float pp[NC][16];
+#pragma unroll
+        for (int h = 0; h < G; ++h) {
+#pragma unroll
+            for (int j = 0; j < NC; ++j)
+                pp[j][h] = kk[j][0] * qr[h][0] + kk[j][1] * qr[h][1] + kk[j][2] * qr[h][2] + kk[j][3] * qr[h][3] +
+                           kk[j][4] * qr[h][4] + kk[j][5] * qr[h][5] + kk[j][6] * qr[h][6] + kk[j][7] * qr[h][7];
+        }
+#pragma unroll
+        for (int j = 0; j < NC; ++j) {
+#pragma unroll
+            for (int h = G; h < 16; ++h) pp[j][h] = 0.0f;
+            const float sj = reduce12<false>(pp[j], lane);
+            if (ok[j]) {
+                if ((lane & 1) == 0 && hd < G) sm.sp[hd][cc[j]] = sj * scale;
+            } else if (lane < G) {
+                sm.sp[lane][cc[j]] = -FLT_MAX;
+            }
+        }
+    }
+    __syncthreads();
+    for (int h = warp; h < G; h += WARPS) {
+        const float a = sm.sp[h][lane], b = sm.sp[h][lane + 32];
+        const float m = warp_max(fmaxf(a, b));
+        const float ea = (lane < n_here && sm.srow[lane] >= 0) ? __expf(a - m) : 0.0f;
+        const float eb = (lane + 32 < n_here && sm.srow[lane + 32] >= 0) ? __expf(b - m) : 0.0f;
+        sm.spt[lane][h] = ea;
+        sm.spt[lane + 32][h] = eb;
+        const float l = warp_sum(ea + eb);
+        if (lane == 0) { part_m[slot * G + h] = m; part_l[slot * G + h] = l; }
+    }
+    __syncthreads();
+    // values: thread t < 128 owns dimensions 2t, 2t+1 of every head; the cells in ascending order
+    if (t >= HD / 2) return;
+    float acc[G][2];
+#pragma unroll
+    for (int h = 0; h < G; ++h) acc[h][0] = acc[h][1] = 0.0f;
+    const int lim = n_here;
+#pragma unroll 4
+    for (int c = 0; c < lim; ++c) {
+        const float sc = __half2float(__ushort_as_half(sm.vs[c][2 * t / KV_Q8_GROUP]));
+        const unsigned short raw = *reinterpret_cast<const unsigned short*>(&sm.v[c][2 * t]);
+        const float v0 = (float) (int8_t) (raw & 0xff) * sc;
+        const float v1 = (float) (int8_t) (raw >> 8) * sc;
+        float w[G];
+#pragma unroll
+        for (int i = 0; i < G / 4; ++i) {
+            const float4 x = *reinterpret_cast<const float4*>(&sm.spt[c][4 * i]);
+            w[4 * i] = x.x; w[4 * i + 1] = x.y; w[4 * i + 2] = x.z; w[4 * i + 3] = x.w;
+        }
+#pragma unroll
+        for (int h = 0; h < G; ++h) {
+            acc[h][0] = fmaf(w[h], v0, acc[h][0]);
+            acc[h][1] = fmaf(w[h], v1, acc[h][1]);
+        }
+    }
+#pragma unroll
+    for (int h = 0; h < G; ++h)
+        *reinterpret_cast<float2*>(&part_acc[((size_t) slot * G + h) * HD + 2 * t]) = make_float2(acc[h][0], acc[h][1]);
+}
+#endif
 #endif  // STRATA_ATTN_PRE75_BUILT
 
 __global__ void __launch_bounds__(HD) attn_merge_kernel(const float* __restrict__ part_acc,
@@ -800,7 +1145,7 @@ __device__ __forceinline__ void merge_sum_block(const float* __restrict__ pm, co
     }
 }
 
-template <int U>
+template <int U, bool ROT = false>
 __global__ void __launch_bounds__(HD) attn_merge_v2_kernel(const float* __restrict__ part_acc,
                                                            const float* __restrict__ part_m,
                                                            const float* __restrict__ part_l, int n_chunks,
@@ -828,8 +1173,123 @@ __global__ void __launch_bounds__(HD) attn_merge_v2_kernel(const float* __restri
     float L = 0.0f, acc = 0.0f;
     for (int c0 = 0; c0 < n_full; c0 += U) merge_sum_block<U, false>(pm, pl, pa, c0, n_act, M, L, acc);
     if (n_full < n_act) merge_sum_block<U, true>(pm, pl, pa, n_full, n_act, M, L, acc);
-    attn[(size_t) h * HD + d] = L > 0.0f ? acc / L : 0.0f;
+    float o = L > 0.0f ? acc / L : 0.0f;
+    if constexpr (ROT) {
+        // dec/int (STRATA_KV_POST): fwht256_cuda's inverse rotation of the head's row (kv_q4.cu, scale 1/16): its lane
+        // stages on each warp's 32 values, then its register stages (value bits 5..7 = the warp) through shared memory -
+        // the same operations in the same order (the drafter's attn_merge_draft_gq_kernel does the same)
+        __shared__ float fw[HD];
+        const int lane = d & 31, w = d >> 5;
+        float v = o * (1.0f / 16.0f);
+#pragma unroll
+        for (int hh = 1; hh < 32; hh *= 2) {
+            const float v2 = __shfl_xor_sync(0xffffffffu, v, hh, 32);
+            v = (lane & hh) == 0 ? v + v2 : v2 - v;
+        }
+#pragma unroll
+        for (int st = 1; st < HD / 32; st *= 2) {
+            fw[d] = v;
+            __syncthreads();
+            v = (w & st) == 0 ? fw[d] + fw[d + 32 * st] : fw[d - 32 * st] - fw[d];
+            __syncthreads();
+        }
+        o = v;
+    }
+    attn[(size_t) h * HD + d] = o;
 }
+
+#if !defined(__HIPCC__)
+// ---- the drafter's merge with the output gate and o_proj's q8_1 input folded in (STRATA_MTP_ATTN_GQ, mtp.cpp): the merge
+// is attn_merge_v2_kernel's arithmetic (this file's build), then native_qsa_gate_apply's and native_quantize_q8_1's, whose
+// files are built with --use_fast_math, written as the instructions that build emits - the three kernels' outputs bit for bit.
+__device__ __forceinline__ float dgq_gate(float x, float raw) {   // x * (1 / (1 + expf(-raw))), fast math
+    float y;
+    asm("{\n\t.reg .f32 t, e, d, r;\n\t"
+        "mul.ftz.f32 t, %2, 0fBFB8AA3B;\n\t"
+        "ex2.approx.ftz.f32 e, t;\n\t"
+        "add.ftz.f32 d, e, 0f3F800000;\n\t"
+        "rcp.approx.ftz.f32 r, d;\n\t"
+        "mul.ftz.f32 %0, %1, r;\n\t}"
+        : "=f"(y) : "f"(x), "f"(raw));
+    return y;
+}
+__device__ __forceinline__ float dgq_max(float a, float b) { float y; asm("max.ftz.f32 %0, %1, %2;" : "=f"(y) : "f"(a), "f"(b)); return y; }
+__device__ __forceinline__ float dgq_abs(float a) { float y; asm("abs.ftz.f32 %0, %1;" : "=f"(y) : "f"(a)); return y; }
+__device__ __forceinline__ float dgq_add(float a, float b) { float y; asm("add.ftz.f32 %0, %1, %2;" : "=f"(y) : "f"(a), "f"(b)); return y; }
+__device__ __forceinline__ float dgq_div(float a, float b) { float y; asm("div.approx.ftz.f32 %0, %1, %2;" : "=f"(y) : "f"(a), "f"(b)); return y; }
+struct DgqQ81 { half2 ds; int8_t qs[32]; };
+static_assert(sizeof(DgqQ81) == 36 && HD % 32 == 0, "q8_1 blocks of 32 inside a head");
+
+template <int U>
+__global__ void __launch_bounds__(HD) attn_merge_draft_gq_kernel(const float* __restrict__ part_acc,
+                                                                 const float* __restrict__ part_m,
+                                                                 const float* __restrict__ part_l, int n_chunks,
+                                                                 const int32_t* __restrict__ steps, float* __restrict__ attn,
+                                                                 const float* __restrict__ q_full, float* __restrict__ gated,
+                                                                 DgqQ81* __restrict__ xq, int rot) {
+    // attn_merge_v2_kernel for the one query
+    const int width = __ldg(steps + kStepWidth);
+    const int n_act = width > 0 ? min(n_chunks, (width - 1) / CHUNK + 1) : 0;
+    const int h = blockIdx.x;
+    const int kvh = h / G, hl = h % G;
+    const int d = threadIdx.x;
+    const size_t base = (size_t) kvh * (size_t) n_chunks * G + (size_t) hl;
+    const float* pm = part_m + base;
+    const float* pl = part_l + base;
+    const float* pa = part_acc + base * HD + (size_t) d;
+    const int n_full = n_act - n_act % U;
+    float M = -FLT_MAX;
+    for (int c0 = 0; c0 < n_full; c0 += U) merge_max_block<U, false>(pm, c0, n_act, M);
+    if (n_full < n_act) merge_max_block<U, true>(pm, n_full, n_act, M);
+    float L = 0.0f, acc = 0.0f;
+    for (int c0 = 0; c0 < n_full; c0 += U) merge_sum_block<U, false>(pm, pl, pa, c0, n_act, M, L, acc);
+    if (n_full < n_act) merge_sum_block<U, true>(pm, pl, pa, n_full, n_act, M, L, acc);
+    float o = L > 0.0f ? acc / L : 0.0f;
+    if (rot) {
+        // fwht256_cuda (kv_q4.cu, scale 1/16) on the head's row: its lane stages on the warp's 32 values, then its register
+        // stages (value index bits 5..7 = the warp) through shared memory - the same additions in the same order
+        __shared__ float fw[HD];
+        const int lane = d & 31, w = d >> 5;
+        float v = o * (1.0f / 16.0f);
+#pragma unroll
+        for (int hh = 1; hh < 32; hh *= 2) {
+            const float v2 = __shfl_xor_sync(0xffffffffu, v, hh, 32);
+            v = (lane & hh) == 0 ? v + v2 : v2 - v;
+        }
+#pragma unroll
+        for (int st = 1; st < HD / 32; st *= 2) {
+            fw[d] = v;
+            __syncthreads();
+            v = (w & st) == 0 ? fw[d] + fw[d + 32 * st] : fw[d - 32 * st] - fw[d];
+            __syncthreads();
+        }
+        o = v;
+    }
+    const size_t i = (size_t) h * HD + d;
+    attn[i] = o;
+    // native_qsa_gate_apply (head h, channel d)
+    const float gv = dgq_gate(o, q_full[(size_t) h * 2 * HD + HD + d]);
+    gated[i] = gv;
+    // native_quantize_q8_1_kernel: lane d & 31 holds value d & 31 of block i / 32
+    float amax = dgq_abs(gv), sum = gv;
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) amax = dgq_max(amax, __shfl_xor_sync(0xffffffffu, amax, off, 32));
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) sum = dgq_add(sum, __shfl_xor_sync(0xffffffffu, sum, off, 32));
+    const float dd = fabsf(dgq_div(amax, 127.0f)) > 65504.0f ? copysignf(65504.0f, dgq_div(amax, 127.0f)) : dgq_div(amax, 127.0f);
+    int8_t code = 0;
+    if (amax != 0.0f) {
+        const float r = roundf(dgq_div(gv, dd));
+        code = (int8_t) (r > 127.0f ? 127.0f : r < -127.0f ? -127.0f : r);
+    }
+    xq[i / 32].qs[i % 32] = code;
+    if (i % 32 == 0) {
+        const float s2 = fabsf(sum) > 65504.0f ? copysignf(65504.0f, sum) : sum;
+        const float d2 = fabsf(dd) > 65504.0f ? copysignf(65504.0f, dd) : dd;
+        xq[i / 32].ds = make_half2(__float2half(d2), __float2half(s2));
+    }
+}
+#endif
 
 #if defined(STRATA_HIP_GFX906)
 // The compat backend can target other architectures. Check the calling thread's current device,
@@ -941,6 +1401,16 @@ bool pre75_attn() {
 #define STRATA_ATTN_CHUNK(M) attn_chunk_kernel<M>
 #endif
 
+// dec/int: STRATA_ATTN_STAGED=1 - the INT8 chunk pass on attn_chunk_staged_kernel (bitwise the Daily's partials)
+bool staged_attn() {
+#if defined(__HIPCC__)
+    return false;
+#else
+    static const bool on = [] { const char* v = std::getenv("STRATA_ATTN_STAGED"); return v && v[0] == '1'; }();
+    return on;
+#endif
+}
+
 // S25: STRATA_ATTN_LANECELL=1 - the score phase one cell per thread (bit-identical scores, no shuffle reductions)
 bool lane_cell_attn() {
     static const bool on = [] { const char* v = std::getenv("STRATA_ATTN_LANECELL"); return v && v[0] == '1'; }();
@@ -965,7 +1435,10 @@ int attn_merge_v2() {
 // the merge of `n_q` queries' partials: v2 = 0 attn_merge_kernel, 1 attn_merge_v2_kernel (bitwise the same output)
 void launch_merge(int v2, const float* part_acc, const float* part_m, const float* part_l, int n_chunks,
                   const int32_t* steps, float* attn, long long stride, unsigned n_head, unsigned n_q, cudaStream_t st) {
-    if (v2)
+    if (v2 == 2)   // dec/int: + the inverse rotation (attn_merge_v2_kernel<U, true>)
+        attn_merge_v2_kernel<kMergeU, true><<<dim3(n_head, n_q), HD, 0, st>>>(part_acc, part_m, part_l, n_chunks, steps,
+                                                                               attn, stride);
+    else if (v2)
         attn_merge_v2_kernel<kMergeU><<<dim3(n_head, n_q), HD, 0, st>>>(part_acc, part_m, part_l, n_chunks, steps,
                                                                          attn, stride);
     else
@@ -1045,6 +1518,18 @@ void launch_chunks_batch(const float* q, const QsaAttnPools& pools, const int32_
     } else
 #endif
 #if !defined(__HIPCC__)
+    if (kv_mode == 1 && (kernel < 0 ? staged_attn() : kernel == 2)) {
+        static bool carve[64] = {};
+        int dev = 0;
+        if (cudaGetDevice(&dev) == cudaSuccess && dev >= 0 && dev < 64 && !carve[dev]) {
+            // a hint (the largest shared-memory carveout): two 40 KB blocks per SM
+            cudaFuncSetAttribute(attn_chunk_staged_kernel, cudaFuncAttributePreferredSharedMemoryCarveout, 100);
+            cudaGetLastError();
+            carve[dev] = true;
+        }
+        attn_chunk_staged_kernel<<<grid, THREADS, 0, st>>>(q, pools, ids, steps, (int) s.n_head_kv, (int) s.page_size,
+                                                           scale, part_acc, part_m, part_l, n_chunks, (int) cap, stride);
+    } else
     if (kernel < 0 && kv_mode == 1 && attn_v3_on())   // (the parity harness names its kernel: never the environment)
         attn_chunk_q8_v3_kernel<<<grid, THREADS, 0, st>>>(q, pools, ids, steps, (int) s.n_head_kv, (int) s.page_size,
                                                           scale, part_acc, part_m, part_l, n_chunks, (int) cap, stride);
@@ -1097,6 +1582,91 @@ void qsa_decode_attn_batch(const float* q, const QsaAttnPools& pools, const int3
         std::fprintf(stderr, "qsa_decode_attn_batch: %s\n", cudaGetErrorString(e));
         std::exit(1);
     }
+}
+
+bool qsa_decode_attn_batch_unrot(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps,
+                                 int64_t cap, const QsaShapes& s, float* scratch, float* attn, int64_t n_q, void* stream) {
+    if (attn_merge_v2() != 1) return false;   // attn_merge_kernel: the caller rotates after it
+    if (n_q <= 0) return true;
+    if (s.head_dim != HD || s.n_head != (int64_t) G * s.n_head_kv || cap <= 0 || !scratch || !ids || !steps ||
+        !pools.page_table || n_q > 65535) {
+        std::fprintf(stderr, "qsa_decode_attn_batch_unrot: unsupported geometry or missing buffers\n");
+        std::exit(1);
+    }
+    cudaStream_t st = (cudaStream_t) stream;
+    launch_chunks_batch(q, pools, ids, steps, cap, s, scratch, n_q, st, -1);
+    launch_merge_batch(steps, cap, s, scratch, attn, n_q, 2, st);
+    const cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess) {
+        std::fprintf(stderr, "qsa_decode_attn_batch_unrot: %s\n", cudaGetErrorString(e));
+        std::exit(1);
+    }
+    return true;
+}
+
+bool qsa_decode_attn_draft(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps, int64_t cap,
+                           const QsaShapes& s, float* scratch, float* attn, void* stream) {
+    return qsa_decode_attn_draft_gq(q, pools, ids, steps, cap, s, scratch, attn, nullptr, nullptr, nullptr, false, stream);
+}
+
+bool qsa_decode_attn_draft_gq(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps, int64_t cap,
+                              const QsaShapes& s, float* scratch, float* attn, const float* q_full, float* gated, void* xq,
+                              bool rot, void* stream) {
+#if defined(__HIPCC__)
+    (void) q; (void) pools; (void) ids; (void) steps; (void) cap; (void) s; (void) scratch; (void) attn; (void) stream;
+    (void) q_full; (void) gated; (void) xq; (void) rot;
+    return false;
+#else
+    // STRATA_MTP_ATTN_STAGED=0 keeps qsa_decode_attn_batch; STRATA_MTP_ATTN_GQ=0 keeps the gate and the quantizer apart
+    static const bool on = [] { const char* v = std::getenv("STRATA_MTP_ATTN_STAGED"); return v == nullptr || std::atoi(v) != 0; }();
+    static const bool gq_on = [] { const char* v = std::getenv("STRATA_MTP_ATTN_GQ"); return v == nullptr || std::atoi(v) != 0; }();
+    const bool gq = q_full != nullptr;
+    if (gq && (!gq_on || gated == nullptr || xq == nullptr || (rot && HD != 256))) return false;
+    if (!on || attn_kv_mode(pools) != 1 || pools.k_scale == nullptr || pools.v_scale == nullptr) return false;
+    if (s.head_dim != HD || s.n_head != (int64_t) G * s.n_head_kv || cap <= 0 || !scratch || !ids || !steps ||
+        !pools.page_table)
+        return false;
+    constexpr int smem = (int) sizeof(DraftAttnSmem);
+    static bool done[64] = {};
+    static int n_sm[64] = {};
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { (void) cudaGetLastError(); return false; }
+    if (!done[dev]) {
+        if (cudaFuncSetAttribute(attn_chunk_draft_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem) != cudaSuccess) {
+            (void) cudaGetLastError();
+            return false;
+        }
+        int sms = 0;
+        if (cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev) != cudaSuccess) { (void) cudaGetLastError(); sms = 0; }
+        n_sm[dev] = sms > 0 ? sms : 1;
+        done[dev] = true;
+    }
+    cudaStream_t st = (cudaStream_t) stream;
+    const int n_chunks = (int) ((cap + CHUNK - 1) / CHUNK);
+    float* part_acc = scratch;
+    float* part_m = scratch + (size_t) n_chunks * s.n_head * HD;
+    float* part_l = part_m + (size_t) n_chunks * s.n_head;
+    const float scale = 1.0f / sqrtf((float) HD);
+    // one block a chunk (the plain kernel's grid); STRATA_MTP_ATTN_GRID=N caps the blocks a KV head (each then loops over
+    // chunks: one wave of 2 x 170 measured slower on struct, 13 vs 9 us, the chunks' latency is serial)
+    static const int grid_env = [] { const char* v = std::getenv("STRATA_MTP_ATTN_GRID"); return v != nullptr ? std::atoi(v) : 0; }();
+    int gx = grid_env > 0 ? grid_env : n_chunks;   // one block a chunk (a loop over chunks measured slower: 13 vs 9 us)
+    gx = gx < 1 ? 1 : (gx > n_chunks ? n_chunks : gx);
+    const int v2 = attn_merge_v2();
+    attn_chunk_draft_kernel<<<dim3((unsigned) s.n_head_kv, (unsigned) gx), DT_THREADS, smem, st>>>(
+        q, pools, ids, steps, (int) s.n_head_kv, (int) s.page_size, scale, part_acc, part_m, part_l, n_chunks, v2 ? 1 : 0);
+    if (gq)
+        attn_merge_draft_gq_kernel<kMergeU><<<(unsigned) s.n_head, HD, 0, st>>>(part_acc, part_m, part_l, n_chunks, steps, attn,
+                                                                              q_full, gated, (DgqQ81*) xq, rot ? 1 : 0);
+    else
+        launch_merge_batch(steps, cap, s, scratch, attn, 1, v2, st);
+    const cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess) {
+        std::fprintf(stderr, "qsa_decode_attn_draft: %s\n", cudaGetErrorString(e));
+        std::exit(1);
+    }
+    return true;
+#endif
 }
 
 bool qsa_decode_attn_slots(const float* q, const QsaAttnSlotPools& pools, const int32_t* ids, const int32_t* steps,
@@ -1269,7 +1839,7 @@ void qsa_decode_attn_chunks_only(const float* q, const QsaAttnPools& pools, cons
                                  int64_t cap, const QsaShapes& s, float* scratch, int64_t n_q, int daily_chunk,
                                  void* stream) {
     if (n_q <= 0 || n_q > 65535 || s.head_dim != HD || s.n_head != (int64_t) G * s.n_head_kv || cap <= 0 || !scratch ||
-        !q || !ids || !steps || !pools.page_table || (daily_chunk != 0 && daily_chunk != 1)) {
+        !q || !ids || !steps || !pools.page_table || (daily_chunk < 0 || daily_chunk > 2)) {   // dec/int: 2 = attn_chunk_staged_kernel (INT8)
         std::fprintf(stderr, "qsa_decode_attn_chunks_only: unsupported geometry or missing buffers\n");
         std::exit(1);
     }
@@ -1284,7 +1854,7 @@ void qsa_decode_attn_chunks_only(const float* q, const QsaAttnPools& pools, cons
 void qsa_decode_attn_merge_only(const int32_t* steps, int64_t cap, const QsaShapes& s, const float* scratch,
                                 float* attn, int64_t n_q, int v2, void* stream) {
     if (n_q <= 0 || n_q > 65535 || s.head_dim != HD || s.n_head != (int64_t) G * s.n_head_kv || cap <= 0 || !scratch ||
-        (v2 != 0 && v2 != 1) || !steps || !attn) {
+        (v2 != 0 && v2 != 1 && v2 != 2) || !steps || !attn) {   // dec/int: 2 = v2 + the inverse rotation
         std::fprintf(stderr, "qsa_decode_attn_merge_only: unsupported geometry or missing buffers\n");
         std::exit(1);
     }

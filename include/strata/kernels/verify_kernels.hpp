@@ -149,7 +149,7 @@ void fetch_blobs(const unsigned long long* src, const int32_t* n, uint8_t* dst, 
 /// The same with `dst2` (device memory, may be null): blob k goes to dst2[k] instead where that is not 0
 /// (STRATA_ADAPT_FETCH: a VRAM cache slot).  A separate overload, so the SYCL copy keeps the one above.
 void fetch_blobs(const unsigned long long* src, const int32_t* n, uint8_t* dst, int64_t blob_bytes, int cap, void* stream,
-                 const unsigned long long* dst2);
+                 const unsigned long long* dst2, int blocks = 0);   // blocks: the grid (0: 384); dec/host's PCIe branch takes fewer
 /// table[pairs[2k]] = pairs[2k + 1] for k < n, `pairs` in mapped host memory: a residency table's changed entries,
 /// stream-ordered before the window that reads it, without the copy engine (where the tier's swaps may queue).
 void res_patch(int32_t* table, const int32_t* pairs, int n, void* stream);
@@ -214,5 +214,18 @@ void window_ids(int32_t* steps, int n, int window, int32_t* ids, int64_t ids_str
 /// selects exactly what window_ids selects.  CUDA / HIP only.
 void window_ids_floor(int32_t* steps, int n, int window, int32_t* ids, int64_t ids_stride, const int32_t* floor_cell,
                       void* stream);
+
+/// STRATA_L2PF: byte ranges (the next layer's weights, in the order its kernels read them) read ahead into L2 while the
+/// window waits for the CPU pool's rows.  Reads only: no value the window computes changes.  After Basalt's
+/// gdn_commit_lazy read-ahead (src/models/qwen4exp/kernels/verify_kernels.cu, MIT).
+constexpr int kL2pfRanges = 16;
+struct L2Prefetch {
+    const void* p[kL2pfRanges] = {};
+    unsigned long long n[kL2pfRanges] = {};
+};
+/// CUDA sm_90+: `blocks` blocks request the ranges into L2 in 128 KiB steps (cp.async.bulk.prefetch.L2), each looking at
+/// *flag (mapped host word) between its steps and returning once *flag >= value (or at once if it already is).
+/// Elsewhere a no-op.
+void l2_prefetch_until(const L2Prefetch& pf, const uint32_t* flag, uint32_t value, int blocks, void* stream);
 
 }  // namespace strata::kernels

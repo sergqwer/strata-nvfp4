@@ -1444,6 +1444,8 @@ cudaError_t gdn_rec_tc(float* state, const float* h, const float* gate, const fl
         cudaGetDevice(&dev);
         if (dev >= 0 && dev < 64 && !attrs[ai][dev]) {
             if (split) cudaFuncSetAttribute(gdn_tc_scan_kernel<false, true, 3, 2>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) kTcScanSmemSplit);
+            if (split) cudaFuncSetAttribute(gdn_tc_scan_kernel<false, true, 2, 2>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) kTcScanSmemSplit);
+            if (split) cudaFuncSetAttribute(gdn_tc_scan_kernel<false, true, 1, 2>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) kTcScanSmemSplit);
             if (ai == 2) {
                 cudaFuncSetAttribute(gdn_tc_scan_kernel<true, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) kTcScanSmemSplitNorm);
                 cudaFuncSetAttribute(gdn_tc_scan_kernel<true, true, 2>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int) kTcScanSmemSplitNorm);
@@ -1460,8 +1462,10 @@ cudaError_t gdn_rec_tc(float* state, const float* h, const float* gate, const fl
     for (int64_t t0 = 0; t0 < T; t0 += GSB) {
         const int nch = (int) ((std::min<int64_t>(GSB, T - t0) + GCH - 1) / GCH);
         gdn_tc_prep_kernel<<<dim3((unsigned) nch, HK), 256, kTcPrepSmem, s>>>(h, gate, beta, sc.ti, sc.te, sc.sc, sc.kq, sc.pi, t0, T);
-        if (tiles == 2 && split && !nm && np == 3) {
-            gdn_tc_scan_kernel<false, true, 3, 2><<<HV * 2, GTC_CW * 16, kTcScanSmemSplit, s>>>(state, h, sc.ti, sc.te, sc.sc, sc.kq, sc.pi, y, t0, nch, T);
+        if (tiles == 2 && split && !nm) {   // strata-nvfp4: NP 1 / 2 with two tiles too (STRATA_GDN_TC_NP, an experiment)
+            if (np == 2) gdn_tc_scan_kernel<false, true, 2, 2><<<HV * 2, GTC_CW * 16, kTcScanSmemSplit, s>>>(state, h, sc.ti, sc.te, sc.sc, sc.kq, sc.pi, y, t0, nch, T);
+            else if (np == 1) gdn_tc_scan_kernel<false, true, 1, 2><<<HV * 2, GTC_CW * 16, kTcScanSmemSplit, s>>>(state, h, sc.ti, sc.te, sc.sc, sc.kq, sc.pi, y, t0, nch, T);
+            else gdn_tc_scan_kernel<false, true, 3, 2><<<HV * 2, GTC_CW * 16, kTcScanSmemSplit, s>>>(state, h, sc.ti, sc.te, sc.sc, sc.kq, sc.pi, y, t0, nch, T);
         } else if (nm && split) {
 #define STRATA_TCN(NPV) gdn_tc_scan_kernel<true, true, NPV><<<HV, GTC_CW * 32, kTcScanSmemSplitNorm, s>>>(state, h, sc.ti, sc.te, sc.sc, sc.kq, sc.pi, y, t0, nch, T, nm->z, nm->gamma, nm->eps, nm->y16, nm->ld16)
             if (np == 2) STRATA_TCN(2);
@@ -3713,6 +3717,13 @@ void gate_attn(const float* attn, const float* q_full, uint16_t* out16, int64_t 
     gate_attn_kernel<<<blocks_for(T * 24 * 256), 256, 0, (cudaStream_t) stream>>>(attn, q_full, out16, T,
                                                                                 ld16 > 0 ? ld16 : 24 * 256);
     check("gate_attn");
+}
+
+// strata-nvfp4: the split tensor-core plan (the 99-KB cards' gdn_rec_tc(..., split = true)) for gdn_rec_parity's NP / tile
+// variants (STRATA_GDN_TC_NP); the engine does not call it
+cudaError_t gdn_rec_tc_split_for_test(float* state, const float* h, const float* gate, const float* beta, float* y, int64_t T,
+                                      cudaStream_t s, int np, int tiles) {
+    return gdn_rec_tc(state, h, gate, beta, y, T, s, true, np, nullptr, tiles);
 }
 
 }  // namespace strata::prefill

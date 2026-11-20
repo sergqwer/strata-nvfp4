@@ -750,6 +750,55 @@ void swiglu_quant(const float* gu, void* hq, int64_t rows, const int32_t* bounds
     ck(cudaGetLastError(), "swiglu_quant");
 }
 
+// strata-nvfp4 (pfx): the grouped FP4 GEMM (mmq_nvfp4_fp4g.cu, the 12xa unit)
+#if !defined(GGML_USE_HIP)
+}  // namespace strata::prefill::mmq
+namespace strata::prefill::fp4g {
+bool available();
+int run_group(int n, const void* const* gu, const void* const* dn, const float* const* tail, const int32_t* bounds_gu,
+              const int32_t* bounds_d, int64_t r0, int64_t nr, int64_t max_rows, const void* xq, const float* xscale,
+              const int32_t* yrows, int64_t x_rows, float* h, void* hq, float* hscale, float* sd, float* dm, int mode,
+              void* stream);
+}  // namespace strata::prefill::fp4g
+namespace strata::prefill::mmq {
+#endif
+int fp4g_mode() {
+#if defined(GGML_USE_HIP)
+    return 0;
+#else
+    static const int m = [] {
+        // strata-nvfp4 (owner 2026-11-19): mode 2 by default where the 12x unit runs (NOTES-pfx.md, NOTES-int.md:
+        // 16K -5%, 64K -4.6%, first-token KL vs fp16 not worse than MMQ); STRATA_PF_FP4G=0 is the way back to MMQ
+        const char* v = std::getenv("STRATA_PF_FP4G");
+        const int want = v && v[0] ? std::atoi(v) : 2;
+        if (want != 1 && want != 2) return 0;
+        if (strata::emulated_cc() || !fp4g::available()) {
+            if (v && v[0]) std::fprintf(stderr, "strata: STRATA_PF_FP4G=%d needs an sm_12x card in a 12x build: MMQ\n", want);
+            return 0;
+        }
+        std::fprintf(stderr, "strata: prompt NVFP4 experts on the grouped FP4 kernel (STRATA_PF_FP4G=%d: gate/up two FP4 terms%s)\n",
+                     want, want == 2 ? ", down two FP4 terms" : ", down MMQ w4a8");
+        return want;
+    }();
+    return m;
+#endif
+}
+int fp4g_group(int n, const void* const* gu, const void* const* dn, const float* const* tail, const int32_t* bounds_gu,
+               const int32_t* bounds_d, int64_t r0, int64_t nr, int64_t max_rows, const void* xq, const float* xscale,
+               const int32_t* yrows, int64_t x_rows, float* h, void* hq, float* hscale, float* sd, float* dm,
+               void* stream) {
+#if defined(GGML_USE_HIP)
+    (void) n; (void) gu; (void) dn; (void) tail; (void) bounds_gu; (void) bounds_d; (void) r0; (void) nr; (void) max_rows;
+    (void) xq; (void) xscale; (void) yrows; (void) x_rows; (void) h; (void) hq; (void) hscale; (void) sd; (void) dm; (void) stream;
+    return 0;
+#else
+    const int mode = fp4g_mode();
+    if (mode == 0 || !x2_mode()) return 0;
+    return fp4g::run_group(n, gu, dn, tail, bounds_gu, bounds_d, r0, nr, max_rows, xq, xscale, yrows, x_rows, h, hq,
+                           hscale, sd, dm, mode, stream);
+#endif
+}
+
 bool swiglu_quant_ok(int t) {
 #if !defined(__HIPCC__) && defined(STRATA_EXPERIMENTAL_SM60)
     // the q8_1 D4 rows quantize() writes for a down product's H (K 640)

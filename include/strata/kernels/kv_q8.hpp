@@ -33,6 +33,13 @@ inline uint64_t kv_q8_bytes_per_cell(const QsaShapes& s) {
 void kv_append_q8_steps(int8_t* k_q, int8_t* v_q, uint16_t* k_scale, uint16_t* v_scale, const int32_t* page_table,
                         const int32_t* step, int step_stride, const float* kcur, const float* vcur, int cur_stride,
                         int n_tok, const QsaShapes& s, void* stream, const KvHostPools* host);
+/// dec/int (STRATA_KV_POST, default on): fwht256_inplace_cuda on the n_tok x kv_heads rows of K and of V, then
+/// kv_append_q8_steps of them, in one launch - bitwise the three (qsa_post_parity; this kernel lives in kv_q8.cu,
+/// compiled as kv_q4.cu and kv_q8.cu are, without fast-math).  kcur / vcur are left rotated, as before.  head_dim 256.
+bool kv_rot_append_q8_usable(int head_dim);
+void kv_rot_append_q8(float* kcur, float* vcur, int8_t* k_q, int8_t* v_q, uint16_t* k_scale, uint16_t* v_scale,
+                      const int32_t* page_table, const int32_t* step, int step_stride, int n_tok, const QsaShapes& s,
+                      const KvHostPools* host, void* stream);
 void kv_append_q8_step(int8_t* k_q, int8_t* v_q, uint16_t* k_scale, uint16_t* v_scale, const int32_t* page_table,
                        const int32_t* step, const float* kcur, const float* vcur, const QsaShapes& s, void* stream,
                        const KvHostPools* host = nullptr);

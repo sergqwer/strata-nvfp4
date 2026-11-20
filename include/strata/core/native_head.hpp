@@ -35,6 +35,14 @@ public:
     int device() const { return device_; }
     /// Bytes of one vocabulary row.
     size_t row_bytes() const { return n_out_ > 0 ? (size_t) (bytes_ / (uint64_t) n_out_) : 0; }
+    /// The Q8_0 head held as bit planes (q80_vhead.hpp; STRATA_HEAD_PLANES, on by default where the kernels run): every
+    /// reader of the rows goes through mmvq() / gather() below, which give the Q8_0 head's exact bits.
+    bool planes() const { return planes_; }
+    /// Every row of the head against `ncols` q8_1 columns: y[j * n_out + r], the bits of native_mmvq on the Q8_0 rows.
+    void mmvq(const void* x_q8_1, float* y, int ncols, void* stream) const;
+    /// Rows `ids` (device, n of them) copied into `dst` in the GGUF's own layout (planes unpacked), on `stream` (nullptr: the
+    /// legacy stream, as gather_rows).
+    void gather(const int32_t* ids, int64_t n, void* dst, void* stream) const;
 
 private:
     void* weights_ = nullptr;
@@ -44,6 +52,7 @@ private:
     int n_in_ = 0, n_out_ = 0;
     int type_ = -1;
     int device_ = -1;
+    bool planes_ = false;
 };
 
 /// Plan v0.3 P6: `token_embd.weight` in its GGUF form (the IQ model files), in mapped pinned host memory: a row

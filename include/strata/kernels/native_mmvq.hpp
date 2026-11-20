@@ -41,6 +41,11 @@ int native_mmvq_b6_rows();
 // One quantization may serve multiple weight matrices sharing the same input.
 // Q8_1 stores FP16 scale and FP16 warp sum of the ORIGINAL float inputs; it does
 // not reconstruct that sum from the quantized integers.
+/// dec/int: whether the Q8_0 GEMVs of a verify window take dense_tc (STRATA_DENSE_TC=1 on a card that has it).
+bool native_q8_dense_tc_on();
+/// dec/int (STRATA_KV_POST): native_qsa_gate_apply (output = attn * sigmoid(gate) over rows = tokens x heads) and
+/// native_quantize_q8_1 of output in one launch, bitwise the pair (qsa_post_parity; both are fast-math files).
+void qsa_gate_q8_1(const float* attn, const float* q_full, float* output, void* x_q8_1, int rows, int head_dim, void* stream);
 void native_quantize_q8_1(const float* x, void* x_q8_1, int n_in, int ncols,
                           void* stream);
 
@@ -156,6 +161,13 @@ bool native_mmvq_supported(int ggml_type) noexcept;
 std::size_t native_mmvq_weight_bytes(int ggml_type, int n_in, int n_out);
 void native_mmvq(int ggml_type, const void* weights, const void* x_q8_1, float* y,
                  int n_in, int n_out, int ncols, void* stream);
+/// One column of a Q8_0 matrix with the weights read cache-streaming (evict-first): native_mmvq(8, ..., ncols = 1)'s
+/// output bit for bit.  For a large matrix read once per step (the drafter's query projection) beside smaller ones that
+/// should stay in L2.
+void native_q8_0_mmvq_stream(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, void* stream);
+/// The same kernel without the streaming loads: native_mmvq(8, ..., ncols = 1)'s bits, its first weights loaded before the
+/// PDL wait (a PDL launch inside pdl_scope() overlaps them with the kernel before).
+void native_q8_0_mmvq_pf(const void* weights, const void* x_q8_1, float* y, int n_in, int n_out, void* stream);
 /// S26 STRATA_LFUSE: native_mmvq(w1 -> y1) and native_mmvq(w2 -> y2), same type / shape / input, in ONE launch,
 /// bitwise the two calls. Returns false (nothing launched) where that is not the case (Q8_0, 2-8 columns only).
 bool native_mmvq_pair(int ggml_type, const void* w1, const void* w2, const void* x_q8_1, float* y1, float* y2,

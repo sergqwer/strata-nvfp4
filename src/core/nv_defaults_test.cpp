@@ -56,8 +56,9 @@ int main() {
     put("STRATA_SM121_PERF", "1");
     CHECK(nv_default_env(12, 1, false).size() == 6);
     unset("STRATA_SM121_PERF");
-    // the other cards: sm_120 (RTX 50) and sm_100 get nothing from this file; the sm_86 / sm_60 tables are unchanged by the flag
-    CHECK(nv_default_env(12, 0, false).empty());
+    // sm_120 (RTX 50): strata-nvfp4's table (hc8, equal chunks, GDN TC: 5 switches), none with STRATA_DEFAULTS=026; sm_100 gets nothing
+    CHECK(nv_default_env(12, 0, false).size() == 23);
+    CHECK(nv_default_env(12, 0, true).empty());
     CHECK(nv_default_env(10, 0, false).empty());
     CHECK(nv_default_env(8, 9, false).empty());
     CHECK(nv_default_env(7, 5, false).empty());
@@ -136,7 +137,7 @@ int main() {
         unset("STRATA_PF_FUSED_SM86");
     }
     // the other tables are unchanged by it
-    CHECK(nv_default_env(12, 0, false).empty());
+    CHECK(nv_default_env(12, 0, false).size() == 23);
     // round 0212: the NVIDIA prompt-chunk ceiling of a bare `--prefill auto` (nv_chunk.hpp)
     CHECK(nv_chunk_ceiling(nullptr, false) == 32768);
     CHECK(nv_chunk_ceiling("1", false) == 32768);

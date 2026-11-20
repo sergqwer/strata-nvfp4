@@ -48,5 +48,9 @@ bool swiglu_quant_scaled_ok(int) { return false; }
 void swiglu_quant(const float*, void*, int64_t, const int32_t*, int, const float* const*, int64_t, float*, void*) { absent("mmq::swiglu_quant (fork)"); }
 size_t direct_slot_guard() { return 0; }
 void prep_group(const GuardTab&, size_t, void*, void*, size_t, void*) { absent("mmq::prep_group"); }
+int fp4g_mode() { return 0; }
+int fp4g_group(int, const void* const*, const void* const*, const float* const*, const int32_t*, const int32_t*, int64_t,
+               int64_t, int64_t, const void*, const float*, const int32_t*, int64_t, float*, void*, float*, float*, float*,
+               void*) { return 0; }
 
 }  // namespace strata::prefill::mmq

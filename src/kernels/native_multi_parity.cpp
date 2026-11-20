@@ -8,6 +8,7 @@
 //     output, k = 9 and a null shared row take the scalar one) against a host replay of the documented contract:
 //     the first product rounds to F32, the next ones accumulate with FMA in expert order, the shared row is added
 //     once: memcmp.
+#include "strata/kernels/elementwise.hpp"
 #include "strata/kernels/native_moe.hpp"
 #include "strata/kernels/native_router.hpp"
 #include "strata/kernels/router_top10.hpp"
@@ -91,6 +92,60 @@ int main(int argc, char**) {
         std::printf("  %-52s %s (%d cases)\n", (std::string("router multi == single, ") + names[mode]).c_str(),
                     mode_bad ? "*** NO ***" : "bitwise", cases);
         bad += mode_bad;
+    }
+
+    // ---- dec/host round 5: native_route_doorbell_res == native_router_top10_multi + doorbell_publish_res (ids, weights,
+    // the published ids, the rows copied or not, the ring + 1), n = 2..8, all resident / one expert missing
+    {
+        int rd_bad = 0, rd_n = 0;
+        for (int miss = 0; miss < 2; ++miss)
+        for (int n = 2; n <= 8; ++n) {
+            const int N = 2560;
+            std::vector<float> lg((size_t) n * 512), x((size_t) n * N);
+            for (auto& v : lg) v = gauss(rng) * 2.0f;
+            for (auto& v : x) v = gauss(rng);
+            std::vector<int32_t> res(512, 7);
+            float* d_l = up(lg);
+            float* d_x = up(x);
+            int32_t* d_res = up(res);
+            int32_t *d_i[2], *d_io[2];
+            float *d_w[2], *d_xo[2];
+            uint32_t* d_seq[2];
+            for (int k = 0; k < 2; ++k) {
+                check(cudaMalloc(&d_i[k], (size_t) n * 10 * 4), "i"); check(cudaMalloc(&d_w[k], (size_t) n * 10 * 4), "w");
+                check(cudaMalloc(&d_io[k], (size_t) n * 10 * 4), "io"); check(cudaMalloc(&d_xo[k], (size_t) n * N * 4), "xo");
+                check(cudaMalloc(&d_seq[k], 4), "sq");
+                check(cudaMemset(d_xo[k], 0, (size_t) n * N * 4), "z"); check(cudaMemset(d_seq[k], 0, 4), "z");
+            }
+            native_router_top10_multi(d_l, d_i[0], d_w[0], n, st);
+            check(cudaDeviceSynchronize(), "sync");
+            if (miss) {   // make one routed expert non-resident
+                const auto ids = down(d_i[0], (size_t) n * 10);
+                const int32_t m1 = -1;
+                check(cudaMemcpy(d_res + ids[(size_t) (n - 1) * 10 + 9], &m1, 4, cudaMemcpyHostToDevice), "res");
+            }
+            doorbell_publish_res(d_x, d_i[0], d_res, 512, (int64_t) n * N, (int64_t) n * 10, d_xo[0], d_io[0], d_seq[0], st);
+            native_route_doorbell_res(d_l, d_i[1], d_w[1], n, d_x, d_res, 512, (int64_t) n * N, d_xo[1], d_io[1], d_seq[1], st);
+            check(cudaDeviceSynchronize(), "sync");
+            bool ok = down(d_i[0], (size_t) n * 10) == down(d_i[1], (size_t) n * 10) &&
+                      down(d_io[0], (size_t) n * 10) == down(d_io[1], (size_t) n * 10) &&
+                      down(d_seq[0], 1) == down(d_seq[1], 1);
+            const auto w0 = down(d_w[0], (size_t) n * 10), w1 = down(d_w[1], (size_t) n * 10);
+            const auto x0 = down(d_xo[0], (size_t) n * N), x1 = down(d_xo[1], (size_t) n * N);
+            // dec/front STRATA_ROUTE_DB=2 copies the rows whatever the residency (the host reads them only for a miss): with
+            // every expert resident they must then be the rows themselves instead of the untouched buffer
+            static const bool rows_first = [] { const char* v = std::getenv("STRATA_ROUTE_DB"); return v != nullptr && v[0] == '2'; }();
+            const auto xin = down(d_x, (size_t) n * N);
+            const bool rows_ok = (rows_first && miss == 0) ? std::memcmp(xin.data(), x1.data(), x1.size() * 4) == 0
+                                                           : std::memcmp(x0.data(), x1.data(), x0.size() * 4) == 0;
+            ok = ok && std::memcmp(w0.data(), w1.data(), w0.size() * 4) == 0 && rows_ok;
+            ++rd_n;
+            if (!ok) { std::printf("    *** native_route_doorbell_res n=%d miss=%d differs ***\n", n, miss); ++rd_bad; }
+            cudaFree(d_l); cudaFree(d_x); cudaFree(d_res);
+            for (int k = 0; k < 2; ++k) { cudaFree(d_i[k]); cudaFree(d_w[k]); cudaFree(d_io[k]); cudaFree(d_xo[k]); cudaFree(d_seq[k]); }
+        }
+        std::printf("  %-52s %s (%d cases)\n", "route+doorbell == router multi + doorbell", rd_bad ? "*** NO ***" : "bitwise", rd_n);
+        bad += rd_bad;
     }
 
     // ---- #1357: a model that does not have 512 experts takes the generic router (the native one reads 512 floats a

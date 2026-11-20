@@ -12,6 +12,7 @@
 #include "strata/kernels/bf16_bits.hpp"
 #include "strata/kernels/verify_kernels.hpp"
 #include "strata/kernels/gfx_arch.hpp"
+#include "strata/kernels/pdl.hpp"   // dec/front: pdl_launch_ok for the early read
 #include "s26_tsum.cuh"
 
 #include <cuda_fp16.h>
@@ -245,6 +246,11 @@ struct GrMulti {
     FusedGrArgs a[kFusedGrMaxT];
     float* xn;
     int T;
+    // dec/front STRATA_EARLY_READ: the hc8 read launched before the previous layer's combine; its blocks wait until
+    // *gate >= gate_n (the combine's blocks, one count each), the last to pass zeroes gate and gate_pass (null: no gate)
+    const unsigned* gate = nullptr;
+    unsigned gate_n = 0;
+    unsigned* gate_pass = nullptr;
 };
 
 
@@ -3395,6 +3401,8 @@ void launch_q8(const GrMulti& m, float* scratch, cudaStream_t st, unsigned long 
     }
 }
 
+#include "hc8_read.cuh"   // STRATA_HC_Q8=1 on CUDA: the 8-bit read built for sm_120
+
 }  // namespace
 
 #if STRATA_GR_FAST_BUILD
@@ -3578,10 +3586,129 @@ static bool gr_up_pf_dispatch(int pf, int n_tok, const GrMulti& m, const float* 
     }
 }
 
+// ---- hc8 (STRATA_HC_Q8=1 on CUDA): the repacked copies, their launch ---------------------------------------------
+namespace {
+std::mutex g_hc8_mu;
+std::vector<const void*> g_hc8_split;   // the Q8_0 copies repacked into hc8's layout (codes, then fp16 scales)
+bool hc8_is_split(const void* p) {
+    if (p == nullptr) return false;
+    std::lock_guard<std::mutex> lk(g_hc8_mu);
+    for (const void* q : g_hc8_split)
+        if (q == p) return true;
+    return false;
+}
+#if !defined(__HIPCC__)
+__global__ void __launch_bounds__(256) gr_hc8_repack_kernel(const uint8_t* __restrict__ q8, uint8_t* __restrict__ out, int64_t nb) {
+    const int64_t b = (int64_t) blockIdx.x * 8 + (threadIdx.x >> 5);
+    const int lane = threadIdx.x & 31;
+    if (b >= nb) return;
+    const uint8_t* p = q8 + b * 34;
+    out[b * 32 + lane] = p[2 + lane];
+    if (lane == 0) reinterpret_cast<unsigned short*>(out + nb * 32)[b] = (unsigned short) (p[0] | (p[1] << 8));
+}
+#endif
+__global__ void __launch_bounds__(256) gr_dequant_hc8_kernel(const int8_t* __restrict__ q, const unsigned short* __restrict__ sc,
+                                                             uint16_t* __restrict__ out, int64_t nb) {
+    const int64_t b = (int64_t) blockIdx.x * 8 + (threadIdx.x >> 5);
+    const int lane = threadIdx.x & 31;
+    if (b >= nb) return;
+    const float d = __half2float(__ushort_as_half(sc[b]));
+    out[b * 32 + lane] = bf16_from_f32(d * (float) q[b * 32 + lane]);   // gr_dequant_q8_0_kernel's value
+}
+#if !defined(__HIPCC__)
+// one counter set per stream that reads (the verifier's, the MTP's, a test's), per device
+unsigned* hc8_counters(int dev, cudaStream_t st) {
+    static std::mutex mu;
+    static void* base[64] = {};
+    static std::vector<cudaStream_t> streams[64];
+    std::lock_guard<std::mutex> lk(mu);
+    if (dev < 0 || dev >= 64) return nullptr;
+    if (base[dev] == nullptr && (cudaGetSymbolAddress(&base[dev], hc8::g_cnt) != cudaSuccess || base[dev] == nullptr)) {
+        cudaGetLastError();
+        base[dev] = nullptr;
+        return nullptr;
+    }
+    auto& v = streams[dev];
+    size_t i = 0;
+    while (i < v.size() && v[i] != st) ++i;
+    if (i == v.size()) {
+        if (v.size() == (size_t) hc8::NSLOT) {
+            std::fprintf(stderr, "fused_gr hc8: more than %d streams read the hyper-connections on one device\n", hc8::NSLOT);
+            std::exit(1);
+        }
+        v.push_back(st);
+    }
+    return reinterpret_cast<unsigned*>(base[dev]) + i * (hc8::NRG + 1);
+}
+cudaError_t hc8_launch(int T, const GrMulti& m, float* scratch, cudaStream_t st, unsigned long long* stamp_buf, int stamp_i0,
+                       bool gated = false) {
+    int dev = 0;
+    cudaGetDevice(&dev);
+    static int pdl_dev[64] = {};   // 0 unknown, 1 PDL (sm_90+), -1 none
+    if (dev >= 0 && dev < 64 && pdl_dev[dev] == 0) {
+        int major = 0;
+        pdl_dev[dev] = cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) == cudaSuccess &&
+                       strata::cc_major_of(major) >= 9 ? 1 : -1;
+        cudaGetLastError();
+        static const int pdl_env = [] { const char* v = std::getenv("STRATA_HC8_PDL"); return v != nullptr ? std::atoi(v) : 1; }();
+        if (pdl_env == 0) pdl_dev[dev] = -1;
+        std::fprintf(stderr, "strata: STRATA_HC_Q8=1: the 8-bit hyper-connection read hc8 (int8 rows + fp16 scales, fp32 sums)%s\n",
+                     pdl_dev[dev] == 1 ? ", programmatic dependent launch" : "");
+    }
+    const bool pdl = stamp_buf == nullptr && dev >= 0 && dev < 64 && pdl_dev[dev] == 1;
+    unsigned* cnt = hc8_counters(dev, st);
+    if (cnt == nullptr) return cudaErrorInvalidSymbol;
+    const int8_t* qd = reinterpret_cast<const int8_t*>(m.a[0].q8_down);
+    const int8_t* qu = reinterpret_cast<const int8_t*>(m.a[0].q8_up);
+    switch (T) {
+        case 1: return hc8::launch_t<1>(m, qd, qu, scratch, cnt, st, pdl, stamp_buf, stamp_i0, gated);
+        case 2: return hc8::launch_t<2>(m, qd, qu, scratch, cnt, st, pdl, stamp_buf, stamp_i0, gated);
+        case 3: return hc8::launch_t<3>(m, qd, qu, scratch, cnt, st, pdl, stamp_buf, stamp_i0, gated);
+        case 4: return hc8::launch_t<4>(m, qd, qu, scratch, cnt, st, pdl, stamp_buf, stamp_i0, gated);
+        case 5: return hc8::launch_t<5>(m, qd, qu, scratch, cnt, st, pdl, stamp_buf, stamp_i0, gated);
+        case 6: return hc8::launch_t<6>(m, qd, qu, scratch, cnt, st, pdl, stamp_buf, stamp_i0, gated);
+        case 7: return hc8::launch_t<7>(m, qd, qu, scratch, cnt, st, pdl, stamp_buf, stamp_i0, gated);
+        default: return hc8::launch_t<8>(m, qd, qu, scratch, cnt, st, pdl, stamp_buf, stamp_i0, gated);
+    }
+}
+#endif
+}  // namespace
+
+bool fused_gr_hc8_on() {
+#if defined(__HIPCC__)
+    return false;
+#else
+    static const bool on = [] { const char* v = std::getenv("STRATA_HC8_NV"); return v == nullptr || std::atoi(v) != 0; }();
+    return on;
+#endif
+}
+
+bool fused_gr_hc8_repack(void* q8, int64_t n_blocks) {
+#if defined(__HIPCC__)
+    (void) q8; (void) n_blocks;
+    return false;
+#else
+    if (q8 == nullptr || n_blocks <= 0) return false;
+    if (hc8_is_split(q8)) return true;   // a table shared by two loads: once
+    void* tmp = nullptr;
+    const size_t bytes = (size_t) n_blocks * 34;
+    if (cudaMalloc(&tmp, bytes) != cudaSuccess) { cudaGetLastError(); return false; }
+    gr_hc8_repack_kernel<<<(unsigned) ((n_blocks + 7) / 8), 256>>>((const uint8_t*) q8, (uint8_t*) tmp, n_blocks);
+    const bool ok = cudaGetLastError() == cudaSuccess && cudaMemcpy(q8, tmp, bytes, cudaMemcpyDeviceToDevice) == cudaSuccess &&
+                    cudaDeviceSynchronize() == cudaSuccess;
+    cudaFree(tmp);
+    if (!ok) { cudaGetLastError(); return false; }
+    std::lock_guard<std::mutex> lk(g_hc8_mu);
+    g_hc8_split.push_back(q8);
+    return true;
+#endif
+}
+
 // One read of at most kFusedGrMaxT tokens: the kernels below are built for that many (the instantiations, the shared
 // memory, the by-value launch argument), whatever the window is.
 static bool fused_gr_read_multi_slice(const FusedGrArgs* a, int n_tok, float* xn_scratch, void* stream,
-                                      unsigned long long* stamp_buf, int stamp_i0) {
+                                      unsigned long long* stamp_buf, int stamp_i0, const unsigned* gate = nullptr,
+                                      unsigned gate_n = 0, unsigned* gate_pass = nullptr) {
     if (n_tok < 1 || n_tok > kFusedGrMaxT || xn_scratch == nullptr) {
         std::fprintf(stderr, "fused_gr_read_multi: invalid arguments\n");
         std::exit(1);
@@ -3611,7 +3738,25 @@ static bool fused_gr_read_multi_slice(const FusedGrArgs* a, int n_tok, float* xn
         for (int t = 0; t < n_tok; ++t) m.a[t].q8_mixed = nullptr;
     m.xn = xn_scratch;
     m.T = n_tok;
+    m.gate = gate;
+    m.gate_n = gate_n;
+    m.gate_pass = gate_pass;
     cudaStream_t st = (cudaStream_t) stream;
+#if !defined(__HIPCC__)
+    if (a[0].q8_down != nullptr && a[0].q8_up != nullptr && hc8_is_split(a[0].q8_down) && hc8_is_split(a[0].q8_up)) {
+        // STRATA_HC_Q8=1 on CUDA: hc8 (inject: the bf16 rows)
+        if (a[0].w_inject == nullptr && a[0].q8_inject != nullptr) {
+            std::fprintf(stderr, "fused_gr_read_multi hc8: the inject rows must be bf16 (STRATA_HC_Q8_INJECT=1 is not supported with hc8)\n");
+            std::exit(1);
+        }
+        const cudaError_t eh = hc8_launch(n_tok, m, xn_scratch, st, stamp_buf, stamp_i0, gate != nullptr);
+        if (eh != cudaSuccess) {
+            std::fprintf(stderr, "fused_gr_read_multi hc8: %s\n", cudaGetErrorString(eh));
+            std::exit(1);
+        }
+        return q8;
+    }
+#endif
     if (a[0].q8_down != nullptr && a[0].q8_up != nullptr) {   // inject: Q8_0 copy, or the BF16 rows
         launch_q8(m, xn_scratch, st, stamp_buf, stamp_i0);   // S23 experiment: STRATA_HC_Q8=1
         const cudaError_t eq = cudaGetLastError();
@@ -3852,6 +3997,24 @@ void fused_gr_v3_print_resources() {
     one("up T4 pf3", (const void*) gr_up_v3_kernel<1, 4, true, 3>, 0);
 #endif
 }
+bool fused_gr_read_gated_ok(const FusedGrArgs* a, int n_tok) {
+#if defined(__HIPCC__)
+    (void) a; (void) n_tok;
+    return false;
+#else
+    return a != nullptr && n_tok >= 1 && n_tok <= kFusedGrMaxT && a[0].q8_down != nullptr && a[0].q8_up != nullptr &&
+           hc8_is_split(a[0].q8_down) && hc8_is_split(a[0].q8_up) && a[0].w_inject != nullptr &&
+           hc8::hc8_down_variant() != 1 && hc8::hc8_up_variant() == 1;
+#endif
+}
+bool fused_gr_read_multi_gated(const FusedGrArgs* a, int n_tok, float* xn_scratch, const unsigned* gate, unsigned gate_n,
+                               unsigned* gate_pass, void* stream) {
+    if (!fused_gr_read_gated_ok(a, n_tok) || gate == nullptr || gate_pass == nullptr || gate_n == 0) {
+        std::fprintf(stderr, "fused_gr_read_multi_gated: invalid arguments\n");
+        std::exit(1);
+    }
+    return fused_gr_read_multi_slice(a, n_tok, xn_scratch, stream, nullptr, 0, gate, gate_n, gate_pass);
+}
 bool fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, void* stream, unsigned long long* stamp_buf,
                          int stamp_i0) {
     if (n_tok <= kFusedGrMaxT) return fused_gr_read_multi_slice(a, n_tok, xn_scratch, stream, stamp_buf, stamp_i0);
@@ -3899,6 +4062,11 @@ __global__ void __launch_bounds__(256) gr_dequant_q8_0_kernel(const uint8_t* __r
 }
 
 void fused_gr_dequant_q8_0(const uint8_t* q8, uint16_t* bf16, int64_t n_blocks, void* stream) {
+    if (hc8_is_split(q8)) {   // hc8's layout: the codes, then the fp16 scales
+        gr_dequant_hc8_kernel<<<(unsigned) ((n_blocks + 7) / 8), 256, 0, (cudaStream_t) stream>>>(
+            (const int8_t*) q8, (const unsigned short*) (q8 + (size_t) n_blocks * 32), bf16, n_blocks);
+        return;
+    }
     gr_dequant_q8_0_kernel<<<(unsigned) ((n_blocks + 7) / 8), 256, 0, (cudaStream_t) stream>>>(q8, bf16, n_blocks);
 }
 
