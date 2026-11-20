@@ -15,13 +15,16 @@ from strata_control import drafting
 ROOT = Path(__file__).resolve().parents[2]
 REAL_HEADER = ROOT / "tests" / "terminal" / "data" / "flash_next_iq3s_header.gguf"   # the first 2,710 bytes of the Qwen3.8-Flash-Next IQ3_S file: the keys, no weights
 _HARDWARE = mock.patch.object(drafting, "detect_hardware", return_value=("cuda", ["sm_120"]))
+_OLD_AUTO = mock.patch.dict("os.environ", {"STRATA_AUTO_NEW_MTP": "0"})   # strata-nvfp4: the Auto before Basalt's MTP drafting (test_drafting_fork_* cover the new one)
 
 
 def setUpModule():
     _HARDWARE.start()
+    _OLD_AUTO.start()
 
 
 def tearDownModule():
+    _OLD_AUTO.stop()
     _HARDWARE.stop()
 
 

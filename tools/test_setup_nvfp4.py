@@ -80,6 +80,16 @@ def verify(s, size, digest, **_):   # (own=, also= since upstream 0.2.x)
     setup.mark(s, f"sha256 {digest}")
 
 
+# The drafter fetches go to the network (drafting_fetch: the DFlash2 drafter, 1.2 GB, and the tuned draft layer, 0.12 GB):
+# never in a test.  FETCHED records which install asked for them.
+FETCHED: list = []
+
+
+def no_network_fetches():
+    return [mock.patch.object(setup, "nvfp4_fetch_dflash2", lambda data, exe: FETCHED.append(("dflash2", Path(data)))),
+            mock.patch.object(setup, "nvfp4_fetch_tuned_mtp", lambda mtp: FETCHED.append(("tuned", Path(mtp))))]
+
+
 def run(ram, found, argv, repos=FILLED, answers=None, extra=(), downloads=None, pip=None):
     """setup.main() through the golden harness, with the NVFP4 tables and this fork's engine."""
     got = [] if downloads is None else downloads
@@ -95,7 +105,7 @@ def run(ram, found, argv, repos=FILLED, answers=None, extra=(), downloads=None, 
                mock.patch.object(setup, "download", fake_download),
                mock.patch.object(setup, "verify_sha256", verify),
                mock.patch.object(setup, "pip_cuda_libs", lambda tk=13: (pip if pip is not None else []).append(tk)),
-               *extra]
+               *no_network_fetches(), *extra]
     return install(ram, found, argv, answers=answers, extra=patches)
 
 
@@ -105,7 +115,7 @@ def install_with(ram, found, argv, configs=()):
                mock.patch.object(setup, "verify_sha256", verify),
                mock.patch.object(setup, "download", lambda url, dst, what=None, unpinned_ok=True:
                                  (dst.parent.mkdir(parents=True, exist_ok=True), dst.write_bytes(b""), setup.mark(dst))),
-               mock.patch.object(setup, "pip_cuda_libs", lambda tk=13: None)]
+               mock.patch.object(setup, "pip_cuda_libs", lambda tk=13: None), *no_network_fetches()]
     return install(ram, found, argv, extra=patches, configs=configs)
 
 

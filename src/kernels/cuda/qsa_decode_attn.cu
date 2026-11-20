@@ -740,11 +740,30 @@ struct DraftAttnSmem {
     uint16_t vs[CHUNK][HD / KV_Q8_GROUP];
 };
 static_assert(HD % 16 == 0 && (HD / KV_Q8_GROUP) * 2 == 8, "draft attention staging: 16-byte rows, 8-byte scale rows");
+// cp.async from sm_80; the portable build's older targets copy in place (the waits below are then no-ops)
 __device__ __forceinline__ void dattn_cp16(void* s, const void* g) {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"((unsigned) __cvta_generic_to_shared(s)), "l"(g));
+#else
+    *reinterpret_cast<uint4*>(s) = *reinterpret_cast<const uint4*>(g);
+#endif
 }
 __device__ __forceinline__ void dattn_cp8(void* s, const void* g) {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
     asm volatile("cp.async.ca.shared.global [%0], [%1], 8;\n" ::"r"((unsigned) __cvta_generic_to_shared(s)), "l"(g));
+#else
+    *reinterpret_cast<uint2*>(s) = *reinterpret_cast<const uint2*>(g);
+#endif
+}
+__device__ __forceinline__ void dattn_commit() {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
+    asm volatile("cp.async.commit_group;\n" ::);
+#endif
+}
+__device__ __forceinline__ void dattn_wait() {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
+    asm volatile("cp.async.wait_group 0;\n" ::);
+#endif
 }
 // The draft kernel's threads: HD (a thread a dimension, every head; measured 9.2 us a struct step) or 2 * HD (two a
 // dimension, half the heads each: 9.7 us); the same bits either way.
@@ -800,9 +819,9 @@ __global__ void __launch_bounds__(DT_THREADS) attn_chunk_draft_kernel(const floa
         dattn_cp8(&sm.ks[t][0], p.k_scale + sm.srow[t] * (HD / KV_Q8_GROUP));
         dattn_cp8(&sm.vs[t][0], p.v_scale + sm.srow[t] * (HD / KV_Q8_GROUP));
     }
-    asm volatile("cp.async.commit_group;\n" ::);
+    dattn_commit();
     for (int i = t; i < G * HD; i += DT_THREADS) sm.sq[i / HD][i % HD] = q[(size_t) (kvh * G) * HD + i];
-    asm volatile("cp.async.wait_group 0;\n" ::);
+    dattn_wait();
     __syncthreads();
     // load8_q8's expression on the staged row
     auto k8 = [&](int c, int d0, float* out) {
@@ -974,7 +993,7 @@ __global__ void __launch_bounds__(THREADS, 2) attn_chunk_staged_kernel(const flo
                 *reinterpret_cast<uint2*>(&sm.vs[c][0]) = make_uint2(0, 0);
             }
         }
-        asm volatile("cp.async.commit_group;\n" ::);
+        dattn_commit();
     }
     // the lane's 8 dimensions of the 12 query heads, while the copies are in flight
     float qr[G][8];
@@ -985,7 +1004,7 @@ __global__ void __launch_bounds__(THREADS, 2) attn_chunk_staged_kernel(const flo
         qr[h][0] = qa.x; qr[h][1] = qa.y; qr[h][2] = qa.z; qr[h][3] = qa.w;
         qr[h][4] = qb.x; qr[h][5] = qb.y; qr[h][6] = qb.z; qr[h][7] = qb.w;
     }
-    asm volatile("cp.async.wait_group 0;\n" ::);
+    dattn_wait();
     __syncthreads();
     const int hd = head_of_lane(lane);
     constexpr int NC = 2;

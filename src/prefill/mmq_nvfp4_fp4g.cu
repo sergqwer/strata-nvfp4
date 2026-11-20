@@ -174,6 +174,9 @@ __device__ __forceinline__ void consumers_sync() { asm volatile("bar.sync 1, %0;
 // of an ldmatrix hit different banks without a swizzle).
 template <int EPI, bool R144>
 __global__ void __launch_bounds__(kThreads + 128, 1) gemm_kernel(const Args a) {
+#if defined(__CUDA_ARCH__) && !defined(__CUDA_ARCH_FEAT_SM120_ALL) && !defined(__CUDA_ARCH_FEAT_SM121_ALL)
+    __trap();                                     // FP4 block-scale MMA: sm_120a / sm_121a only (available() probes it)
+#else
     constexpr bool SWIGLU = EPI != kPlain;
     extern __shared__ __align__(1024) uint8_t smem[];
     __shared__ int32_t yrow_s[kTok];
@@ -418,6 +421,7 @@ __global__ void __launch_bounds__(kThreads + 128, 1) gemm_kernel(const Args a) {
             }
         }
     }
+#endif
 }
 
 // strata-nvfp4 (pfx round 3): the same tile and MMA sequence as gemm_kernel, persistent: one block per SM walks the
@@ -441,6 +445,9 @@ __device__ __forceinline__ void producers_sync() { asm volatile("bar.sync 2, 128
 
 template <int EPI>
 __global__ void __launch_bounds__(kThreads + 128, 1) gemm_persist(const Args a, const int nx, const int ntiles) {
+#if defined(__CUDA_ARCH__) && !defined(__CUDA_ARCH_FEAT_SM120_ALL) && !defined(__CUDA_ARCH_FEAT_SM121_ALL)
+    __trap();
+#else
     constexpr bool SWIGLU = EPI != kPlain;
     extern __shared__ __align__(1024) uint8_t smem[];
     __shared__ int32_t yrow_p[kTok];   // the producers' row table of the tile they load
@@ -591,6 +598,7 @@ __global__ void __launch_bounds__(kThreads + 128, 1) gemm_persist(const Args a, 
                 }
             }
     }
+#endif
 }
 
 void ck(cudaError_t e, const char* what) {

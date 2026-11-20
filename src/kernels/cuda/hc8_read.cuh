@@ -182,9 +182,11 @@ __global__ void __launch_bounds__(THREADS, INJF ? 1 : 2) hc8_down_kernel(GrMulti
             const size_t tot = ((size_t) D * LR + (size_t) D * UPR * 2) & ~(size_t) 15;
             const unsigned nb = gridDim.x * gridDim.y, bi = blockIdx.y * gridDim.x + blockIdx.x;
             const size_t per = ((tot + nb - 1) / nb + 15) & ~(size_t) 15, o = (size_t) bi * per;
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900   // a hint: the bulk prefetch exists from sm_90
             if (o < tot)
                 asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" ::"l"(reinterpret_cast<const uint8_t*>(m.a[0].q8_up) + o),
                              "r"((unsigned) (o + per <= tot ? per : tot - o)) : "memory");
+#endif
         }
 #pragma unroll
         for (int p = 0; p < KP; ++p) {

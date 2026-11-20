@@ -9358,7 +9358,7 @@ def nvfp4_install(a, family: str, gpu: dict, multi: list, cuda_tk: int, ram: flo
     if df2 and not drafting.pack_ready(paths["pack"].parent):
         need += drafting.DOWNLOAD_GB                   # the source file is fetched, packed and removed (about 0.9 GB stays)
     tuned_mtp = drafting.fork_tuned_wanted(f"{fam['name']}-{nvfp4_size(family).lower()}")
-    if tuned_mtp and not drafting.fork_tuned_mtp_complete(paths["mtp"] / drafting.FORK_MTP_TUNED):
+    if tuned_mtp and not drafting.fork_tuned_mtp_complete(drafting.fork_tuned_dir_for(paths["mtp"])):
         need += drafting.FORK_MTP_TUNED_GB
     if a.dry_run:
         say()
@@ -9384,8 +9384,8 @@ def nvfp4_install(a, family: str, gpu: dict, multi: list, cuda_tk: int, ram: flo
                 "its fallback" + (" (already here)" if drafting.pack_ready(paths["pack"].parent) else ""))
         if tuned_mtp:
             say(f"  tuned    Basalt's self-distilled draft layer ({drafting.FORK_MTP_TUNED_REPO}, {drafting.FORK_MTP_TUNED_GB:g} GB): "
-                f"{paths['mtp'] / drafting.FORK_MTP_TUNED}" +
-                (" (already here)" if drafting.fork_tuned_mtp_complete(paths["mtp"] / drafting.FORK_MTP_TUNED) else ""))
+                f"{drafting.fork_tuned_dir_for(paths['mtp'])}" +
+                (" (already here)" if drafting.fork_tuned_mtp_complete(drafting.fork_tuned_dir_for(paths["mtp"])) else ""))
         say(f"  config   {cfg_path.name}, start script run-{tag.lower()}.{'bat' if WIN else 'sh'}; the engine's arguments:")
         line = []
         for x in nvfp4_args(paths, ctx, kv, vision, scaling, rope_scale, extra):

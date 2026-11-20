@@ -24,13 +24,16 @@ def rule(**over) -> bool:
 
 
 _HARDWARE = mock.patch.object(drafting, "detect_hardware", return_value=("cuda", ["sm_120"]))
+_OLD_AUTO = mock.patch.dict("os.environ", {"STRATA_AUTO_NEW_MTP": "0"})   # strata-nvfp4: the Auto before Basalt's MTP drafting (test_drafting_fork_* cover the new one)
 
 
 def setUpModule():
     _HARDWARE.start()
+    _OLD_AUTO.start()
 
 
 def tearDownModule():
+    _OLD_AUTO.stop()
     _HARDWARE.stop()
 
 

@@ -146,21 +146,32 @@ __global__ void pack_kernel(const uint8_t* __restrict__ head, const int32_t* __r
 // The 2-bit copy's loads: streamed past L2 (Basalt's __ldcs), or KEEP (STRATA_PROXY_L2=1): marked evict-last, so the copy can
 // stay in the 96 MB L2 between the chain's steps.  The same values either way.
 template <bool KEEP> __device__ __forceinline__ uint4 px_ld4(const uint4* p) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+    return __ldcs(p);                             // no L2 cache policy before sm_80: the streamed load
+#endif
     if (!KEEP) return __ldcs(p);
     uint4 v;
     uint64_t pol;
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
     asm volatile("createpolicy.fractional.L2::evict_last.b64 %0, 1.0;" : "=l"(pol));
+#endif
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
     asm volatile("ld.global.nc.L1::no_allocate.L2::cache_hint.v4.u32 {%0,%1,%2,%3}, [%4], %5;"
                  : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w) : "l"(p), "l"(pol));
+#endif
     return v;
 }
 template <bool KEEP> __device__ __forceinline__ uint32_t px_ld1(const uint32_t* p) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+    return __ldcs(p);
+#else
     if (!KEEP) return __ldcs(p);
     uint32_t v;
     uint64_t pol;
     asm volatile("createpolicy.fractional.L2::evict_last.b64 %0, 1.0;" : "=l"(pol));
     asm volatile("ld.global.nc.L1::no_allocate.L2::cache_hint.u32 %0, [%1], %2;" : "=r"(v) : "l"(p), "l"(pol));
     return v;
+#endif
 }
 template <bool KEEP>
 __global__ void __launch_bounds__(128) score_kernel(const uint4* __restrict__ wq, const uint32_t* __restrict__ sc,

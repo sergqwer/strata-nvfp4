@@ -74,7 +74,7 @@ def tuned_mtp(root: Path = ROOT, check_only: bool = False) -> int:
     sys.path.insert(0, str(root))
     from strata_control import drafting
     mtp = root / MODEL_DIR / "mtp"
-    if drafting.fork_tuned_mtp_complete(mtp / drafting.FORK_MTP_TUNED) and drafting.sync_fork_tuned_mtp(mtp):
+    if drafting.fork_tuned_mtp_complete(drafting.fork_tuned_dir_for(mtp)) and drafting.sync_fork_tuned_mtp(mtp):
         print("Tuned draft layer: here")
         return 0
     if check_only:

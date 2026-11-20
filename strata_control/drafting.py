@@ -472,7 +472,7 @@ def fork_tuned_mtp_dir(args: list[Any], data_dir: str | Path | None) -> Path | N
     cands: list[Path] = []
     folder = _flag_value(args, "--mtp")
     if folder and not folder.isdigit():
-        cands.append(Path(folder).parent / FORK_MTP_TUNED if Path(folder).name == "rt" else Path(folder) / FORK_MTP_TUNED)
+        cands.append(fork_tuned_dir_for(folder))
     if data_dir:
         cands.append(Path(data_dir) / "mtp" / FORK_MTP_TUNED)
     env = os.environ.get("STRATA_MTP_TUNED_DIR")
@@ -482,6 +482,12 @@ def fork_tuned_mtp_dir(args: list[Any], data_dir: str | Path | None) -> Path | N
         if fork_tuned_mtp_complete(c):
             return c
     return None
+
+
+def fork_tuned_dir_for(mtp_dir: str | Path) -> Path:
+    """Where a set's tuned layer goes and is looked for first: <mtp>/rt-tuned, or the sibling of an ``rt`` folder (<data>/mtp/rt-tuned)."""
+    mtp = Path(mtp_dir)
+    return mtp.parent / FORK_MTP_TUNED if mtp.name == "rt" else mtp / FORK_MTP_TUNED
 
 
 def fork_tuned_mtp_complete(folder: str | Path) -> bool:
@@ -500,11 +506,11 @@ def fork_tuned_wanted(model_name: str | None) -> bool:
 
 
 def sync_fork_tuned_mtp(mtp_dir: str | Path) -> bool:
-    """Give <mtp>/rt-tuned the set's own experts.bin and draft_vocab.bin (a hard link, a copy on a drive without links), and again when
-    the set's file changed (another draft vocabulary chosen).  Nothing is downloaded.  -> the folder is complete.  No rt-tuned folder:
-    nothing is made."""
+    """Give the set's tuned folder (fork_tuned_dir_for) the set's own experts.bin and draft_vocab.bin (a hard link, a copy on a drive
+    without links), and again when the set's file changed (another draft vocabulary chosen).  Nothing is downloaded.  -> the folder is
+    complete.  No tuned folder: nothing is made."""
     mtp = Path(mtp_dir)
-    out = mtp / FORK_MTP_TUNED
+    out = fork_tuned_dir_for(mtp)
     if not out.is_dir():
         return False
     for name in FORK_MTP_TUNED_SHARED:

@@ -331,7 +331,7 @@ def ensure_for(data_dir: str | Path, *, model_name: str | None, backend: str | N
 
 def ensure_fork_tuned_mtp(mtp_dir: str | Path, *, progress: Progress | None = None, cancel: threading.Event | None = None,
                           base_url: str | None = None, files=None) -> Path:
-    """strata-nvfp4 0.2.15-nvfp4.4: Basalt's self-distilled draft layer into <mtp>/rt-tuned (drafting.FORK_MTP_TUNED_*): dense.bin and
+    """strata-nvfp4 0.2.15-nvfp4.4: Basalt's self-distilled draft layer into <mtp>/rt-tuned (drafting.fork_tuned_dir_for; FORK_MTP_TUNED_*): dense.bin and
     dense.txt from this fork's GPTQ repository at the pinned revision, each checked against its size and SHA-256; experts.bin and
     draft_vocab.bin are the set's own (drafting.sync_fork_tuned_mtp: linked, else copied).  Files already here and checked are kept;
     a stopped download resumes.  ``base_url`` / ``files`` are for tests."""
@@ -341,7 +341,7 @@ def ensure_fork_tuned_mtp(mtp_dir: str | Path, *, progress: Progress | None = No
     if missing_own:
         raise DraftingError(f"The model's own draft layer is not complete in {mtp} ({', '.join(missing_own)} missing), so the tuned layer "
                             "is not set up. Run setup again to repair the model's files.")
-    out = mtp / drafting.FORK_MTP_TUNED
+    out = drafting.fork_tuned_dir_for(mtp)
     spec = tuple(files if files is not None else drafting.FORK_MTP_TUNED_FILES)
     base = base_url or drafting.FORK_MTP_TUNED_BASE_URL
 

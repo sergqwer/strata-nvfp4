@@ -150,6 +150,11 @@ class TunedLayer(unittest.TestCase):
             drafting.apply(cfg, data_dir=self.data, backend="cuda", archs=["sm_120"], vram_mib=32607)
         self.assertEqual(cfg["args"][cfg["args"].index("--mtp") + 1], str(self.mtp), "the old Auto keeps the set's own layer")
 
+    def test_the_place_is_the_one_the_finder_looks_at_first(self):
+        self.assertEqual(drafting.fork_tuned_dir_for(self.mtp), self.mtp / "rt-tuned")            # this fork's <model>/mtp
+        rt = Path(self.tmp.name) / "data" / "mtp" / "rt"
+        self.assertEqual(drafting.fork_tuned_dir_for(rt), rt.parent / "rt-tuned")                # upstream's <data>/mtp/rt: its sibling
+
     def test_an_incomplete_folder_is_not_used(self):
         tuned = self.mtp / "rt-tuned"
         tuned.mkdir()

@@ -144,6 +144,9 @@ template <int CH>
 __global__ void __launch_bounds__(kThreads, 2) gemm_f16c_kernel(const uint8_t* __restrict__ X, const uint8_t* __restrict__ W,
                                                                 float* __restrict__ Y, int T, int N, int K, int64_t ldy,
                                                                 float beta, unsigned* __restrict__ redo_count) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+    __trap();                                     // never launched there: gemm_f16c() returns false below cc 8.0
+#else
     extern __shared__ __align__(128) uint8_t smem[];
     const int m0 = blockIdx.y * 128, n0 = blockIdx.x * 128;
     float acc[4][8][4];
@@ -186,6 +189,7 @@ __global__ void __launch_bounds__(kThreads, 2) gemm_f16c_kernel(const uint8_t* _
                 }
             }
         }
+#endif
 }
 
 __device__ unsigned g_f16c_redo;
@@ -207,6 +211,12 @@ bool gemm_f16c(const uint16_t* X, const uint16_t* W, float* Y, int64_t T, int64_
     static bool attr[64] = {};
     int dev = 0;
     if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { cudaGetLastError(); return false; }
+    static int major[64] = {};                    // the kernel needs sm_80 (cp.async, m16n8k16): older cards keep cuBLAS
+    if (major[dev] == 0 && cudaDeviceGetAttribute(&major[dev], cudaDevAttrComputeCapabilityMajor, dev) != cudaSuccess) {
+        cudaGetLastError();
+        major[dev] = -1;
+    }
+    if (major[dev] < 8) return false;
     if (!attr[dev]) {
         if (cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem) != cudaSuccess) {
             cudaGetLastError();
