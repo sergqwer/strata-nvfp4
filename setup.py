@@ -6067,11 +6067,11 @@ def install_build_tools(gpu, yes):
     say("  They can be installed now (about 8-10 GB, 15-40 minutes" + (", Windows will ask for permission" if WIN else
                                                                         ", sudo will ask for your password") + ").")
     if ask("  Install them now?", ["y", "n"], "y", yes) != "y":
-        fail("the build tools are needed", "install them yourself (see README.md) and run it again")
+        fail("the build tools are needed", "install them yourself (see docs/fork/INSTALL.md) and run it again")
     if WIN:
         if shutil.which("winget") is None:
             fail("winget (Windows package manager) is not available",
-                 "install 'App Installer' from the Microsoft Store, or install the tools by hand (README.md)")
+                 "install 'App Installer' from the Microsoft Store, or install the tools by hand (docs/fork/INSTALL.md)")
         wg = ["winget", "install", "-e", "--source", "winget", "--accept-package-agreements",
               "--accept-source-agreements", "--disable-interactivity"]
         if not have_cc:
@@ -6113,7 +6113,7 @@ def install_build_tools(gpu, yes):
                          "install the CUDA Toolkit 13 from https://developer.nvidia.com/cuda-downloads and run it again")
     nvcc, cuda_v = find_nvcc(below=(13, 0)) if old else find_nvcc()
     if (WIN and find_vcvars(cuda_v) is None) or (not WIN and shutil.which("g++") is None):
-        fail("the C++ build tools did not install", "install them by hand (README.md) and run it again")
+        fail("the C++ build tools did not install", "install them by hand (docs/fork/INSTALL.md) and run it again")
     if nvcc is None or cuda_v < need_cuda:
         fail("the CUDA Toolkit did not install", "install it from https://developer.nvidia.com/cuda-downloads, then run it again")
     nvcc, cuda_v = sm120_nvcc(nvcc, cuda_v, archs)
@@ -8842,13 +8842,13 @@ NVFP4_WITHDRAWN = {
 }
 NVFP4_MIN_ARCH = 75                    # RTX 20 and newer (docs/NVFP4.md, "Other GPUs")
 NVFP4_MIN_VRAM_GB = 11.5               # a 12 GB card (nvidia-smi lists ~11.99); an 8 GB one has no room for the cache
-NVFP4_MIN_RAM_GB = 60                  # a 64 GB PC (63.7 listed), the README's floor
+NVFP4_MIN_RAM_GB = 60                  # a 64 GB PC (63.7 listed), the floor in docs/fork/INSTALL.md
 NVFP4_ALL_RAM_GB = 92                  # the engine's rule (memory.hpp kLowRamBelowGib, the same ullTotalPhys GiB as
                                        # ram_gb()): from here every expert stays in RAM - a 96 GB PC lists 93.4-95.6 -
                                        # below it the engine's own low-RAM mode (a 64 GB PC)
 NVFP4_BESIDE_GIB = 16                  # 0.1.42-nvfp4.2, the engine's kLowRamBesideGib: from 92 GiB too, experts.bin and
                                        # this much more must fit, else the low-RAM mode (qwen-q8 on 128 GB)
-NVFP4_CONTEXTS = ((28, 262144), (20, 131072), (14, 65536), (0, 32768))   # VRAM -> context, the README's table
+NVFP4_CONTEXTS = ((28, 262144), (20, 131072), (14, 65536), (0, 32768))   # VRAM -> context, the table in docs/fork/INSTALL.md
 NVFP4_VISION_TOKENS = 1024             # the tray's: the encoder runs on the CPU
 
 

@@ -190,7 +190,7 @@ retrained for 4-bit experts (quantization-aware distillation). Setup downloads N
 turns them into a Strata pack on your PC once (20 to 40 minutes, about 110 GB more disk while it runs; the 102 GB can be
 deleted afterwards). Strata does not redistribute NVIDIA's weights. Pictures use the original model's reader file, which
 setup downloads with it. Licenses: NVIDIA Open Model Agreement and Qwen's Community License.
-More: [NVFP4.md](NVFP4.md#nvidias-fp4-local-checkpoint).
+More: [NVFP4.upstream.md](NVFP4.upstream.md#nvidias-fp4-local-checkpoint).
 
 ```sh
 strata launch --family nvfp4 --model NVFP4

@@ -2507,7 +2507,7 @@ One measuring pitfall: right after another engine process with a 63 GiB pinned a
 
 ## By hand: build, convert, re-quantize, run
 
-Setup installs the GPTQ packs ready-made (README, "Quick start"). These are the manual steps, moved here from the
+Setup installs the GPTQ packs ready-made ([Quick start](fork/INSTALL.md#quick-start)). These are the manual steps, moved here from the
 README: the engine built by hand, jpezzulli's ModelOpt checkpoint converted on your own PC, an experts pack
 re-quantized from BF16, and the engine and the server started without setup.
 
@@ -2600,7 +2600,7 @@ build\strata.exe --pack packs\orca-nvfp4 --native models\orca-nvfp4.gguf --nativ
 ```
 
 `--native` and `--native-dense-gguf` both point at the GGUF: `--native` alone would take the PLE file for a second
-shard of the same model. With less VRAM lower `--max-context` (README, "Requirements").
+shard of the same model. With less VRAM lower `--max-context` ([Requirements](fork/INSTALL.md#requirements)).
 
 OpenAI- and Anthropic-compatible server: save the same arguments as a config (`{"exe": "build/strata.exe", "args":
 [...], "tokenizer": "packs/orca-nvfp4/tokenizer", "host": "127.0.0.1"}`) and start
@@ -2615,7 +2615,7 @@ runs; the engine is idle then.
 
 ### Switches kept for A/B runs
 
-Each gives the same bits as the default, or the measured alternative the default replaced (README, "Switches", has
+Each gives the same bits as the default, or the measured alternative the default replaced ([Switches](fork/ENVIRONMENT.md) has
 the rest).
 
 | | |
