@@ -378,7 +378,7 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
-### RTX 50: faster prompts (2026-11-20, main)
+### RTX 50: faster prompts (2026-11-20, release 0.2.15-nvfp4.4)
 
 A second round on the prompt path, after a probe of what the 5090 computes fastest for each data type
 (block-scaled FP8 accumulates in f32 at full rate, plain f16 does so at half rate, int8 scores QSA blocks fastest).
@@ -421,7 +421,7 @@ Also new and on by default: a GEMM warm file (`STRATA_GEMM_WARM_FILE`, default
 `%LOCALAPPDATA%\strata\gemm-warm-<GPU>.txt`, `=0` turns it off). cuBLASLt loads each GEMM kernel the first time it
 runs; the file records the prompt's GEMM shapes and the next start replays them before the first request.
 
-### RTX 50: decode and prompt kernels after Basalt (2026-11-20, main)
+### RTX 50: decode and prompt kernels after Basalt (2026-11-20, release 0.2.15-nvfp4.4)
 
 [Basalt](https://github.com/jesdga95/basalt) (MIT, copyright Jesús Gulfo) is a Strata fork tuned for this model on
 RTX 50 cards; on the same pack its decode ran 16-55% ahead of this fork's 0.2.15-nvfp4.3. This round ports its decode kernels and its

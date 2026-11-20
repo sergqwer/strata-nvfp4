@@ -61,20 +61,20 @@ files by hand.
 
 ## What's new
 
-- **Long prompts 17-20% faster again on RTX 50 (on main, not released yet).** int8 QSA scores, f16-accumulate dense GEMMs,
+- **Long prompts 17-20% faster again on RTX 50 (0.2.15-nvfp4.4).** int8 QSA scores, f16-accumulate dense GEMMs,
   CUDA graphs for the prompt's kernel chains, less hyper-connection traffic and the borrowed expert slots refilled
   beside decode. RTX 5090: 16K reads in 1.35 s instead of 1.69 s, 64K in 5.1 s instead of 6.2 s, 128K in 10.3 s
   instead of 12.5 s (Basalt in the same hour: 2.0 s at 16K, 6.3 s at 64K). Accuracy and decode unchanged
-  ([measurements](docs/NVFP4.md#rtx-50-faster-prompts-2026-11-20-main)).
+  ([measurements](docs/NVFP4.md#rtx-50-faster-prompts-2026-11-20-release-0215-nvfp44)).
 
-- **Faster decode and prompts on RTX 50 (on main, not released yet).** Basalt's decode kernels and drafting
+- **Faster decode and prompts on RTX 50 (0.2.15-nvfp4.4).** Basalt's decode kernels and drafting
   ([Credits](#credits)) plus kernels of our own, on by default on RTX 50 cards only. RTX 5090, tokens/s against
   0.2.15-nvfp4.3: a JSON answer 487 vs 330 (+48%), a chat 269 vs 219 (+23%), English prose 261 vs 205 (+27%),
   Ukrainian 241 vs 154 (+56%); Basalt in the same hour 475 / 248 / 276 / 235. These decode runs used Basalt's
   self-distilled draft layer, which is not shipped yet; without it the drafts are accepted less often. A 64K prompt
   reads in 6.2 s instead of 7.8 s, 128K in 12.5 s instead of 14.5 s. Accuracy: KL 0.015 against the base engine,
   whose own runs differ by 0.012. `STRATA_NVFP4_SM120=0` turns all of it off
-  ([measurements](docs/NVFP4.md#rtx-50-decode-and-prompt-kernels-after-basalt-2026-11-20-main)).
+  ([measurements](docs/NVFP4.md#rtx-50-decode-and-prompt-kernels-after-basalt-2026-11-20-release-0215-nvfp44)).
 
 - **KV streaming on by default (0.2.15-nvfp4.3).** On one GPU with a context of 131,072 tokens or more (the tray's
   512K), the engine keeps 32,768 cells of each attention layer's K/V in VRAM and all of it in pinned RAM (6.2 GiB at
