@@ -80,6 +80,7 @@ public:
     void* stream() const { return stream_; }
 
 private:
+    void f16c_check(const uint16_t* X, const uint16_t* W, int64_t T, int64_t N, int64_t K);   ///< STRATA_DENSE_F16C_CHECK
     void* handle_ = nullptr;
     void* stream_ = nullptr;
     uint16_t* scratch_ = nullptr;

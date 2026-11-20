@@ -6,6 +6,8 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <exception>
@@ -913,6 +915,25 @@ bool PleReader::read_batch(const uint32_t* rows, size_t n, uint8_t* out_raw, std
     m.stats.dedup_rows += dedup;
     m.stats.wait_us += now_us() - start;
     m.last_read_us = now_us();
+    static const bool trace = std::getenv("STRATA_PLE_TRACE") != nullptr;
+    if (trace && nj >= 4096) {   // (prompt chunks only) how far the pages lie apart: what merged reads could save
+        std::vector<uint64_t> o(m.b_off.begin(), m.b_off.end());
+        std::sort(o.begin(), o.end());
+        size_t adj = 0, near64 = 0, near1m = 0;
+        for (size_t j = 1; j < o.size(); ++j) {
+            const uint64_t d = o[j] - o[j - 1];
+            adj += d == PAGE;
+            near64 += d <= 65536;
+            near1m += d <= (1u << 20);
+        }
+        uint64_t rd = 0;
+        for (auto& r : m.readers) rd += r->reads;
+        std::fprintf(stderr, "strata ple io: %zu rows, %zu not cached, %zu pages (%llu dedup), %.1f ms = %.0f k reads/s; "
+                             "next page adjacent %zu, within 64 KiB %zu, within 1 MiB %zu; %zu readers x depth %u\n",
+                     n, nm, nj, (unsigned long long) dedup, (now_us() - start) / 1000.0,
+                     (double) rd / std::max(1.0, now_us() - start) * 1000.0, adj, near64, near1m, m.readers.size(),
+                     (unsigned) m.batch_depth);
+    }
     if (b.failed.load()) {
         if (err.empty()) err = "PleReader: a table read failed";
         return false;

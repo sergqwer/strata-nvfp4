@@ -210,6 +210,8 @@ public:
     /// of the slot (the pieces tile the blob).  Same queue, same `sync_queued`.
     bool fill_slot_queued_parts(int32_t slot, const BlobPart* parts, int n, std::string& err);
     bool sync_queued(std::string& err);
+    /// `fill_slot_queued` on the caller's stream (STRATA_PF_REFILL_BG: the lent slots refilled beside decode).
+    bool fill_slot_on(int32_t slot, const uint8_t* host_blob, void* stream, std::string& err, int64_t bytes = 0);
 
     /// Reads `slot` back to the host and compares it to `host_blob`, byte for byte.  **THE ONLY THING THAT SAYS
     /// THE CACHE HOLDS THE EXPERT IT CLAIMS TO.**  A slot table that is right about indices and wrong about

@@ -378,6 +378,49 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### RTX 50: faster prompts (2026-11-20, main)
+
+A second round on the prompt path, after a probe of what the 5090 computes fastest for each data type
+(block-scaled FP8 accumulates in f32 at full rate, plain f16 does so at half rate, int8 scores QSA blocks fastest).
+Every switch below is on by default on RTX 50 cards only; `STRATA_NVFP4_SM120=0` still turns the whole set off and each
+switch's own `=0` turns that one off.
+
+**Prompt**, serve, one request, context 140,000, RTX 5090 at 600 W, ms. The first three columns were measured in one hour
+(2 rounds, alternating order), the CUDA graphs on top of this round in a second set the same evening, where this round
+without graphs read 64K in 5,265 ms (5,261 in the first set):
+
+| prompt tokens | main before this round | this round | + CUDA graphs | Basalt |
+| ---: | ---: | ---: | ---: | ---: |
+| 3,072 | 922 | 880 | 857 | 1,258 |
+| 16,676 | 1,686 | 1,398 | 1,350 | 1,972 |
+| 66,617 | 6,208 | 5,261 | 5,110 | 6,300 |
+| 131,000 | 12,496 | 10,549 | 10,345 | - (context ends at 66K) |
+
+The read no longer includes refilling the expert slots the prompt borrowed (that runs beside decode now), so the time
+to the first token is the honest end-to-end number: 64K 6,191 -> 5,248 ms, 128K 12,348 -> 10,497 ms (without the
+graphs); a 64K prompt plus a 300-token answer 7,795 -> 6,772 ms. Decode is unchanged (no switch here runs in it).
+
+**Accuracy**, teacher-forced corpus, three runs: top token 96.08 / 96.10 / 95.85%, KL 0.0149-0.0156, the same as main
+before this round (96.1% / 0.015; two runs of one engine differ by 96.52% / 0.0118). Long prompts of 8-32K against an
+fp16 reference: KL 0.0081 and 0.0074, as before. With every switch below at `=0` the engine reproduces main's text and
+first-token logits bit for bit.
+
+| switch | what it does | output |
+| --- | --- | --- |
+| `STRATA_QSA_I8=1` | QSA block scores on int8 tensor cores (six int8 products per score) | rounds; the same blocks selected in tests |
+| `STRATA_DENSE_F16C=1` | the prompt's dense FP16 GEMMs with f16 accumulation in chains of 64, then f32 | rounds |
+| `STRATA_PF_HC_INJ=1` | the hyper-connection inject folded into the HC write kernels | rounds |
+| `STRATA_PF_DM16H=1` | the HC `Dm` rows in FP16 (the largest value seen is 23) | rounds |
+| `STRATA_PF_GRAPH=7` | the QSA indexer loop of a layer and each expert group's kernels as CUDA graphs (updated in place, not rebuilt) | exact |
+| `STRATA_PF_SHARED_LATE=1` | a streamed chunk's shared expert runs on the GPU while the host groups the routed ones | exact |
+| `STRATA_KV_PREFETCH=1`, `STRATA_PF_KV_UNSTAGE_SIDE=1` | KV streaming's copies on their own stream, ordered by events | exact |
+| `STRATA_PF_UPMIX_SKIP32=1` | the attention half skips an FP32 write nobody reads | exact |
+| `STRATA_PF_REFILL_BG=1` | serve refills the borrowed expert slots beside decode, hottest first, in batched copies | exact text in the fixed-placement mode; moves the first windows' expert placement in serve |
+
+Also new and on by default: a GEMM warm file (`STRATA_GEMM_WARM_FILE`, default
+`%LOCALAPPDATA%\strata\gemm-warm-<GPU>.txt`, `=0` turns it off). cuBLASLt loads each GEMM kernel the first time it
+runs; the file records the prompt's GEMM shapes and the next start replays them before the first request.
+
 ### RTX 50: decode and prompt kernels after Basalt (2026-11-20, main)
 
 [Basalt](https://github.com/jesdga95/basalt) (MIT, copyright Jesús Gulfo) is a Strata fork tuned for this model on

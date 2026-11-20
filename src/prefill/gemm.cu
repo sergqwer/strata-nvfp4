@@ -1,5 +1,10 @@
 // src/prefill/gemm.cu - see include/strata/prefill/gemm.hpp.
 #include "strata/prefill/gemm.hpp"
+#include "strata/prefill/gemm_f16c.hpp"
+
+#include <array>
+#include <cmath>
+#include <vector>
 #include "strata/kernels/dequant_bf16.hpp"
 #include "strata/core/arch_defaults.hpp"   // prompt_f16_resolve (inline)
 #if defined(STRATA_PREFILL_MMQ) && defined(__HIPCC__)
@@ -39,6 +44,14 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <chrono>
+#include <string>
+#include <tuple>
+#if defined(_WIN32)
+#include <direct.h>   // _mkdir (STRATA_GEMM_WARM_FILE)
+#else
+#include <sys/stat.h>
+#endif
 
 #if defined(__HIPCC__) && defined(STRATA_HIPBLASLT_AVAILABLE)
 #include "hipblaslt_tuning.hpp"
@@ -53,6 +66,8 @@
 #else
 #include <unistd.h>
 #endif
+#include <chrono>
+#include <string>
 #include <hip/hip_runtime_api.h>
 #include <hipblaslt/hipblaslt.h>
 #include <hipblaslt/hipblaslt-ext.hpp>
@@ -622,6 +637,150 @@ cublasStatus_t create_handle(cublasHandle_t* h) {
     return cublasCreate(h);
 }
 
+#if !defined(__HIPCC__)
+// STRATA_GEMM_WARM_FILE (idle item 4): cuBLASLt loads each GEMM kernel the first time it runs (cuLibraryLoadData,
+// 1-24 ms each: ~41 ms of GPU idle in the first prompt after a start, which the tray pays on every first request after
+// a load).  Which kernel runs depends on the shape (and on T), so the prompt path's cuBLAS calls are written down here
+// - type, N, T, K, ldx, ldy, beta 0/1, one line per (shape, power-of-two class of T, T a multiple of 8 or not) - and
+// the next start runs each once on zeros on the prewarm thread, while the model loads.  The default file is
+// %LOCALAPPDATA%/strata/gemm-warm-<device>.txt (Linux: $XDG_CACHE_HOME or ~/.cache/strata/...); "0" turns it off.
+// Only the kernel choice and its loading are affected: a warm product writes its own scratch, nothing else.
+struct WarmShape { int type, N, T, K, ldx, ldy, beta1; };
+std::mutex g_warm_m;
+std::vector<WarmShape> g_warm_seen;   // (shape, T class) recorded in this process or read from the file
+bool g_warm_read = false;
+int t_class(int T) { int c = 0; while (T > 1) { T >>= 1; ++c; } return c; }
+bool same_class(const WarmShape& a, const WarmShape& b) {
+    return a.type == b.type && a.N == b.N && a.K == b.K && a.ldx == b.ldx && a.ldy == b.ldy && a.beta1 == b.beta1 &&
+           t_class(a.T) == t_class(b.T) && (a.T % 8 == 0) == (b.T % 8 == 0);   // (a chunk's odd tail picks other kernels)
+}
+std::string warm_file() {
+    static const std::string path = [] {
+        const char* v = std::getenv("STRATA_GEMM_WARM_FILE");
+        if (v != nullptr) return std::string(v[0] == '0' && v[1] == 0 ? "" : v);
+        int dev = 0;
+        cudaDeviceProp p{};
+        if (cudaGetDevice(&dev) != cudaSuccess || cudaGetDeviceProperties(&p, dev) != cudaSuccess) { (void) cudaGetLastError(); return std::string(); }
+        std::string name = p.name;
+        for (char& ch : name) if (!std::isalnum((unsigned char) ch)) ch = '_';
+#if defined(_WIN32)
+        const char* base = std::getenv("LOCALAPPDATA");
+        if (base == nullptr || !*base) return std::string();
+        const std::string dir = std::string(base) + "/strata";
+        (void) _mkdir(dir.c_str());
+#else
+        const char* xdg = std::getenv("XDG_CACHE_HOME");
+        const char* home = std::getenv("HOME");
+        if ((xdg == nullptr || !*xdg) && (home == nullptr || !*home)) return std::string();
+        const std::string cache = xdg && *xdg ? std::string(xdg) : std::string(home) + "/.cache";
+        const std::string dir = cache + "/strata";
+        (void) mkdir(cache.c_str(), 0755);
+        (void) mkdir(dir.c_str(), 0755);
+#endif
+        return dir + "/gemm-warm-" + name + ".txt";
+    }();
+    return path;
+}
+void warm_read_locked() {   // g_warm_m held
+    if (g_warm_read) return;
+    g_warm_read = true;
+    const std::string f = warm_file();
+    if (f.empty()) return;
+    std::FILE* fp = std::fopen(f.c_str(), "r");
+    if (fp == nullptr) return;
+    WarmShape w{};
+    while (g_warm_seen.size() < 1024 &&
+           std::fscanf(fp, "%d %d %d %d %d %d %d", &w.type, &w.N, &w.T, &w.K, &w.ldx, &w.ldy, &w.beta1) == 7)
+        if (w.N > 0 && w.T > 0 && w.K > 0 && w.ldy >= w.N && (w.ldx == 0 || w.ldx >= w.K)) g_warm_seen.push_back(w);
+    std::fclose(fp);
+}
+// a cuBLAS product of the prompt path: written down the first time its (shape, T class) is seen
+void warm_note(int type, int64_t T, int64_t N, int64_t K, int64_t ldx, int64_t ldy, float beta) {
+    if (T <= 0 || T > INT_MAX || N > INT_MAX || K > INT_MAX || ldy > INT_MAX || ldx > INT_MAX) return;
+    const WarmShape w{type, (int) N, (int) T, (int) K, (int) ldx, (int) ldy, beta != 0.0f ? 1 : 0};
+    std::lock_guard<std::mutex> lock(g_warm_m);
+    warm_read_locked();
+    for (const WarmShape& s : g_warm_seen)
+        if (same_class(s, w)) return;
+    if (g_warm_seen.size() >= 1024) return;
+    g_warm_seen.push_back(w);
+    const std::string f = warm_file();
+    if (f.empty()) return;
+    if (std::FILE* fp = std::fopen(f.c_str(), "a")) {
+        std::fprintf(fp, "%d %d %d %d %d %d %d\n", w.type, w.N, w.T, w.K, w.ldx, w.ldy, w.beta1);
+        std::fclose(fp);
+    }
+}
+// the recorded products, once each on zeros (the prewarm thread, `h` on its own stream `st`)
+void warm_replay(cublasHandle_t h, cudaStream_t st) {
+    std::vector<WarmShape> todo;
+    {
+        std::lock_guard<std::mutex> lock(g_warm_m);
+        warm_read_locked();
+        todo = g_warm_seen;
+    }
+    // cuBLAS picks the kernel by the exact T (a 66617-token prompt's last chunk of 22072 rows runs another kernel than
+    // its 22272-row chunks): each recorded shape also runs at every STRATA_GEMM_WARM_STEP-th T (default 512) of its T's
+    // power-of-two class, so a prompt of another length finds most of its kernels loaded too.  0: the recorded T only.
+    static const int step = [] { const char* v = std::getenv("STRATA_GEMM_WARM_STEP"); return v != nullptr ? std::max(0, std::atoi(v)) : 512; }();
+    if (step > 0) {
+        const size_t n0 = todo.size();
+        for (size_t i = 0; i < n0; ++i) {
+            const int lo = 1 << t_class(todo[i].T), hi = std::min(2 * lo - 1, 65536);
+            for (int t = (lo + step - 1) / step * step; t <= hi; t += step)
+                if (t != todo[i].T) { WarmShape w = todo[i]; w.T = t; todo.push_back(w); }
+        }
+    }
+    // each exact product once (the two alignment classes of a shape sweep the same T), at most 2048 of them
+    std::sort(todo.begin(), todo.end(), [](const WarmShape& a, const WarmShape& b) {
+        return std::tie(a.type, a.N, a.K, a.ldx, a.ldy, a.beta1, a.T) < std::tie(b.type, b.N, b.K, b.ldx, b.ldy, b.beta1, b.T);
+    });
+    todo.erase(std::unique(todo.begin(), todo.end(), [](const WarmShape& a, const WarmShape& b) {
+                   return a.type == b.type && a.N == b.N && a.K == b.K && a.ldx == b.ldx && a.ldy == b.ldy && a.beta1 == b.beta1 && a.T == b.T;
+               }), todo.end());
+    if (todo.size() > 2048) todo.resize(2048);
+    if (todo.empty()) return;
+    const auto t0 = std::chrono::steady_clock::now();
+    // (a shape whose operands alone exceed 2 GiB is left to load on first use)
+    todo.erase(std::remove_if(todo.begin(), todo.end(), [](const WarmShape& w) {
+                   return (double) w.T * (w.ldx ? w.ldx : w.K) * 2 + (double) w.N * w.K * 2 + (double) w.T * w.ldy * 4 > 2147483648.0;
+               }), todo.end());
+    if (todo.empty()) return;
+    size_t xb = 0, wb = 0, yb = 0;
+    for (const WarmShape& w : todo) {
+        xb = std::max(xb, (size_t) w.T * (size_t) (w.ldx ? w.ldx : w.K) * 2);
+        wb = std::max(wb, (size_t) w.N * (size_t) w.K * 2);
+        yb = std::max(yb, (size_t) w.T * (size_t) w.ldy * 4);
+    }
+    void* buf = nullptr;
+    constexpr size_t kWs = 32u << 20;   // Gemm::init's workspace: the kernel choice can depend on it
+    if (cudaMalloc(&buf, xb + wb + yb + kWs) != cudaSuccess) {
+        (void) cudaGetLastError();
+        std::fprintf(stderr, "prefill gemm: the warm-up's %zu MiB do not fit; the recorded GEMM kernels load on first use\n",
+                     (xb + wb + yb) >> 20);
+        return;
+    }
+    uint8_t* p = (uint8_t*) buf;
+    (void) cudaMemsetAsync(p, 0, xb + wb, st);
+    const float alpha = 1.0f, beta0 = 0.0f, beta1 = 1.0f;
+    int ran = 0;
+    (void) cublasSetWorkspace(h, p + xb + wb + yb, kWs);
+    for (const WarmShape& w : todo) {
+        const cudaDataType_t dt = w.type == 1 ? CUDA_R_16F : CUDA_R_16BF;
+        if (cublasGemmEx(h, CUBLAS_OP_T, CUBLAS_OP_N, w.N, w.T, w.K, &alpha, p + xb, dt, w.K, p, dt, w.ldx ? w.ldx : w.K,
+                         w.beta1 ? &beta1 : &beta0, p + xb + wb, CUDA_R_32F, w.ldy, CUBLAS_COMPUTE_32F,
+                         CUBLAS_GEMM_DEFAULT) == CUBLAS_STATUS_SUCCESS)
+            ++ran;
+    }
+    (void) cudaStreamSynchronize(st);
+    (void) cublasSetWorkspace(h, nullptr, 0);
+    (void) cudaFree(buf);
+    (void) cudaGetLastError();
+    std::fprintf(stderr, "prefill gemm: %d of the %zu recorded prompt GEMM shapes warmed in %.0f ms (%s)\n", ran, todo.size(),
+                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(), warm_file().c_str());
+}
+#endif
+
 // The first FP16 and the first BF16 cublasGemmEx of a process load cuBLASLt's GEMM kernels for that input type
 // (cuLibraryLoadData, ~65 ms each on an RTX 5090, 36 MiB of VRAM for both), whatever the shape; later shapes load
 // ~1 ms more each.  Without this the first prompt after a start paid them.  One 16x256x256 product of each type on
@@ -654,11 +813,15 @@ void warm_gemm_kernels(cublasHandle_t h) {
         if (major >= 8)   // the BF16 tensor-core GEMM; below sm_80 the prompt path converts to FP16 (bf16_path)
             (void) cublasGemmEx(h, CUBLAS_OP_T, CUBLAS_OP_N, N, T, K, &alpha, p + x_b, CUDA_R_16BF, K, p, CUDA_R_16BF, K,
                                 &beta, p + x_b + w_b, CUDA_R_32F, N, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+        (void) cudaStreamSynchronize(st);
+        (void) cudaFree(buf);
+        buf = nullptr;
+        warm_replay(h, st);   // STRATA_GEMM_WARM_FILE: the shapes the prompt path ran before
     }
     (void) cudaStreamSynchronize(st);
     (void) cublasSetStream(h, nullptr);
     (void) cudaStreamDestroy(st);
-    (void) cudaFree(buf);
+    if (buf) (void) cudaFree(buf);
     (void) cudaGetLastError();
 #else
     (void) h;
@@ -1325,12 +1488,110 @@ void Gemm::bf16(const uint16_t* X, const uint16_t* W, float* Y, int64_t T, int64
     }
 #endif
     // Column-major view: Y^T[N, T] = W[N, K] (stored K x N col-major, transposed) . X^T[K, T].
+#if !defined(__HIPCC__)
+    warm_note(0, T, N, K, ldx, ldy, beta);
+#endif
     ck(cublasGemmEx((cublasHandle_t) handle_, CUBLAS_OP_T, CUBLAS_OP_N, (int) N, (int) T, (int) K, &alpha, W,
                     CUDA_R_16BF, (int) K, X, CUDA_R_16BF, (int) (ldx ? ldx : K), &beta, Y, CUDA_R_32F, (int) ldy,
                     CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT),
        "cublasGemmEx");
     STRATA_ABSORB_HIPBLAS_STICKY("cublasGemmEx");
 }
+
+#if !defined(__HIPCC__)
+namespace {
+struct F16cShape { int64_t n, k; double d2, r2, mx; int64_t calls; };
+std::vector<F16cShape>& f16c_shapes() { static std::vector<F16cShape> v; return v; }
+bool dense_f16c_check() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_DENSE_F16C_CHECK"); return v && v[0] == '1'; }();
+    return on;
+}
+bool dense_f16c_take(int64_t T, int64_t N, int64_t K) {
+    static const bool on = [] {
+        const char* v = std::getenv("STRATA_DENSE_F16C");
+        if (!(v && v[0] == '1' && v[1] == '\0')) return false;
+        int dev = 0, major = 0;
+        if (cudaGetDevice(&dev) != cudaSuccess || cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) != cudaSuccess) {
+            cudaGetLastError();
+            return false;
+        }
+        if (major < 8) return false;
+        std::fprintf(stderr, "prefill gemm: dense FP16 GEMMs with f16-accumulate chains of 64 (STRATA_DENSE_F16C=1)\n");
+        return true;
+    }();
+    if (!on) return false;
+    static const int64_t min_t = [] { const char* v = std::getenv("STRATA_DENSE_F16C_MIN_T"); return v ? (int64_t) std::atoll(v) : (int64_t) 256; }();
+    static const std::vector<std::pair<int64_t, int64_t>> skip = [] {
+        std::vector<std::pair<int64_t, int64_t>> s;
+        const char* v = std::getenv("STRATA_DENSE_F16C_SKIP");
+        while (v && *v) {
+            long long n = 0, k = 0;
+            if (std::sscanf(v, "%lld:%lld", &n, &k) == 2) s.emplace_back((int64_t) n, (int64_t) k);
+            const char* c = std::strchr(v, ',');
+            v = c ? c + 1 : nullptr;
+        }
+        return s;
+    }();
+    static const bool log = [] { const char* v = std::getenv("STRATA_DENSE_F16C_LOG"); return v && v[0] == '1'; }();
+    if (log) {
+        static std::vector<std::array<int64_t, 3>> seen;
+        static std::mutex mu;
+        std::lock_guard<std::mutex> lk(mu);
+        const std::array<int64_t, 3> key{T, N, K};
+        if (std::find(seen.begin(), seen.end(), key) == seen.end() && seen.size() < 400) {
+            seen.push_back(key);
+            std::fprintf(stderr, "prefill gemm f16: T %lld N %lld K %lld\n", (long long) T, (long long) N, (long long) K);
+        }
+    }
+    // STRATA_DENSE_F16C_MIN_TILES (default 400): fewer 128 x 128 tiles than that leave the card half idle in the kernel's
+    // two-CTA waves, where cuBLAS picks a smaller tile (gemm_f16c_bench: 512 x 2560 at T 1024 0.55x, at T 16675 1.22x)
+    static const int64_t min_tiles = [] { const char* v = std::getenv("STRATA_DENSE_F16C_MIN_TILES"); return v ? (int64_t) std::atoll(v) : (int64_t) 400; }();
+    if (T < min_t || ((N + 127) / 128) * ((T + 127) / 128) < min_tiles || !strata::prefill::gemm_f16c_fits(T, N, K)) return false;
+    for (const auto& s : skip)
+        if (s.first == N && s.second == K) return false;
+    return true;
+}
+}  // namespace
+
+void Gemm::f16c_check(const uint16_t* X, const uint16_t* W, int64_t T, int64_t N, int64_t K) {
+    const int64_t t = std::min<int64_t>(T, 1024);
+    static float* a = nullptr;
+    static float* r = nullptr;
+    static int64_t have = 0;
+    if (t * N > have) {
+        cudaStreamSynchronize((cudaStream_t) stream_);
+        cudaFree(a);
+        cudaFree(r);
+        a = r = nullptr;
+        have = 0;
+        if (cudaMalloc((void**) &a, (size_t) (t * N) * 4) != cudaSuccess || cudaMalloc((void**) &r, (size_t) (t * N) * 4) != cudaSuccess) {
+            cudaGetLastError();
+            return;
+        }
+        have = t * N;
+    }
+    const float one = 1.0f, zero = 0.0f;
+    if (cublasGemmEx((cublasHandle_t) handle_, CUBLAS_OP_T, CUBLAS_OP_N, (int) N, (int) t, (int) K, &one, W, CUDA_R_16F,
+                     (int) K, X, CUDA_R_16F, (int) K, &zero, r, CUDA_R_32F, (int) N, CUBLAS_COMPUTE_32F,
+                     CUBLAS_GEMM_DEFAULT) != CUBLAS_STATUS_SUCCESS ||
+        !strata::prefill::gemm_f16c(X, W, a, t, N, K, N, 0.0f, stream_))
+        return;
+    double o[3] = {};
+    if (!strata::prefill::gemm_f16c_diff(a, r, t * N, o, stream_)) return;
+    auto& v = f16c_shapes();
+    F16cShape* s = nullptr;
+    for (auto& e : v)
+        if (e.n == N && e.k == K) s = &e;
+    if (!s) { v.push_back({N, K, 0, 0, 0, 0}); s = &v.back(); }
+    s->d2 += o[0];
+    s->r2 += o[1];
+    s->mx = std::max(s->mx, o[2] / std::sqrt(o[1] / (double) (t * N)));
+    if (++s->calls % 48 == 1 || s->calls < 4)
+        std::fprintf(stderr, "prefill gemm f16c check: N %lld K %lld, %lld calls: rel RMS vs cuBLAS %.3e, max |d|/rms %.3e, f32 redo tiles %u\n",
+                     (long long) N, (long long) K, (long long) s->calls, std::sqrt(s->d2 / std::max(1e-300, s->r2)), s->mx,
+                     strata::prefill::gemm_f16c_redo_count(false));
+}
+#endif
 
 void Gemm::f16(const uint16_t* X, const uint16_t* W, float* Y, int64_t T, int64_t N, int64_t K, int64_t ldy,
                float beta) {
@@ -1391,6 +1652,14 @@ void Gemm::f16(const uint16_t* X, const uint16_t* W, float* Y, int64_t T, int64_
     if (rdna2_sgemm(X, W, Y, T, N, K, ldy, beta, false)) return;
 #endif
 #if !defined(__HIPCC__)
+    // STRATA_DENSE_F16C=1: the f16-accumulate-chain kernel (gemm_f16c.hpp) for chunks of STRATA_DENSE_F16C_MIN_T rows or
+    // more (default 256) on shapes it takes; STRATA_DENSE_F16C_SKIP=N:K,... keeps those shapes on cuBLAS.
+    // STRATA_DENSE_F16C_LOG=1 prints each new shape; STRATA_DENSE_F16C_CHECK=1 compares the first 1024 rows of every call
+    // with this cuBLAS call (sum per N:K, printed every 48th call of a shape; a sync each: not for timing).
+    if (dense_f16c_take(T, N, K)) {
+        if (dense_f16c_check()) f16c_check(X, W, T, N, K);
+        if (strata::prefill::gemm_f16c(X, W, Y, T, N, K, ldy, beta, stream_)) return;
+    }
     const auto f16_gemm = [&](cublasGemmAlgo_t algo) {
         return cublasGemmEx((cublasHandle_t) handle_, CUBLAS_OP_T, CUBLAS_OP_N, (int) N, (int) T, (int) K, &alpha,
                             W, CUDA_R_16F, (int) K, X, CUDA_R_16F, (int) K, &beta, Y, CUDA_R_32F, (int) ldy,
@@ -1404,6 +1673,7 @@ void Gemm::f16(const uint16_t* X, const uint16_t* W, float* Y, int64_t T, int64_
     cublasGemmAlgo_t algo = CUBLAS_GEMM_DEFAULT;
     for (int i = 0; i < f16_algo_n_; ++i)
         if (f16_algo_shape_[i] == shape) { algo = CUBLAS_GEMM_ALGO2; break; }
+    if (algo == CUBLAS_GEMM_DEFAULT) warm_note(1, T, N, K, 0, ldy, beta);
     cublasStatus_t st = f16_gemm(algo);
     if (st == CUBLAS_STATUS_INTERNAL_ERROR && algo == CUBLAS_GEMM_DEFAULT) {
         if (f16_algo_n_ < kF16AlgoSlots) f16_algo_shape_[f16_algo_n_++] = shape;

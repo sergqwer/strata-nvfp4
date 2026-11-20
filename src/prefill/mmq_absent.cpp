@@ -52,5 +52,6 @@ int fp4g_mode() { return 0; }
 int fp4g_group(int, const void* const*, const void* const*, const float* const*, const int32_t*, const int32_t*, int64_t,
                int64_t, int64_t, const void*, const float*, const int32_t*, int64_t, float*, void*, float*, float*, float*,
                void*) { return 0; }
+void fp4g_set_dm16(bool) {}
 
 }  // namespace strata::prefill::mmq

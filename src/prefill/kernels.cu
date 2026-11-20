@@ -177,11 +177,52 @@ __global__ void gr_mix_r_kernel(const float* __restrict__ R, const float* __rest
 // weights - the same thread-to-element mapping (256 threads, stride 256) and block_sum, so rs and the BF16 image are
 // the same bits, and R is not read back
 constexpr int GRW_PER = (N + 255) / 256;
+// pf-hc (STRATA_PF_HC_INJ): the next half's inject projection from the 16-bit image as it is stored (the values the
+// cuBLAS GEMM reads), FP32 sums: v4[c'] += x16 * wi[c', col] over a thread's columns, then one block reduction
+__device__ __forceinline__ float img_f(uint16_t o, int f16img) {
+    return f16img ? __half2float(__ushort_as_half(o)) : __uint_as_float((uint32_t) o << 16);
+}
+// wi4: the inject weights interleaved, [10240 columns][4] BF16 (hc_inj_interleave): one 8-byte load a column
+__device__ __forceinline__ void inj_acc(float* iv, float xv, const uint16_t* __restrict__ wi4, int col) {
+    const uint2 wv = *reinterpret_cast<const uint2*>(wi4 + ((int64_t) col << 2));
+    iv[0] = fmaf(xv, __uint_as_float(wv.x << 16), iv[0]);
+    iv[1] = fmaf(xv, __uint_as_float(wv.x & 0xffff0000u), iv[1]);
+    iv[2] = fmaf(xv, __uint_as_float(wv.y << 16), iv[2]);
+    iv[3] = fmaf(xv, __uint_as_float(wv.y & 0xffff0000u), iv[3]);
+}
+// wi: the plain layout [4][10240] (gr_write_norm_rs: four 2-byte loads, faster there than the interleaved copy)
+__device__ __forceinline__ void inj_acc_plain(float* iv, float xv, const uint16_t* __restrict__ wi, int col) {
+#pragma unroll
+    for (int q = 0; q < 4; ++q) iv[q] = fmaf(xv, __uint_as_float((uint32_t) wi[(int64_t) q * D + col] << 16), iv[q]);
+}
+__global__ void hc_inj_interleave_kernel(const uint16_t* __restrict__ wi, uint16_t* __restrict__ wi4) {
+    const int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j >= D) return;
+#pragma unroll
+    for (int q = 0; q < 4; ++q) wi4[(int64_t) j * 4 + q] = wi[(int64_t) q * D + j];
+}
+__device__ __forceinline__ void block_sum4(float* v, float* sh4) {   // sh4: 4 x 32 floats; thread 0 gets the sums
+    const int lane = threadIdx.x & 31, w = threadIdx.x >> 5;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) v[i] = warp_sum(v[i]);
+    __syncthreads();
+    if (lane == 0)
+#pragma unroll
+        for (int i = 0; i < 4; ++i) sh4[i * 32 + w] = v[i];
+    __syncthreads();
+    if (w == 0) {
+        const int nw = (blockDim.x + 31) >> 5;
+#pragma unroll
+        for (int i = 0; i < 4; ++i) v[i] = warp_sum(lane < nw ? sh4[i * 32 + lane] : 0.0f);
+    }
+}
+template <bool INJ>
 __global__ void __launch_bounds__(256) gr_write_norm_rs_kernel(float* __restrict__ R, const float* __restrict__ bo,
                                                                const float* __restrict__ inj, int64_t inj_ld,
                                                                const float* __restrict__ w, float eps,
                                                                float* __restrict__ rs_out, uint16_t* __restrict__ xn16,
-                                                               uint16_t* __restrict__ xn16_lo, int64_t ldx, int f16img) {
+                                                               uint16_t* __restrict__ xn16_lo, int64_t ldx, int f16img,
+                                                               const uint16_t* __restrict__ wi, float* __restrict__ injp) {
     __shared__ float sh[32];
     const int64_t row = blockIdx.x;                 // t * 4 + c
     const int64_t t = row / HC;
@@ -202,13 +243,35 @@ __global__ void __launch_bounds__(256) gr_write_norm_rs_kernel(float* __restrict
     const float rs = rsqrtf(block_sum(ss, sh) / (float) N + eps);
     if (threadIdx.x == 0) rs_out[row] = rs;
     k = 0;
+    float iv[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 #pragma unroll
     for (int d = threadIdx.x; d < N; d += 256, ++k) {
         const float x = v[k] * rs * w[c * N + d];
         const uint16_t h = act16(x);
-        xn16[xo + d] = f16img ? bf_to_hf_conv(h) : h;
+        const uint16_t o = f16img ? bf_to_hf_conv(h) : h;
+        xn16[xo + d] = o;
         if (xn16_lo) xn16_lo[xo + d] = bf_lo(x, h);
+        if constexpr (INJ) {
+            inj_acc_plain(iv, img_f(o, f16img), wi, c * N + d);
+        }
     }
+    if constexpr (INJ) {   // this row's part of the four sums: injp[row][c'] (hc_inj_reduce adds the four rows)
+        __shared__ float sh4[4 * 32];
+        block_sum4(iv, sh4);
+        if (threadIdx.x == 0)
+#pragma unroll
+            for (int q = 0; q < 4; ++q) injp[row * 4 + q] = iv[q];
+    }
+}
+// pf-hc: inj[t][c'] = the sum of the token's np parts, in order (np 4: gr_write_norm_rs's rows; 1: the combine's)
+__global__ void hc_inj_reduce_kernel(const float* __restrict__ p, float* __restrict__ inj, int64_t T, int np) {
+    const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= T * 4) return;
+    const int64_t t = i >> 2;
+    const int q = (int) (i & 3);
+    float s = p[(t * np) * 4 + q];
+    for (int k = 1; k < np; ++k) s += p[(t * np + k) * 4 + q];
+    inj[i] = s;
 }
 // S23 (opt-in STRATA_CVEC_FUSE=1): a steered layer's FFN write, its control vector and the next half's norm in one
 // pass over R (was gr_write + cvec_apply + gr_norm_rs: three).  The write is gr_write_kernel's, the vector
@@ -2455,7 +2518,9 @@ __global__ void moe_combine_kernel(const float* __restrict__ Dm, const int32_t* 
 #pragma unroll
     for (int k = 0; k < KU; ++k) {
         const int64_t r = slot[t * KU + k];
-        const float v = row_sd ? Dm[r * N + d] * row_sd[r] : Dm[r * N + d];   // the product scale_down_rows stored
+        const float sd = row_sd ? row_sd[r] : 1.0f;
+        const float v = sd < 0.0f ? __half2float(reinterpret_cast<const __half*>(Dm + r * N)[d])   // pf-hc: an FP16 row (s_down in it)
+                        : row_sd ? Dm[r * N + d] * sd : Dm[r * N + d];   // the product scale_down_rows stored
         s = fmaf(w[t * KU + k], v, s);
     }
     bo[i] = s + shared[i] * sigm(sg[t]);
@@ -2477,6 +2542,14 @@ __global__ void moe_combine4_kernel(const float* __restrict__ Dm, const int32_t*
     for (int k = 0; k < KU; ++k) {
         ww[k] = w[t * KU + k];
         const int64_t r = slot[t * KU + k];
+        if (row_sd && row_sd[r] < 0.0f) {   // pf-hc: an FP16 row (s_down in it)
+            const uint2 raw = *reinterpret_cast<const uint2*>(reinterpret_cast<const uint16_t*>(Dm + r * N) + d);
+            v[k] = make_float4(__half2float(__ushort_as_half((unsigned short) (raw.x & 0xffffu))),
+                               __half2float(__ushort_as_half((unsigned short) (raw.x >> 16))),
+                               __half2float(__ushort_as_half((unsigned short) (raw.y & 0xffffu))),
+                               __half2float(__ushort_as_half((unsigned short) (raw.y >> 16))));
+            continue;
+        }
         v[k] = *reinterpret_cast<const float4*>(Dm + r * N + d);
         if (row_sd) {   // NVFP4 in MMQ: the row's s_down, as moe_combine_kernel applies it
             const float sd = row_sd[r];
@@ -2543,11 +2616,13 @@ __global__ void moe_scatter_add_kernel(const float* __restrict__ Dm, const int32
 // moe_combine4_kernel's sum for one token, then gr_write_norm_rs_kernel for its four rows (t, c): a block per token,
 // bo kept in registers (each thread's elements d = tid + 256 k, the mapping both kernels use) instead of written and
 // read back.  Every value is the two kernels' expression in their order: the same R, rs and BF16 image.
+template <bool INJ>
 __global__ void __launch_bounds__(256) moe_combine_write_norm_rs_kernel(
     const float* __restrict__ Dm, const int32_t* __restrict__ slot, const float* __restrict__ w,
     const float* __restrict__ shared, const float* __restrict__ sg, const float* __restrict__ row_sd,
     float* __restrict__ R, const float* __restrict__ inj, int64_t inj_ld, const float* __restrict__ wn, float eps,
-    float* __restrict__ rs_out, uint16_t* __restrict__ xn16, uint16_t* __restrict__ xn16_lo, int64_t ldx, int f16img) {
+    float* __restrict__ rs_out, uint16_t* __restrict__ xn16, uint16_t* __restrict__ xn16_lo, int64_t ldx, int f16img,
+    const uint16_t* __restrict__ wi, float* __restrict__ injp) {
     __shared__ float sh[32];
     __shared__ int64_t s_row[10];
     __shared__ float s_w[10], s_sd[10];
@@ -2561,14 +2636,19 @@ __global__ void __launch_bounds__(256) moe_combine_write_norm_rs_kernel(
     __syncthreads();
     const float g = sigm(sg[t]);
     float bo[GRW_PER];
+    float iv[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     int k = 0;
 #pragma unroll
     for (int d = threadIdx.x; d < N; d += 256, ++k) {
         float s = 0.0f;
 #pragma unroll
         for (int q = 0; q < 10; ++q) {
-            float v = Dm[s_row[q] * N + d];
-            if (row_sd) v = v * s_sd[q];
+            float v;
+            if (s_sd[q] < 0.0f) v = __half2float(reinterpret_cast<const __half*>(Dm + s_row[q] * N)[d]);   // pf-hc: FP16 row
+            else {
+                v = Dm[s_row[q] * N + d];
+                if (row_sd) v = v * s_sd[q];
+            }
             s = fmaf(s_w[q], v, s);
         }
         bo[k] = s + shared[t * N + d] * g;
@@ -2596,9 +2676,20 @@ __global__ void __launch_bounds__(256) moe_combine_write_norm_rs_kernel(
         for (int d = threadIdx.x; d < N; d += 256, ++k) {
             const float x = v[k] * rs * wn[c * N + d];
             const uint16_t h = act16(x);
-            xn16[xo + d] = f16img ? bf_to_hf_conv(h) : h;   // gr_write_norm_rs_kernel's FP16 image (upstream's xf16)
+            const uint16_t o = f16img ? bf_to_hf_conv(h) : h;
+            xn16[xo + d] = o;   // gr_write_norm_rs_kernel's FP16 image (upstream's xf16)
             if (xn16_lo) xn16_lo[xo + d] = bf_lo(x, h);
+            if constexpr (INJ) {
+                    inj_acc(iv, img_f(o, f16img), wi, c * N + d);
+            }
         }
+    }
+    if constexpr (INJ) {   // pf-hc: the token's four inject sums, one part (hc_inj_reduce np 1)
+        __shared__ float sh4[4 * 32];
+        block_sum4(iv, sh4);
+        if (threadIdx.x == 0)
+#pragma unroll
+            for (int q = 0; q < 4; ++q) injp[t * 4 + q] = iv[q];
     }
 }
 
@@ -2992,7 +3083,7 @@ __global__ void __launch_bounds__(256, 2) gr_upmix_cuda_kernel(const uint16_t* _
                 }
                 sm[0] /= (float) HC;
                 sm[1] /= (float) HC;
-                *reinterpret_cast<float2*>(mixed + t * N + d) = make_float2(sm[0], sm[1]);
+                if (mixed) *reinterpret_cast<float2*>(mixed + t * N + d) = make_float2(sm[0], sm[1]);   // pf-host: null = not read
                 if (mixed16) {
                     const uint16_t h0 = act16(sm[0]), h1 = act16(sm[1]);
                     *reinterpret_cast<uint32_t*>(mixed16 + t * N + d) = (uint32_t) h0 | ((uint32_t) h1 << 16);
@@ -3123,11 +3214,50 @@ bool gr_upmix(const uint16_t* lo16, const uint16_t* w_up, const float* R, const 
 #endif
 }
 void gr_write_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_ld, const float* w_norm_next, float eps,
-                      float* rs, uint16_t* xn16, int64_t T, void* stream, uint16_t* xn16_lo, int64_t ldx, bool f16img) {
-    gr_write_norm_rs_kernel<<<(unsigned) (T * HC), 256, 0, (cudaStream_t) stream>>>(R, bo, inj, inj_ld, w_norm_next, eps,
-                                                                                      rs, xn16, xn16_lo,
-                                                                                      ldx > 0 ? ldx : D, f16img ? 1 : 0);
+                      float* rs, uint16_t* xn16, int64_t T, void* stream, uint16_t* xn16_lo, int64_t ldx, bool f16img,
+                      const uint16_t* wi_next, float* injp) {
+    if (wi_next != nullptr && injp != nullptr)
+        gr_write_norm_rs_kernel<true><<<(unsigned) (T * HC), 256, 0, (cudaStream_t) stream>>>(
+            R, bo, inj, inj_ld, w_norm_next, eps, rs, xn16, xn16_lo, ldx > 0 ? ldx : D, f16img ? 1 : 0, wi_next, injp);
+    else
+        gr_write_norm_rs_kernel<false><<<(unsigned) (T * HC), 256, 0, (cudaStream_t) stream>>>(
+            R, bo, inj, inj_ld, w_norm_next, eps, rs, xn16, xn16_lo, ldx > 0 ? ldx : D, f16img ? 1 : 0, nullptr, nullptr);
     check("gr_write_norm_rs");
+}
+void hc_inj_interleave(const uint16_t* wi, uint16_t* wi4, void* stream) {
+    hc_inj_interleave_kernel<<<blocks_for(D), 256, 0, (cudaStream_t) stream>>>(wi, wi4);
+    check("hc_inj_interleave");
+}
+// pf-hc probe (STRATA_PF_DM_PROBE): over the 10 rows a token reads, |Dm x s_down| (FP32 rows): out[0] the max (as
+// int bits), out[1..4] counts above 8192 / 16384 / 32768 / 65504
+__global__ void dm_probe_kernel(const float* __restrict__ Dm, const int32_t* __restrict__ slot,
+                                const float* __restrict__ row_sd, unsigned int* __restrict__ out) {
+    const int64_t t = blockIdx.x;
+    float mx = 0.0f;
+    unsigned int c0 = 0, c1 = 0, c2 = 0, c3 = 0;
+    for (int q = 0; q < 10; ++q) {
+        const int64_t r = slot[t * 10 + q];
+        const float s = row_sd ? row_sd[r] : 1.0f;
+        for (int d = threadIdx.x; d < N; d += blockDim.x) {
+            const float v = fabsf(Dm[r * N + d] * s);
+            mx = fmaxf(mx, v);
+            c0 += v > 8192.0f; c1 += v > 16384.0f; c2 += v > 32768.0f; c3 += v > 65504.0f;
+        }
+    }
+    atomicMax(out, __float_as_uint(mx));
+    if (c0) atomicAdd(out + 1, c0);
+    if (c1) atomicAdd(out + 2, c1);
+    if (c2) atomicAdd(out + 3, c2);
+    if (c3) atomicAdd(out + 4, c3);
+}
+void dm_probe(const float* Dm, const int32_t* slot, const float* row_sd, int64_t T, unsigned int* out, void* stream) {
+    dm_probe_kernel<<<(unsigned) T, 256, 0, (cudaStream_t) stream>>>(Dm, slot, row_sd, out);
+    check("dm_probe");
+}
+void hc_inj_reduce(const float* injp, int np, float* inj, int64_t T, void* stream) {
+    if (T <= 0) return;
+    hc_inj_reduce_kernel<<<blocks_for(T * 4), 256, 0, (cudaStream_t) stream>>>(injp, inj, T, np);
+    check("hc_inj_reduce");
 }
 void gr_write_cvec_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_ld, const float* v_l,
                            const float* s_l, const int* on, int mode, const float* w_norm_next, float eps, float* rs,
@@ -3639,19 +3769,25 @@ void moe_scatter_add(const float* Dm, const int32_t* u_tok, const int32_t* u_off
 bool moe_combine_write_norm_rs(const float* Dm, const int32_t* slot, const float* w, const float* shared, const float* sg,
                                const float* row_sd, float* R, const float* inj, int64_t inj_ld, const float* w_norm_next,
                                float eps, float* rs, uint16_t* xn16, int64_t T, void* stream, uint16_t* xn16_lo,
-                               int64_t ldx, bool f16img) {
+                               int64_t ldx, bool f16img, const uint16_t* wi_next, float* injp) {
 #if !defined(STRATA_W_NO_COMB) && !defined(__HIPCC__)
     // where moe_combine takes moe_combine4_kernel (16-byte aligned Dm, shared and bo; bo is not needed here)
     if (((reinterpret_cast<uintptr_t>(Dm) | reinterpret_cast<uintptr_t>(shared)) & 15) == 0) {
         if (T > 0) {
-            moe_combine_write_norm_rs_kernel<<<(unsigned) T, 256, 0, (cudaStream_t) stream>>>(
-                Dm, slot, w, shared, sg, row_sd, R, inj, inj_ld, w_norm_next, eps, rs, xn16, xn16_lo, ldx > 0 ? ldx : D,
-                f16img ? 1 : 0);
+            if (wi_next != nullptr && injp != nullptr)
+                moe_combine_write_norm_rs_kernel<true><<<(unsigned) T, 256, 0, (cudaStream_t) stream>>>(
+                    Dm, slot, w, shared, sg, row_sd, R, inj, inj_ld, w_norm_next, eps, rs, xn16, xn16_lo, ldx > 0 ? ldx : D,
+                    f16img ? 1 : 0, wi_next, injp);
+            else
+                moe_combine_write_norm_rs_kernel<false><<<(unsigned) T, 256, 0, (cudaStream_t) stream>>>(
+                    Dm, slot, w, shared, sg, row_sd, R, inj, inj_ld, w_norm_next, eps, rs, xn16, xn16_lo, ldx > 0 ? ldx : D,
+                    f16img ? 1 : 0, nullptr, nullptr);
             check("moe_combine_write_norm_rs");
         }
         return true;
     }
 #endif
+    (void) wi_next; (void) injp;
     // STRATA_W_NO_COMB: moe_combine_kernel's path, not the expression this kernel copies; HIP: not checked there
     (void) Dm; (void) slot; (void) w; (void) shared; (void) sg; (void) row_sd; (void) R; (void) inj; (void) inj_ld;
     (void) w_norm_next; (void) eps; (void) rs; (void) xn16; (void) T; (void) stream; (void) xn16_lo; (void) ldx;

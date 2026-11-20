@@ -759,6 +759,7 @@ int run_group(int n, const void* const* gu, const void* const* dn, const float* 
               const int32_t* bounds_d, int64_t r0, int64_t nr, int64_t max_rows, const void* xq, const float* xscale,
               const int32_t* yrows, int64_t x_rows, float* h, void* hq, float* hscale, float* sd, float* dm, int mode,
               void* stream);
+void set_dm16(bool on);
 }  // namespace strata::prefill::fp4g
 namespace strata::prefill::mmq {
 #endif
@@ -796,6 +797,13 @@ int fp4g_group(int n, const void* const* gu, const void* const* dn, const float*
     if (mode == 0 || !x2_mode()) return 0;
     return fp4g::run_group(n, gu, dn, tail, bounds_gu, bounds_d, r0, nr, max_rows, xq, xscale, yrows, x_rows, h, hq,
                            hscale, sd, dm, mode, stream);
+#endif
+}
+void fp4g_set_dm16(bool on) {
+#if defined(GGML_USE_HIP)
+    (void) on;
+#else
+    fp4g::set_dm16(on);
 #endif
 }
 

@@ -61,6 +61,12 @@ files by hand.
 
 ## What's new
 
+- **Long prompts 17-20% faster again on RTX 50 (on main, not released yet).** int8 QSA scores, f16-accumulate dense GEMMs,
+  CUDA graphs for the prompt's kernel chains, less hyper-connection traffic and the borrowed expert slots refilled
+  beside decode. RTX 5090: 16K reads in 1.35 s instead of 1.69 s, 64K in 5.1 s instead of 6.2 s, 128K in 10.3 s
+  instead of 12.5 s (Basalt in the same hour: 2.0 s at 16K, 6.3 s at 64K). Accuracy and decode unchanged
+  ([measurements](docs/NVFP4.md#rtx-50-faster-prompts-2026-11-20-main)).
+
 - **Faster decode and prompts on RTX 50 (on main, not released yet).** Basalt's decode kernels and drafting
   ([Credits](#credits)) plus kernels of our own, on by default on RTX 50 cards only. RTX 5090, tokens/s against
   0.2.15-nvfp4.3: a JSON answer 487 vs 330 (+48%), a chat 269 vs 219 (+23%), English prose 261 vs 205 (+27%),

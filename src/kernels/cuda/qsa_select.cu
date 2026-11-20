@@ -505,6 +505,207 @@ __global__ void __launch_bounds__(32) block_scores_tail_kernel(const float* __re
     }
 }
 
+// ---- STRATA_QSA_I8=1 (prompt path, CUDA sm_80+): the block scores on int8 tensor cores, "i8x6".  Every operand row
+// (a pooled key; a query's head) becomes 24-bit fixed point with one fp32 scale per row: x = (h*2^16 + l*2^8 + m) * s,
+// h and l signed bytes, m an unsigned byte, s = max|row| / (127 * 2^16).  q . k is then the six IMMA products of order
+// >= 2^-16 (hh; hl + lh; hm + mh + ll), joined in FP32 and scaled by s_q * s_k.  The dropped products (lm, ml, mm) are
+// below 2^-24 of the row scales, so the score error is FP32-level (gpu-probe POC: rel RMS 4.2e-7 vs FP64, 3xTF32 8.5e-7)
+// at 2.3x the TF32 kernel's rate.  Not bitwise against qsa_block_scores_tc (another arithmetic); the heads are added in
+// the same order (relu(h0) + relu(h1) + relu(h2) + relu(h3)).  The keys are split once per layer and chunk
+// (qsa_i8_keys), the queries once per call; blocks < n_bid only, the tail block n_bid is block_scores_tail_kernel's.
+#if !defined(__HIPCC__)
+constexpr int I8_QT = 16;                 // queries per CTA (4 per warp: 16 A rows = 4 heads x 4 queries)
+constexpr int I8_NB = 64;                 // blocks per CTA
+constexpr int I8_KS = IDX_DIM + 16;       // key row stride in bytes (shared memory)
+constexpr float I8_FULL = 127.0f * 65536.0f;
+
+// one warp per row of 128 values: three byte planes [3][rows * 128] and the row's scale
+__global__ void __launch_bounds__(256) i8_split_rows_kernel(const float* __restrict__ x, int64_t rows,
+                                                            int8_t* __restrict__ planes, int64_t plane_stride,
+                                                            float* __restrict__ scale) {
+    const int64_t r = (int64_t) blockIdx.x * 8 + (threadIdx.x >> 5);
+    if (r >= rows) return;
+    const int lane = threadIdx.x & 31;
+    const float4 v = reinterpret_cast<const float4*>(x + r * IDX_DIM)[lane];
+    float mx = fmaxf(fmaxf(fabsf(v.x), fabsf(v.y)), fmaxf(fabsf(v.z), fabsf(v.w)));
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, o));
+    const float inv = mx > 0.0f && mx <= FLT_MAX ? I8_FULL / mx : 0.0f;
+    const float vv[4] = {v.x, v.y, v.z, v.w};
+    uint32_t ph = 0, pl = 0, pm = 0;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        const int X = __float2int_rn(vv[i] * inv);          // |X| <= 127 * 2^16 (+1 by rounding)
+        const int hh = (X + 32768) >> 16;                   // [-127, 127]
+        const int rr = X - (hh << 16);                      // [-32768, 32767]
+        ph |= (uint32_t) (uint8_t) (int8_t) hh << (8 * i);
+        pl |= (uint32_t) (uint8_t) (int8_t) (rr >> 8) << (8 * i);
+        pm |= (uint32_t) (rr & 255) << (8 * i);
+    }
+    uint32_t* p = reinterpret_cast<uint32_t*>(planes + r * IDX_DIM) + lane;
+    p[0] = ph;
+    p[plane_stride / 4] = pl;
+    p[plane_stride / 2] = pm;
+    if (lane == 0) scale[r] = mx > 0.0f ? mx / I8_FULL : 0.0f;
+}
+
+template <int AT, int BT>   // 0 = s8, 1 = u8
+__device__ __forceinline__ void mma_i8(int* c, const uint32_t* a, const uint32_t* b) {
+#if STRATA_SEL_SM80
+    if (AT == 0 && BT == 0)
+        asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
+                     : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3])
+                     : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
+    else if (AT == 0)
+        asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.u8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
+                     : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3])
+                     : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
+    else
+        asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.u8.s8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
+                     : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3])
+                     : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
+#else
+    __trap();
+#endif
+}
+
+// CTA: 16 queries x 64 blocks; warp w: queries q0 + 4w .. + 3, A row r = head (r >> 2) of query (r & 3).
+// qp / kp: the byte planes (plane strides qps / kps), sq [nq_cap * 4], sk [blocks].
+__global__ void __launch_bounds__(128) block_scores_i8_kernel(const int8_t* __restrict__ qp, int64_t qps,
+                                                              const float* __restrict__ sq,
+                                                              const int8_t* __restrict__ kp, int64_t kps,
+                                                              const float* __restrict__ sk,
+                                                              const int32_t* __restrict__ steps, int64_t nq,
+                                                              int64_t max_blocks, float* __restrict__ out) {
+    __shared__ __align__(16) int8_t sK[3][I8_NB][I8_KS];
+    __shared__ int s_nbid[I8_QT];
+    const int t = threadIdx.x, lane = t & 31, warp = t >> 5, g = lane >> 2, tig = lane & 3;
+    const int64_t q0 = (int64_t) blockIdx.y * I8_QT;
+    const int64_t b0 = (int64_t) blockIdx.x * I8_NB;
+    if (t < I8_QT) s_nbid[t] = q0 + t < nq ? steps[(q0 + t) * kStepCount + kStepNBid] : 0;
+    __syncthreads();
+    int hi_nbid = 0;
+#pragma unroll
+    for (int i = 0; i < I8_QT; ++i) hi_nbid = max(hi_nbid, s_nbid[i]);
+    if (b0 >= hi_nbid) return;                       // uniform over the CTA
+    for (int i = t; i < 3 * I8_NB * IDX_DIM / 16; i += 128) {
+        const int p = i / (I8_NB * IDX_DIM / 16), rem = i % (I8_NB * IDX_DIM / 16);
+        const int r = rem / (IDX_DIM / 16), c = rem % (IDX_DIM / 16);
+        int4 v = make_int4(0, 0, 0, 0);
+        if (b0 + r < hi_nbid) v = reinterpret_cast<const int4*>(kp + p * kps + (b0 + r) * IDX_DIM)[c];
+        *reinterpret_cast<int4*>(&sK[p][r][c * 16]) = v;
+    }
+    __syncthreads();
+    const int64_t qw = q0 + warp * 4;
+    const int64_t a0 = (qw + (g & 3)) * (IDX_HEADS * IDX_DIM) + (g >> 2) * IDX_DIM;          // row g
+    const int64_t a1 = (qw + ((g + 8) & 3)) * (IDX_HEADS * IDX_DIM) + ((g + 8) >> 2) * IDX_DIM;   // row g + 8
+    int c_hh[32], c_x1[32], c_x2[32];                // weights 2^32, 2^24, 2^16 (of s_q s_k)
+#pragma unroll
+    for (int i = 0; i < 32; ++i) c_hh[i] = c_x1[i] = c_x2[i] = 0;
+#pragma unroll 1
+    for (int k0 = 0; k0 < IDX_DIM; k0 += 32) {
+        uint32_t A[3][4];
+#pragma unroll
+        for (int p = 0; p < 3; ++p) {
+            const int8_t* q = qp + p * qps;
+            A[p][0] = *reinterpret_cast<const uint32_t*>(q + a0 + k0 + 4 * tig);
+            A[p][1] = *reinterpret_cast<const uint32_t*>(q + a1 + k0 + 4 * tig);
+            A[p][2] = *reinterpret_cast<const uint32_t*>(q + a0 + k0 + 16 + 4 * tig);
+            A[p][3] = *reinterpret_cast<const uint32_t*>(q + a1 + k0 + 16 + 4 * tig);
+        }
+#pragma unroll
+        for (int nt = 0; nt < 8; ++nt) {
+            uint32_t B[3][2];
+#pragma unroll
+            for (int p = 0; p < 3; ++p) {
+                B[p][0] = *reinterpret_cast<const uint32_t*>(&sK[p][nt * 8 + g][k0 + 4 * tig]);
+                B[p][1] = *reinterpret_cast<const uint32_t*>(&sK[p][nt * 8 + g][k0 + 16 + 4 * tig]);
+            }
+            mma_i8<0, 0>(c_hh + nt * 4, A[0], B[0]);
+            mma_i8<0, 0>(c_x1 + nt * 4, A[0], B[1]);
+            mma_i8<0, 0>(c_x1 + nt * 4, A[1], B[0]);
+            mma_i8<0, 1>(c_x2 + nt * 4, A[0], B[2]);
+            mma_i8<1, 0>(c_x2 + nt * 4, A[2], B[0]);
+            mma_i8<0, 0>(c_x2 + nt * 4, A[1], B[1]);
+        }
+    }
+    // thread (g, tig): rows g (head g >> 2 of query g & 3) and g + 8 (head (g >> 2) + 2); lanes g < 4 hold heads 0 and 2,
+    // lanes ^ 16 (g + 4) heads 1 and 3 of the same query.  Columns: blocks nt * 8 + 2 tig + j.
+    const int qr = warp * 4 + (g & 3);               // the query's row in the CTA
+    const float r0 = sq[(q0 + qr) * IDX_HEADS + (g >> 2)], r1 = sq[(q0 + qr) * IDX_HEADS + (g >> 2) + 2];
+    const int nb = s_nbid[qr];
+    const int64_t qi = q0 + qr;
+#pragma unroll
+    for (int nt = 0; nt < 8; ++nt)
+#pragma unroll
+        for (int j = 0; j < 2; ++j) {
+            const int64_t b = b0 + nt * 8 + 2 * tig + j;
+            const float skb = b < hi_nbid ? sk[b] : 0.0f;
+            float d[2];
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                const int i = nt * 4 + h * 2 + j;
+                const float v = (float) c_hh[i] * 4294967296.0f + (float) c_x1[i] * 16777216.0f + (float) c_x2[i] * 65536.0f;
+                d[h] = v * (h ? r1 : r0) * skb;
+            }
+            // d[0] = head (g >> 2), d[1] = head (g >> 2) + 2; the partner lane has the other two
+            const float e0 = __shfl_xor_sync(0xffffffffu, d[0], 16), e1 = __shfl_xor_sync(0xffffffffu, d[1], 16);
+            if (g < 4 && qi < nq && b < nb && b < max_blocks) {
+                float score = 0.0f;
+                score += d[0] > 0.0f ? d[0] : 0.0f;   // head 0
+                score += e0 > 0.0f ? e0 : 0.0f;       // head 1
+                score += d[1] > 0.0f ? d[1] : 0.0f;   // head 2
+                score += e1 > 0.0f ? e1 : 0.0f;       // head 3
+                out[qi * max_blocks + b] = score;
+            }
+        }
+}
+
+// STRATA_QSA_I8_CHECK: per query, the i8 ids against the reference ids (both ascending; widths from the step record),
+// and the largest score difference relative to the query's top score.  s[0] queries, s[1] queries whose ids differ,
+// s[2] cells of the i8 selection missing from the reference's, s[3] cells compared, s[4] max relative error (float bits)
+__device__ unsigned long long g_i8_stats[5];
+__global__ void __launch_bounds__(256) i8_check_kernel(const float* __restrict__ sc, const int32_t* __restrict__ ids,
+                                                       const float* __restrict__ ref, const int32_t* __restrict__ ref_ids,
+                                                       const int32_t* __restrict__ steps, int64_t max_blocks, int64_t cap) {
+    __shared__ unsigned int s_miss;
+    __shared__ float s_top, s_err;
+    const int64_t qi = blockIdx.x;
+    const int32_t* st = steps + qi * kStepCount;
+    const int64_t n_kv = st[kStepNKv], n_bid = st[kStepNBid], width = st[kStepWidth];
+    const int64_t w = n_kv < width ? n_kv : width;
+    if (threadIdx.x == 0) { s_miss = 0u; s_top = 0.0f; s_err = 0.0f; }
+    __syncthreads();
+    const int32_t* a = ids + qi * cap;
+    const int32_t* r = ref_ids + qi * cap;
+    unsigned int miss = 0;
+    for (int64_t j = threadIdx.x; j < w; j += 256) {
+        const int32_t x = a[j];
+        int64_t lo = 0, hi = w;
+        while (lo < hi) { const int64_t mid = (lo + hi) >> 1; if (r[mid] < x) lo = mid + 1; else hi = mid; }
+        miss += !(lo < w && r[lo] == x);
+    }
+    float top = 0.0f, err = 0.0f;
+    for (int64_t b = threadIdx.x; b < n_bid && b < max_blocks; b += 256) {
+        const float y = ref[qi * max_blocks + b], x = sc[qi * max_blocks + b];
+        top = fmaxf(top, fabsf(y));
+        err = fmaxf(err, fabsf(x - y));
+    }
+    atomicAdd(&s_miss, miss);
+    atomicMax(reinterpret_cast<unsigned int*>(&s_top), __float_as_uint(top));
+    atomicMax(reinterpret_cast<unsigned int*>(&s_err), __float_as_uint(err));
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        atomicAdd(&g_i8_stats[0], 1ull);
+        atomicAdd(&g_i8_stats[1], s_miss ? 1ull : 0ull);
+        atomicAdd(&g_i8_stats[2], (unsigned long long) s_miss);
+        atomicAdd(&g_i8_stats[3], (unsigned long long) w);
+        const float rel = s_top > 0.0f ? s_err / s_top : 0.0f;
+        atomicMax(&g_i8_stats[4], (unsigned long long) __float_as_uint(rel));
+    }
+}
+#endif  // !__HIPCC__
+
 // ---- the block scores as an FP32 tiled GEMM for cards without a matrix-core scorer (CUDA below sm_80; HIP, opt-in):
 // rows (query, indexer head) x columns (blocks), K = 128 through shared memory, 2 queries x 4 heads x TN blocks per
 // thread, relu per head summed in registers.  The warp kernel spends 5 shuffles per 4 products and reached ~1 TFLOPS
@@ -3909,5 +4110,139 @@ void qsa_two_pass_check(const float*, const int32_t*, const float*, const int32_
                         int64_t, int64_t, void*, void*) {}
 bool qsa_two_pass_stats(unsigned long long*, bool, void*) { return false; }
 #endif
+
+
+// ---- STRATA_QSA_I8 (see block_scores_i8_kernel) -------------------------------------------------------------------
+namespace {
+struct I8Layout {
+    uint64_t kp, ks, qp, qs, total;
+    int64_t kps, qps;
+};
+I8Layout i8_layout(int64_t nq_cap, int64_t max_blocks) {
+    const auto up = [](uint64_t v) { return (v + 255u) & ~uint64_t(255u); };
+    const int64_t nqr = (nq_cap + 15) / 16 * 16;
+    const int64_t nbr = (max_blocks + 63) / 64 * 64;
+    I8Layout L{};
+    L.kps = (int64_t) up((uint64_t) nbr * 128u);
+    L.qps = (int64_t) up((uint64_t) nqr * 512u);
+    L.kp = 0;
+    L.ks = L.kp + 3u * (uint64_t) L.kps;
+    L.qp = L.ks + up((uint64_t) nbr * 4u);
+    L.qs = L.qp + 3u * (uint64_t) L.qps;
+    L.total = L.qs + up((uint64_t) nqr * 16u);
+    return L;
+}
+}  // namespace
+
+int qsa_i8_mode() {
+#if defined(__HIPCC__)
+    return 0;
+#else
+    static const int mode = [] {
+        const char* v = std::getenv("STRATA_QSA_I8");
+        if (v == nullptr || v[0] != '1' || v[1] != '\0') return 0;
+        int dev = 0, major = 0;
+        if (cudaGetDevice(&dev) != cudaSuccess || cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) != cudaSuccess) {
+            cudaGetLastError();
+            return 0;
+        }
+        const char* w = std::getenv("STRATA_QSA_WARP");
+        const bool warp = w && (!std::strcmp(w, "1") || !std::strcmp(w, "select"));
+        if (strata::cc_major_of(major) < 8 || warp) {
+            std::fprintf(stderr, "qsa select: STRATA_QSA_I8=1 needs sm_80+ and no STRATA_QSA_WARP; not used\n");
+            return 0;
+        }
+        std::fprintf(stderr, "qsa select: prompt block scores on int8 tensor cores (i8x6, STRATA_QSA_I8=1)\n");
+        return 1;
+    }();
+    return mode;
+#endif
+}
+bool qsa_i8_check_on() {
+    static const bool on = [] { const char* v = std::getenv("STRATA_QSA_I8_CHECK"); return v && v[0] == '1'; }();
+    return on;
+}
+uint64_t qsa_i8_scratch_bytes(int64_t nq_cap, int64_t max_blocks) { return i8_layout(nq_cap, max_blocks).total; }
+
+bool qsa_i8_keys(const float* pooled, int64_t n_blocks, int64_t nq_cap, int64_t max_blocks, void* scratch,
+                 uint64_t scratch_bytes, void* stream) {
+#if defined(__HIPCC__)
+    (void) pooled; (void) n_blocks; (void) nq_cap; (void) max_blocks; (void) scratch; (void) scratch_bytes; (void) stream;
+    return false;
+#else
+    if (qsa_i8_mode() == 0 || n_blocks > max_blocks || nq_cap <= 0) return false;
+    const I8Layout L = i8_layout(nq_cap, max_blocks);
+    if (scratch == nullptr || scratch_bytes < L.total || (reinterpret_cast<uintptr_t>(scratch) & 255u) != 0) return false;
+    if (n_blocks <= 0) return true;
+    uint8_t* base = static_cast<uint8_t*>(scratch);
+    i8_split_rows_kernel<<<(unsigned) ((n_blocks + 7) / 8), 256, 0, (cudaStream_t) stream>>>(
+        pooled, n_blocks, reinterpret_cast<int8_t*>(base + L.kp), L.kps, reinterpret_cast<float*>(base + L.ks));
+    const cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess) { std::fprintf(stderr, "qsa i8 keys: %s\n", cudaGetErrorString(e)); std::exit(1); }
+    return true;
+#endif
+}
+
+bool qsa_block_scores_i8(const float* dead, const float* q_idx, const int32_t* steps, int64_t nq, int64_t nq_cap,
+                         int64_t max_blocks, const QsaShapes& s, float* scores, void* scratch, uint64_t scratch_bytes,
+                         void* stream, int64_t active_blocks) {
+#if defined(__HIPCC__)
+    (void) dead; (void) q_idx; (void) steps; (void) nq; (void) nq_cap; (void) max_blocks; (void) s; (void) scores;
+    (void) scratch; (void) scratch_bytes; (void) stream; (void) active_blocks;
+    return false;
+#else
+    if (qsa_i8_mode() == 0 || s.idx_dim != IDX_DIM || s.idx_n_head != IDX_HEADS || s.idx_block != R || nq > nq_cap ||
+        (nq + I8_QT - 1) / I8_QT > 65535)
+        return false;
+    const I8Layout L = i8_layout(nq_cap, max_blocks);
+    if (scratch == nullptr || scratch_bytes < L.total || (reinterpret_cast<uintptr_t>(scratch) & 255u) != 0) return false;
+    if (nq <= 0) return true;
+    uint8_t* base = static_cast<uint8_t*>(scratch);
+    const cudaStream_t st = (cudaStream_t) stream;
+    const int64_t qrows = nq * IDX_HEADS;
+    i8_split_rows_kernel<<<(unsigned) ((qrows + 7) / 8), 256, 0, st>>>(q_idx, qrows, reinterpret_cast<int8_t*>(base + L.qp),
+                                                                     L.qps, reinterpret_cast<float*>(base + L.qs));
+    const int64_t reach = active_blocks > 0 && active_blocks < max_blocks ? active_blocks : max_blocks;
+    const dim3 grid((unsigned) ((reach + I8_NB - 1) / I8_NB), (unsigned) ((nq + I8_QT - 1) / I8_QT));
+    block_scores_i8_kernel<<<grid, 128, 0, st>>>(reinterpret_cast<const int8_t*>(base + L.qp), L.qps,
+                                                 reinterpret_cast<const float*>(base + L.qs),
+                                                 reinterpret_cast<const int8_t*>(base + L.kp), L.kps,
+                                                 reinterpret_cast<const float*>(base + L.ks), steps, nq, max_blocks, scores);
+    block_scores_tail_kernel<<<(unsigned) nq, 32, 0, st>>>(dead, q_idx, steps, max_blocks, scores);
+    const cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess) { std::fprintf(stderr, "qsa i8 scores: %s\n", cudaGetErrorString(e)); std::exit(1); }
+    return true;
+#endif
+}
+
+void qsa_i8_check(const float* scores, const int32_t* ids, const float* ref_scores, const int32_t* ref_ids,
+                  const int32_t* steps, int64_t nq, int64_t max_blocks, int64_t cap, void* stream) {
+#if defined(__HIPCC__)
+    (void) scores; (void) ids; (void) ref_scores; (void) ref_ids; (void) steps; (void) nq; (void) max_blocks; (void) cap; (void) stream;
+#else
+    if (nq <= 0) return;
+    i8_check_kernel<<<(unsigned) nq, 256, 0, (cudaStream_t) stream>>>(scores, ids, ref_scores, ref_ids, steps, max_blocks, cap);
+    const cudaError_t e = cudaGetLastError();
+    if (e != cudaSuccess) { std::fprintf(stderr, "qsa i8 check: %s\n", cudaGetErrorString(e)); std::exit(1); }
+#endif
+}
+
+bool qsa_i8_stats(unsigned long long* out, bool reset, void* stream) {
+#if defined(__HIPCC__)
+    (void) out; (void) reset; (void) stream;
+    return false;
+#else
+    const cudaStream_t st = (cudaStream_t) stream;
+    void* p = nullptr;
+    if (cudaGetSymbolAddress(&p, g_i8_stats) != cudaSuccess) { cudaGetLastError(); return false; }
+    const size_t bytes = sizeof(unsigned long long) * 5;
+    if (cudaMemcpyAsync(out, p, bytes, cudaMemcpyDeviceToHost, st) != cudaSuccess ||
+        (reset && cudaMemsetAsync(p, 0, bytes, st) != cudaSuccess) || cudaStreamSynchronize(st) != cudaSuccess) {
+        cudaGetLastError();
+        return false;
+    }
+    return true;
+#endif
+}
 
 }  // namespace strata::kernels

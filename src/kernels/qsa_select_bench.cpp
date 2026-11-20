@@ -209,5 +209,91 @@ int main(int argc, char** argv) {
                 "mean %.2g max %.2g; selections identical %lld/%lld, cells differing %.4f%%\n", (long long) ctx,
                 (long long) nq, (long long) active, t_old, t_new, t_old / t_new, t_tk, sum_rel / std::max(1.0, n_rel),
                 max_rel, (long long) same_sel, (long long) nq, cells_all ? 100.0 * (double) cells_diff / (double) cells_all : 0.0);
-    return acc_ok && reg_same == nq ? 0 : 1;
+    // QSA_BENCH_I8=1 (with STRATA_QSA_I8=1): the i8x6 scorer against the FP64 reference (rel RMS and max error over
+    // the sample, the 3xTF32 scorer's alongside), its selections against the 3xTF32 ones, and its time (keys split once,
+    // as per layer and chunk; queries split in every call)
+    bool i8_ok = true;
+    if (std::getenv("QSA_BENCH_I8") && have_tc) {
+        const uint64_t bytes = k::qsa_i8_scratch_bytes(nq, max_blocks);
+        void* scratch = nullptr;
+        float* sc_i8 = nullptr;
+        int32_t* ids_i8 = nullptr;
+        ck(cudaMalloc(&scratch, bytes), "malloc");
+        ck(cudaMalloc(&sc_i8, (size_t) (nq * max_blocks) * 4), "malloc");
+        ck(cudaMalloc(&ids_i8, (size_t) (nq * cap) * 4), "malloc");
+        const int64_t n_keys = active - 1;
+        if (!k::qsa_i8_keys(d_pooled, n_keys, nq, max_blocks, scratch, bytes, nullptr)) {
+            std::printf("i8 scorer: off (set STRATA_QSA_I8=1)\n");
+            return 2;
+        }
+        auto run_i8 = [&] {
+            if (!k::qsa_block_scores_i8(d_dead, d_q, d_steps, nq, nq, max_blocks, s, sc_i8, scratch, bytes, nullptr, active)) {
+                std::fprintf(stderr, "i8 scorer refused\n");
+                std::exit(2);
+            }
+        };
+        run_i8();
+        k::qsa_block_topk(sc_i8, d_steps, nq, max_blocks, cap, s, ids_i8, nullptr, active);
+        ck(cudaDeviceSynchronize(), "i8");
+        std::vector<float> c((size_t) (nq * max_blocks));
+        std::vector<int32_t> ic((size_t) (nq * cap));
+        ck(cudaMemcpy(c.data(), sc_i8, c.size() * 4, cudaMemcpyDeviceToHost), "down");
+        ck(cudaMemcpy(ic.data(), ids_i8, ic.size() * 4, cudaMemcpyDeviceToHost), "down");
+        // FP64 reference: every block of 32 queries spread over the batch
+        double se_t = 0, se_i = 0, sr = 0, mx_t = 0, mx_i = 0, scl = 0;
+        const int64_t nqs = std::min<int64_t>(nq, 32);
+        int64_t top_same_t = 0, top_same_i = 0;
+        for (int64_t qs = 0; qs < nqs; ++qs) {
+            const int64_t i = qs * nq / nqs;
+            const int64_t nbid = steps[(size_t) (i * k::kStepCount + k::kStepNBid)];
+            std::vector<double> ref((size_t) nbid);
+            for (int64_t j = 0; j < nbid; ++j) {
+                double r = 0;
+                for (int h = 0; h < 4; ++h) {
+                    double d = 0;
+                    for (int cc = 0; cc < 128; ++cc) d += (double) q[(size_t) (i * 512 + h * 128 + cc)] * (double) pooled[(size_t) (j * 128 + cc)];
+                    r += d > 0 ? d : 0;
+                }
+                ref[(size_t) j] = r;
+                const double dt = (double) b[(size_t) (i * max_blocks + j)] - r, di = (double) c[(size_t) (i * max_blocks + j)] - r;
+                se_t += dt * dt; se_i += di * di; sr += r * r;
+                mx_t = std::max(mx_t, std::fabs(dt)); mx_i = std::max(mx_i, std::fabs(di)); scl = std::max(scl, std::fabs(r));
+            }
+            // top-64 blocks by FP64 vs by each scorer (as sets)
+            const int64_t kk = std::min<int64_t>(64, nbid);
+            auto top = [&](auto get) {
+                std::vector<int64_t> o((size_t) nbid);
+                for (int64_t j = 0; j < nbid; ++j) o[(size_t) j] = j;
+                std::partial_sort(o.begin(), o.begin() + kk, o.end(), [&](int64_t x, int64_t y) { return get(x) > get(y) || (get(x) == get(y) && x < y); });
+                std::vector<int64_t> r(o.begin(), o.begin() + kk);
+                std::sort(r.begin(), r.end());
+                return r;
+            };
+            const auto tr = top([&](int64_t j) { return ref[(size_t) j]; });
+            top_same_t += tr == top([&](int64_t j) { return (double) b[(size_t) (i * max_blocks + j)]; });
+            top_same_i += tr == top([&](int64_t j) { return (double) c[(size_t) (i * max_blocks + j)]; });
+        }
+        int64_t same_i = 0, cells_d = 0, cells_n = 0;
+        for (int64_t i = 0; i < nq; ++i) {
+            const int64_t w = steps[(size_t) (i * k::kStepCount + k::kStepWidth)];
+            std::vector<int32_t> x(ib.begin() + i * cap, ib.begin() + i * cap + w), y(ic.begin() + i * cap, ic.begin() + i * cap + w);
+            same_i += x == y;
+            std::vector<int32_t> d;
+            std::set_symmetric_difference(x.begin(), x.end(), y.begin(), y.end(), std::back_inserter(d));
+            cells_d += (int64_t) d.size() / 2;
+            cells_n += w;
+        }
+        const float t_keys = timed([&] { k::qsa_i8_keys(d_pooled, n_keys, nq, max_blocks, scratch, bytes, nullptr); });
+        const float t_i8 = timed(run_i8);
+        i8_ok = mx_i <= std::max(4.0 * mx_t, 1e-5 * scl);
+        std::printf("%s i8x6 vs FP64 (%lld queries, all blocks): rel RMS tf32x3 %.2e / i8x6 %.2e, max err %.2e / %.2e (scale %.3g); "
+                    "top-64 = FP64's: tf32x3 %lld/%lld, i8x6 %lld/%lld\n",
+                    i8_ok ? "PASS" : "FAIL", (long long) nqs, std::sqrt(se_t / sr), std::sqrt(se_i / sr), mx_t, mx_i, scl,
+                    (long long) top_same_t, (long long) nqs, (long long) top_same_i, (long long) nqs);
+        std::printf("i8x6: ctx %lld, %lld queries x %lld blocks: scores tf32x3 %.3f -> i8x6 %.3f ms (%.2fx), key split %.3f ms "
+                    "(once per layer and chunk); selections = tf32x3's %lld/%lld, cells differing %lld of %lld\n",
+                    (long long) ctx, (long long) nq, (long long) active, t_new, t_i8, t_new / t_i8, t_keys, (long long) same_i,
+                    (long long) nq, (long long) cells_d, (long long) cells_n);
+    }
+    return acc_ok && reg_same == nq && i8_ok ? 0 : 1;
 }

@@ -150,6 +150,24 @@ std::vector<std::pair<std::string, std::string>> nv_default_env(int major, int m
             {"STRATA_EARLY_READ", "1"},
             {"STRATA_GDN_MID_HEAD", "2"},
             {"STRATA_ROUTE_DB", "2"},
+            // dec/pf-num (NOTES-pfnum.md): the prompt path's QSA block scores on int8 tensor cores (i8x6, ~2x the 3xTF32 kernel,
+            // 9x closer to FP64) and the dense FP16 GEMMs with f16-accumulate chains of 64 promoted to f32 (1.2x cuBLAS at chunk
+            // size, rel. error ~3e-4 more); first-token / all-rows KL on the long-prompt sets at the run-to-run floor.
+            {"STRATA_QSA_I8", "1"},
+            {"STRATA_DENSE_F16C", "1"},
+            // dec/pf-host: the next streamed attention layer's K/V prefix staged on its own stream, and (STRATA_PF_KV_UNSTAGE_SIDE)
+            // the chunk's K/V download there too, so the compute stream never waits behind the expert copies (one copy engine
+            // under WDDM).  Same bytes; 64K read 6098 -> 6007 ms at 600 W with the pf-host scheduling changes (NOTES-pfhost.md).
+            {"STRATA_KV_PREFETCH", "1"},
+            // dec/pf-hc (NOTES-hc.md): the next half's HC inject projection folded into the residual writes (FP32 sums of the
+            // stored xn16 bits; R / rs / xn16 bitwise) and the FP4G down rows stored FP16 with s_down applied (real |Dm| <= 23,
+            // 2800x under FP16's range).  64K read -3.3% at 600 W; long-set / 131K / TF-corpus KL at the run-to-run floor.
+            {"STRATA_PF_HC_INJ", "1"},
+            {"STRATA_PF_DM16H", "1"},
+            // dec/pf-graph (NOTES-graph.md): the prompt path's QSA indexer chain (a layer's scores + top-k per 256 queries) and each
+            // expert group's chain (gate/up, H quantize, down) replayed as CUDA graphs: under WDDM an eager launch costs ~10 us of
+            // host and ~3 us of GPU idle.  The same kernels and arguments (bitwise); 64K read -2.7% at 600 W.
+            {"STRATA_PF_GRAPH", "7"},
         };
     }
     return t;

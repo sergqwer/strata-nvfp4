@@ -9,6 +9,7 @@
 
 #include "ggml.h"
 
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
 #include <algorithm>
@@ -26,6 +27,7 @@ int run_group(int n, const void* const* gu, const void* const* dn, const float* 
               const int32_t* bounds_d, int64_t r0, int64_t nr, int64_t max_rows, const void* xq, const float* xscale,
               const int32_t* yrows, int64_t x_rows, float* h, void* hq, float* hscale, float* sd, float* dm, int mode,
               void* stream);
+void set_dm16(bool on);
 }
 namespace strata::prefill::mmq {
 void quantize_nvfp4_x2(const float* x, const int32_t* ids, void* xq, float* yscale, int64_t cols, int64_t ld,
@@ -253,6 +255,34 @@ int main(int argc, char** argv) {
         const float t_m1gu = time([&] { fp4g(1, nullptr); });
         const float t_m1 = time([&] { fp4g(1, nullptr); mmq_down(hq, dm_ref); });
         const float t_m2 = time([&] { fp4g(2, dm); });
+        // pf-hc STRATA_PF_DM16H: mode 2 with FP16 down rows (s_down applied, sd = -1) against mode 2's FP32 rows x s_down
+        strata::prefill::fp4g::set_dm16(true);
+        if (fp4g(2, dm) != 2) { std::printf("mode 2 (dm16) not taken\n"); return 1; }
+        ck(cudaDeviceSynchronize(), "run16");
+        {
+            std::vector<float> raw((size_t) rows * N), sdh(rows);
+            ck(cudaMemcpy(raw.data(), dm, raw.size() * 4, cudaMemcpyDeviceToHost), "d16");
+            ck(cudaMemcpy(sdh.data(), sd, rows * 4, cudaMemcpyDeviceToHost), "sd16");
+            double num = 0, den = 0, mx = 0, num_in = 0, den_in = 0, mx_in = 0;
+            int64_t marked = 0, nsat = 0;
+            for (int64_t r = 0; r < rows; ++r) {
+                marked += sdh[r] == -1.0f;
+                const __half* h16 = reinterpret_cast<const __half*>(raw.data() + (size_t) r * N);
+                for (int n = 0; n < N; ++n) {
+                    const double ref = (double) (d_x2[(size_t) r * N + n] * sr[r]);
+                    const double e = (double) __half2float(h16[n]) - ref;
+                    num += e * e; den += ref * ref; mx = std::max(mx, std::fabs(e) / std::max(std::fabs(ref), 1e-3));
+                    if (std::fabs(ref) < 65504.0) { num_in += e * e; den_in += ref * ref; mx_in = std::max(mx_in, std::fabs(e) / std::max(std::fabs(ref), 1e-3)); } else ++nsat;
+                }
+            }
+            if (std::getenv("DM16_DBG")) for (int n = 0; n < 4; ++n) std::printf("dbg r0 n%d: half %g f32 %g sd %g\n", n, (double) __half2float(reinterpret_cast<const __half*>(raw.data())[n]), (double) d_x2[n], (double) sr[0]);
+            const float t_m2h = time([&] { fp4g(2, dm); });
+            std::printf("   dm16: rows marked %lld / %lld, FP16 rows vs FP32 x s_down rel RMS %.3e (max rel %.3e); mode 2 ms FP32 %.4f FP16 %.4f\n",
+                        (long long) marked, (long long) rows, std::sqrt(num / den), mx, t_m2, t_m2h);
+            std::printf("   dm16 in FP16 range: rel RMS %.3e (max rel %.3e); saturated %lld of %lld (%.2f%%)\n", std::sqrt(num_in / std::max(den_in, 1e-300)), mx_in,
+                        (long long) nsat, (long long) rows * N, 100.0 * nsat / ((double) rows * N));
+        }
+        strata::prefill::fp4g::set_dm16(false);
         std::printf("%6d %11.4f%% %12.3e %12.3e %10.4f %10.4f %10.4f %10.4f %10.3f%% %10.3f%%%s%s\n", R, 100.0 * diff / tot, r1, r2, t_mmq, t_m1gu,
                     t_m1, t_m2, 100.0 * std::sqrt(e8 / den), 100.0 * std::sqrt(e2 / den), sd_ok ? "" : "  (s_down rows differ!)", q_same ? "  H quantizer: same bytes" : "  H quantizer: BYTES DIFFER");
         cudaFree(dx); cudaFree(xq); cudaFree(xs); cudaFree(db); cudaFree(dsrc); cudaFree(dids); cudaFree(GU); cudaFree(H);

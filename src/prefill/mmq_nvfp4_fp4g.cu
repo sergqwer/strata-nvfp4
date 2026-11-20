@@ -16,6 +16,7 @@
 // Apache-2.0: src/ops/offloaded_sparse_moe/cuda/wide_expert.cuh, src/ops/common/mma.cuh).  Measured on one
 // synthetic 16-expert group (fp4g_parity, NOTES-pfx.md): the kernel is bound by its global->shared copies and its
 // ldmatrix/lds feeding about equally; the FP4 MMA itself runs at ~1/3 of its peak.
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
 #include <atomic>
@@ -81,7 +82,13 @@ struct Args {
     float* sd;                          // SwiGLU: s_down per output row (null: none)
     int bulk;                           // R144: the stage's rows by one bulk copy (else 16-byte cp.async)
     int flat;                           // >0: the group's experts (this many) as one list of row tiles in grid y
+    int dm16;                           // pf-hc STRATA_PF_DM16H, kPlain: FP16 rows of s_down * product (sd row = -1)
 };
+
+// pf-hc: an FP16 Dm row (STRATA_PF_DM16H): the product times the expert's s_down, saturated at +-65504
+__device__ __forceinline__ __half2 dm16_pair(float a, float b) {
+    return __floats2half2_rn(fminf(fmaxf(a, -65504.0f), 65504.0f), fminf(fmaxf(b, -65504.0f), 65504.0f));
+}
 
 __device__ __forceinline__ uint32_t smem_addr(const void* p) { return (uint32_t) __cvta_generic_to_shared(p); }
 
@@ -308,6 +315,24 @@ __global__ void __launch_bounds__(kThreads + 128, 1) gemm_kernel(const Args a) {
     }
 
     if constexpr (EPI == kPlain) {
+        if (a.dm16) {   // pf-hc: FP16 rows with s_down applied; the row's sd marks it (-1) for the combine
+            if (a.sd != nullptr && rb == 0 && tid < kTok && first + tid < cnt) a.sd[b0r + first + tid - a.o_base] = -1.0f;
+            if (!live) return;
+            const float sdz = a.tail[z][2];
+#pragma unroll
+            for (int mt = 0; mt < kMT; ++mt)
+#pragma unroll
+                for (int h = 0; h < 2; ++h) {
+                    const int t = warp_m * kWM + mt * 16 + group + 8 * h;
+                    if (first + t >= cnt) continue;
+                    const float rs = ys_s[t];
+                    __half* out = (__half*) (a.dst + (b0r + first + t - a.o_base) * a.ld) + rb * kRows + warp_n * 64 + 2 * tig;
+#pragma unroll
+                    for (int r = 0; r < kNT; ++r)
+                        *(__half2*) (out + 8 * r) = dm16_pair((rs * acc[mt][r][2 * h]) * sdz, (rs * acc[mt][r][2 * h + 1]) * sdz);
+                }
+            return;
+        }
         if (!live) return;
 #pragma unroll
         for (int mt = 0; mt < kMT; ++mt)
@@ -531,6 +556,9 @@ __global__ void __launch_bounds__(kThreads + 128, 1) gemm_persist(const Args a, 
         if constexpr (SWIGLU) {
             tl = *(const float4*) a.tail[t.z];
             if (a.sd != nullptr && t.rb == 0 && tid < kTok && t.first + tid < cnt) a.sd[b0r + t.first + tid - a.o_base] = tl.z;
+        } else if (a.dm16) {   // pf-hc: FP16 rows (see gemm_kernel)
+            tl.z = a.tail[t.z][2];
+            if (a.sd != nullptr && t.rb == 0 && tid < kTok && t.first + tid < cnt) a.sd[b0r + t.first + tid - a.o_base] = -1.0f;
         }
         if (!live) continue;
 #pragma unroll
@@ -542,6 +570,13 @@ __global__ void __launch_bounds__(kThreads + 128, 1) gemm_persist(const Args a, 
                 const int64_t r = b0r + t.first + tr;
                 const float rs = a.ys[a.yrows ? a.yrows[r] : (int32_t) (r - a.y_base)];
                 if constexpr (EPI == kPlain) {
+                    if (a.dm16) {
+                        __half* out = (__half*) (a.dst + (r - a.o_base) * a.ld) + t.rb * kRows + warp_n * 64 + 2 * tig;
+#pragma unroll
+                        for (int rr = 0; rr < kNT; ++rr)
+                            *(__half2*) (out + 8 * rr) = dm16_pair((rs * acc[mt][rr][2 * h]) * tl.z, (rs * acc[mt][rr][2 * h + 1]) * tl.z);
+                        continue;
+                    }
                     float* out = a.dst + (r - a.o_base) * a.ld + t.rb * kRows + warp_n * 64 + 2 * tig;
 #pragma unroll
                     for (int rr = 0; rr < kNT; ++rr)
@@ -603,7 +638,12 @@ __global__ void probe_kernel(int* out) {
 #endif
 }
 
+int g_dm16 = 0;   // pf-hc: set_dm16
+
 }  // namespace
+
+// pf-hc (STRATA_PF_DM16H): mode 2's down rows as FP16 with s_down applied, sd = -1 marking them (for the next groups)
+void set_dm16(bool on) { g_dm16 = on ? 1 : 0; }
 
 bool available() {
     static const bool ok = [] {
@@ -679,6 +719,7 @@ int run_group(int n, const void* const* gu, const void* const* dn, const float* 
     d.y2_off = (int64_t) (((kFF + 511) / 512 * 512) / 256) * nr * kBlk;
     d.ys = hscale; d.bounds = bounds_d; d.yrows = nullptr; d.y_base = 0; d.o_base = 0;
     d.dst = dm; d.ld = kN;
+    if (g_dm16 && sd != nullptr) { d.dm16 = 1; d.sd = sd; }   // pf-hc: FP16 rows, marked in sd
     static const int bulk = [] { const char* v = std::getenv("STRATA_PF_FP4G_BULK"); return v != nullptr && v[0] == '1'; }();
     d.bulk = bulk;
     d.flat = flat ? n : 0;

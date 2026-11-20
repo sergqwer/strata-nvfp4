@@ -913,6 +913,23 @@ bool ExpertCache::fill_slot_queued_parts(int32_t slot, const BlobPart* parts, in
     return true;
 }
 
+bool ExpertCache::fill_slot_on(int32_t slot, const uint8_t* host_blob, void* stream, std::string& err, int64_t bytes) {
+    if (sealed_) sealed_write("fill_slot_on", slot);
+    const size_t n = (size_t) (bytes > 0 && bytes <= blob_ ? bytes : blob_);
+    uint8_t* dst = device_slot(slot);
+    if (dst == nullptr || host_blob == nullptr) {
+        err = dst == nullptr ? "ExpertCache::fill_slot_on: slot outside the arena" : "ExpertCache::fill_slot_on: the host blob is null";
+        return false;
+    }
+    const cudaError_t e = cudaMemcpyAsync(dst, host_blob, n, cudaMemcpyHostToDevice, (cudaStream_t) stream);
+    if (e != cudaSuccess) {
+        err = std::string("ExpertCache::fill_slot_on: ") + cudaGetErrorString(e);
+        return false;
+    }
+    ++fills_;
+    return true;
+}
+
 bool ExpertCache::sync_queued(std::string& err) {
     const cudaError_t e = cudaStreamSynchronize((cudaStream_t) 0);
     if (e != cudaSuccess) {

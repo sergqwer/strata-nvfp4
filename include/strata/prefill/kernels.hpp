@@ -31,9 +31,18 @@ void gr_mix_r(const float* R, const float* rs, const float* w_norm, const float*
 bool gr_upmix(const uint16_t* lo16, const uint16_t* w_up, const float* R, const float* rs, const float* w_norm,
               float* mixed, uint16_t* mixed16, uint16_t* mixed_h, int64_t T, void* stream,
               uint16_t* mixed16_lo = nullptr);
+/// pf-hc (STRATA_PF_HC_INJ): with wi_next (the next half's inject weights, plain BF16 [4][10240]; the combine's below takes the interleaved copy: hc_inj_interleave) and injp (T x 16 floats)
+/// it also writes each row's part of the next half's inject projection from the xn16 it stores; hc_inj_reduce(np 4)
+/// then gives inj (the cuBLAS GEMM's inputs, FP32 sums in another order).
 void gr_write_norm_rs(float* R, const float* bo, const float* inj, int64_t inj_ld, const float* w_norm_next, float eps,
                       float* rs, uint16_t* xn16, int64_t T, void* stream, uint16_t* xn16_lo = nullptr,
-                      int64_t ldx = 0, bool f16img = false);
+                      int64_t ldx = 0, bool f16img = false, const uint16_t* wi_next = nullptr, float* injp = nullptr);
+/// pf-hc: inj[t][c] = sum over p < np of injp[(t * np + p) * 4 + c], in p order.
+/// pf-hc: wi4[j * 4 + q] = wi[q * 10240 + j] (the inject weights, BF16 [4][10240], as the fused writes read them).
+void hc_inj_interleave(const uint16_t* wi, uint16_t* wi4, void* stream);
+void hc_inj_reduce(const float* injp, int np, float* inj, int64_t T, void* stream);
+/// pf-hc probe: out[5] (zeroed by the caller): max |Dm x s_down| bits, counts above 8192 / 16384 / 32768 / 65504
+void dm_probe(const float* Dm, const int32_t* slot, const float* row_sd, int64_t T, unsigned int* out, void* stream);
 /// S23 (STRATA_CVEC_FUSE=1): gr_write, then the control vector (v_l = layer l's direction row, *s_l its scale,
 /// *on the request flag, mode 0 project / 1 add; cvec_kernel's arithmetic), then gr_norm_rs with the next half's
 /// norm - one pass over R, the same bits as the three kernels.
@@ -153,7 +162,8 @@ void f16_to_f32_wide(float* dst, const uint16_t* src, int64_t n, void* stream);
 bool moe_combine_write_norm_rs(const float* D, const int32_t* slot, const float* w, const float* shared, const float* sg,
                                const float* row_sd, float* R, const float* inj, int64_t inj_ld, const float* w_norm_next,
                                float eps, float* rs, uint16_t* xn16, int64_t T, void* stream, uint16_t* xn16_lo = nullptr,
-                               int64_t ldx = 0, bool f16img = false);
+                               int64_t ldx = 0, bool f16img = false, const uint16_t* wi_next = nullptr,
+                               float* injp = nullptr);   // pf-hc: injp T x 4 (hc_inj_reduce np 1)
 
 // ---- QSA helpers
 /// In place: x[r, :] = x[r, :] * rsqrt(mean x^2 + eps) * w  over rows of `cols` (row stride `ld`).

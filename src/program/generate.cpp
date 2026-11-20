@@ -15390,7 +15390,57 @@ int main(int argc, char** argv) {
             }
             return r;
         };
+        // STRATA_PF_REFILL_BG (one GPU, serial windows, the tier not waiting): after a prompt the lent slots are refilled on
+        // their own stream while decode runs, hottest first.  Until a batch of copies has landed its experts stay
+        // non-resident (served as any miss: CPU pool / PCIe share) and in_flight (no admission elsewhere); the adaptive
+        // tier pauses.  Each window boundary (apply_pending(false)) hands the landed batches to the tables (the
+        // pre-launch hook patches d_res); every quiesce point (apply_pending(true)) waits for all of them.
+        struct BgRefill {
+            std::vector<std::pair<int32_t, int32_t>> items;   // (residency index, slot), hottest first
+            std::vector<size_t> ends;                          // batch b = items [ends[b-1], ends[b])
+            std::vector<cudaEvent_t> evs;                      // one per batch (kept between requests)
+            size_t next = 0;                                   // the first batch the tables do not have yet
+            cudaStream_t st = nullptr;
+            bool live = false;
+            Clock::time_point t0;
+            double issue_ms = 0, sync_ms = 0;
+            size_t hot = 0;                                    // items with a non-zero tier count
+            int64_t windows = 0;                               // windows that started while it was live
+        } bgr;
+        auto bgr_poll = [&](bool wait) {
+            if (!bgr.live) return;
+            if (!wait) ++bgr.windows;
+            bool any = false;
+            while (bgr.next < bgr.ends.size()) {
+                if (wait) cudaEventSynchronize(bgr.evs[bgr.next]);
+                else if (cudaEventQuery(bgr.evs[bgr.next]) != cudaSuccess) break;
+                for (size_t k = bgr.next ? bgr.ends[bgr.next - 1] : 0; k < bgr.ends[bgr.next]; ++k) {
+                    const auto [i, slot] = bgr.items[k];
+                    host_res[(size_t) i] = slot;
+                    if (!drive.d.in_flight.empty()) drive.d.in_flight[(size_t) i] = 0;
+                    drive.d.res_dirty_idx.push_back(i);
+#if defined(_WIN32)
+                    srcp->release((int64_t) i / g.n_expert, (int64_t) i % g.n_expert);
+#endif
+                }
+                any = true;
+                ++bgr.next;
+            }
+            if (any) drive.d.res_dirty = true;
+            if (bgr.next < bgr.ends.size()) return;
+            bgr.live = false;
+            if (wait && any && res_upload() == cudaSuccess) {   // a quiesce point: the whole table now, no hook to wait for
+                drive.d.res_dirty = false;
+                drive.d.res_dirty_idx.clear();
+            }
+            static const bool bg_log = [] { const char* v = std::getenv("STRATA_PF_REFILL_BG_LOG"); return v == nullptr || v[0] != '0'; }();
+            if (bg_log)
+                std::fprintf(stderr, "strata serve: %zu lent slots refilled beside decode in %.1f ms (sync %.1f, issue %.1f ms, %zu with tier counts, %lld windows ran meanwhile%s)\n",
+                             bgr.items.size(), std::chrono::duration<double, std::milli>(Clock::now() - bgr.t0).count(), bgr.sync_ms, bgr.issue_ms, bgr.hot,
+                             (long long) bgr.windows, wait ? ", the last waited for" : "");
+        };
         auto apply_pending = [&](bool wait) {
+            bgr_poll(wait);
             if (peer.valid()) peer.apply_pending(wait);
             if (pending.empty()) {
                 // a round where only the peer swapped: its copies have landed (or, without the wait, are still in
@@ -15681,6 +15731,7 @@ int main(int argc, char** argv) {
         // the VRAM tier follows the conversation (the same rule as the speculative loop below)
         auto adapt = [&]() -> bool {
             if (!pending.empty()) return true;   // the previous swaps are still in flight
+            if (bgr.live) return true;           // STRATA_PF_REFILL_BG: the lent slots are still being refilled
             if (remote_opt && !remote_opt->adapt(drive.d.usage, host_res, pending, o.adapt_swaps, *srcp)) return false;
             struct Swap { float gain; int32_t layer, in, out, lout; };   // lout: the victim's layer (= layer unless ranked across)
             std::vector<Swap> swaps;
@@ -20346,6 +20397,7 @@ int main(int argc, char** argv) {
             // STRATA_REFILL_SERIAL=1: stage after stage, as 0.1.30/0.1.31.
             static const bool refill_serial = std::getenv("STRATA_REFILL_SERIAL") != nullptr;
             auto refill = [&](std::string& e) -> bool {
+                bgr_poll(true);   // STRATA_PF_REFILL_BG: a refill still landing from the last request
                 const auto t_rf = Clock::now();
                 int64_t n_lent = 0, n_parts = 0;
                 for (PfPart& p : pf_parts)
@@ -20366,6 +20418,107 @@ int main(int argc, char** argv) {
                                  std::chrono::duration<double, std::milli>(Clock::now() - t_rf).count());
                     std::fflush(stderr);
                 }
+                return true;
+            };
+            // STRATA_PF_REFILL_BG (see bgr above): the request's last refill, queued on its own stream; decode starts at
+            // once.  Only where the tables can take landed batches at a window boundary without a blocking upload.
+            static const int refill_bg_env = [] { const char* v = std::getenv("STRATA_PF_REFILL_BG"); return v != nullptr ? std::atoi(v) : 1; }();
+            static const size_t refill_bg_batch = [] { const char* v = std::getenv("STRATA_PF_REFILL_BG_BATCH"); return (size_t) (v != nullptr ? std::max(1, std::atoi(v)) : 32); }();
+            auto refill_last = [&](std::string& e) -> bool {
+                const bool bg_ok = refill_bg_env != 0 && pf_parts.size() == 1 && pf_parts[0].cache == &xcache && pf_parts[0].dev <= 0 &&
+                                   !pf_parts[0].lent.empty() && stages.empty() && !multi_gpu && !peer.valid() && !pipe &&
+                                   serial_windows && res_pairs != nullptr && (drive.d.fetch_admit > 0 || drive.d.evict_sync) &&
+                                   adapt_nowait() && !ajob && !refill_parts && !refill_blocking() && !o.prefill_head_alias &&
+                                   o.batch == 0 && !remote_opt;
+                if (!bg_ok) return refill(e);
+                bgr_poll(true);   // (none is live: every request starts with a quiesce)
+                PfPart& p = pf_parts[0];
+                const auto t0 = Clock::now();
+                // the prompt's work on the borrowed bytes is done on every stream before they are written over
+                if (cudaDeviceSynchronize() != cudaSuccess) {
+                    e = std::string("refilling the lent slots: ") + cudaGetErrorString(cudaGetLastError());
+                    return false;
+                }
+                if (bgr.st == nullptr && cudaStreamCreateWithFlags(&bgr.st, cudaStreamNonBlocking) != cudaSuccess) {
+                    (void) cudaGetLastError();
+                    bgr.st = nullptr;
+                    return refill(e);
+                }
+                bgr.items = std::move(p.lent);
+                p.lent.clear();
+                p.lent_chunk = 0;
+                // hottest first by the adaptive tier's counts; ties (all of them on a first request) by slot: the start
+                // placement fills the slots in the profile's rank order
+                bgr.hot = 0;
+                for (const auto& it : bgr.items) bgr.hot += !drive.d.usage.empty() && drive.d.usage[(size_t) it.first] > 0.0f;
+                std::sort(bgr.items.begin(), bgr.items.end(), [&](const auto& a, const auto& b) {
+                    const float ua = drive.d.usage.empty() ? 0.0f : drive.d.usage[(size_t) a.first];
+                    const float ub = drive.d.usage.empty() ? 0.0f : drive.d.usage[(size_t) b.first];
+                    return ua != ub ? ua > ub : a.second < b.second;
+                });
+                bgr.ends.clear();
+                bgr.next = 0;
+                bgr.windows = 0;
+                const double sync_ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+                // STRATA_PF_REFILL_BG_API=1 (default): one cudaMemcpyBatchAsync a batch (one call: a single
+                // cudaMemcpyAsync of a 2.7 MB blob costs ~40 us of host time under WDDM); 0: a cudaMemcpyAsync each
+                static const bool batch_api = [] { const char* v = std::getenv("STRATA_PF_REFILL_BG_API"); return v == nullptr || v[0] != '0'; }();
+                std::vector<void*> b_dst;
+                std::vector<const void*> b_src;
+                std::vector<size_t> b_n;
+                for (size_t k = 0; k < bgr.items.size(); ++k) {
+                    const auto [i, slot] = bgr.items[k];
+                    const uint8_t* b = srcp->blob_stable(i / g.n_expert, i % g.n_expert);
+                    const int64_t nb = (int64_t) strata::kernels::cpu::expert_layout().blob_bytes(i / g.n_expert);
+                    if (b == nullptr) { e = "refilling a lent slot: no blob"; return false; }
+#if defined(CUDART_VERSION) && CUDART_VERSION >= 12080 && !defined(STRATA_USE_HIP) && !defined(STRATA_GPU_METAL)
+                    if (batch_api && p.cache->device_slot(slot) != nullptr) {
+                        b_dst.push_back(p.cache->device_slot(slot));
+                        b_src.push_back(b);
+                        b_n.push_back((size_t) nb);
+                    } else
+#endif
+                    if (!p.cache->fill_slot_on(slot, b, bgr.st, e, nb)) return false;
+                    if (b_dst.empty()) srcp->note_async_read(b, bgr.st);   // #1237
+                    if (!drive.d.in_flight.empty()) drive.d.in_flight[(size_t) i] = 1;
+                    if ((k + 1) % refill_bg_batch == 0 || k + 1 == bgr.items.size()) {
+#if defined(CUDART_VERSION) && CUDART_VERSION >= 12080 && !defined(STRATA_USE_HIP) && !defined(STRATA_GPU_METAL)
+                        if (!b_dst.empty()) {
+                            cudaMemcpyAttributes at{};
+                            at.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
+                            at.flags = cudaMemcpyFlagPreferOverlapWithCompute;
+                            size_t at_idx = 0;
+                            if (cudaMemcpyBatchAsync(b_dst.data(), b_src.data(), b_n.data(), b_dst.size(), &at, &at_idx, 1, bgr.st) !=
+                                cudaSuccess) {
+                                e = std::string("refilling the lent slots (cudaMemcpyBatchAsync): ") + cudaGetErrorString(cudaGetLastError());
+                                return false;
+                            }
+                            for (const void* q : b_src) srcp->note_async_read((const uint8_t*) q, bgr.st);   // #1237
+                            b_dst.clear();
+                            b_src.clear();
+                            b_n.clear();
+                        }
+#endif
+                        const size_t bi = bgr.ends.size();
+                        if (bi == bgr.evs.size()) {
+                            cudaEvent_t ev = nullptr;
+                            if (cudaEventCreateWithFlags(&ev, cudaEventDisableTiming) != cudaSuccess) {
+                                e = std::string("refilling the lent slots: ") + cudaGetErrorString(cudaGetLastError());
+                                return false;
+                            }
+                            bgr.evs.push_back(ev);
+                        }
+                        if (cudaEventRecord(bgr.evs[bi], bgr.st) != cudaSuccess) {
+                            e = std::string("refilling the lent slots: ") + cudaGetErrorString(cudaGetLastError());
+                            return false;
+                        }
+                        bgr.ends.push_back(k + 1);
+                    }
+                }
+                bgr.t0 = t0;
+                bgr.issue_ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+                bgr.sync_ms = sync_ms;
+                bgr.live = true;
                 return true;
             };
             // extras/split-prefill (opt-in): STRATA_SPLIT_PF_CHUNKS=k - a layer split reads a request segment in about k
@@ -20410,6 +20563,7 @@ int main(int argc, char** argv) {
             // participant's own cache, and marking only that participant's own layers
             int64_t seg_lend = 0;   // the loan the last lend left (the largest participant's chunk; 0: none)
             auto lend = [&](int64_t tokens, std::string& e, int64_t exact) -> bool {
+                bgr_poll(true);   // STRATA_PF_REFILL_BG: the slots it lends are the ones a refill may still be writing
                 seg_lend = 0;
                 if (pf_parts.empty()) return true;                     // its own buffers: nothing to lend
                 const auto t_ln = Clock::now();
@@ -21505,7 +21659,7 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "strata serve: message boundary checkpoint: %lld tokens, %lld tail\n",
                                  (long long) message_at, (long long) (turn_at - message_at));
             }
-            if (!refill(err)) {
+            if (!(cancelled ? refill(err) : refill_last(err))) {
                 std::printf("ERR refilling a lent slot failed: %s\n", err.c_str());
                 return 1;
             }

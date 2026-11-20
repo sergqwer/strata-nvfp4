@@ -123,4 +123,24 @@ void qsa_two_pass_check(const float* scores, const int32_t* ids, const float* re
 /// The counters (two_pass::kStatCount of them, this device), read on `stream` (synchronized); reset: zeroed after.
 bool qsa_two_pass_stats(unsigned long long* out, bool reset, void* stream);
 
+/// STRATA_QSA_I8=1 (prompt path, CUDA sm_80+): the block scores on int8 tensor cores (i8x6: each row as 24-bit fixed
+/// point in three byte planes with one fp32 scale, six IMMA products; FP32-level accuracy, not qsa_block_scores_tc's
+/// bits).  qsa_i8_mode(): 1 when on (read once).  `scratch` (qsa_i8_scratch_bytes(nq_cap, max_blocks), 256-byte
+/// aligned) holds the key planes qsa_i8_keys wrote once per layer and chunk for blocks [0, n_blocks) and the query planes
+/// of the current call.  qsa_block_scores_i8: the scores of blocks < n_bid (as qsa_block_scores_tc) + the tail block by
+/// the warp kernel's arithmetic; false (nothing launched) when off, HIP, another geometry, nq > nq_cap, too little scratch.
+int qsa_i8_mode();
+bool qsa_i8_check_on();   ///< STRATA_QSA_I8_CHECK=1: compare with qsa_block_scores_tc's row and ids (diagnostic)
+uint64_t qsa_i8_scratch_bytes(int64_t nq_cap, int64_t max_blocks);
+bool qsa_i8_keys(const float* pooled, int64_t n_blocks, int64_t nq_cap, int64_t max_blocks, void* scratch,
+                 uint64_t scratch_bytes, void* stream);
+bool qsa_block_scores_i8(const float* dead, const float* q_idx, const int32_t* steps, int64_t nq, int64_t nq_cap,
+                         int64_t max_blocks, const QsaShapes& s, float* scores, void* scratch, uint64_t scratch_bytes,
+                         void* stream, int64_t active_blocks);
+/// The check: queries, queries whose ids differ, i8 cells missing from the reference selection, cells compared, and the
+/// largest |score - ref| / (the query's top ref score) as float bits; read (and reset) with qsa_i8_stats.
+void qsa_i8_check(const float* scores, const int32_t* ids, const float* ref_scores, const int32_t* ref_ids,
+                  const int32_t* steps, int64_t nq, int64_t max_blocks, int64_t cap, void* stream);
+bool qsa_i8_stats(unsigned long long* out, bool reset, void* stream);
+
 }  // namespace strata::kernels

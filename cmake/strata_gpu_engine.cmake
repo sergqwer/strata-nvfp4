@@ -461,6 +461,7 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     # v100/gdn-chunk: the chunked Volta GDN prompt recurrence.  The dispatch (src/prefill/kernels.cu) is
     # Volta-only (cc 7.0) and gated on STRATA_EXPERIMENTAL_SM60; the path itself stays opt-in (STRATA_GDN_CHUNK).
     target_sources(strata_prefill PRIVATE src/prefill/gdn_chunk.cu)
+    target_sources(strata_prefill PRIVATE src/prefill/gemm_f16c.cu)   # STRATA_DENSE_F16C (gemm_f16c.hpp)
   endif()
   if(STRATA_ENABLE_HIP AND STRATA_HIPBLASLT_AVAILABLE)
     target_compile_definitions(strata_prefill PRIVATE STRATA_HIPBLASLT_AVAILABLE=1)
@@ -898,6 +899,12 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     # Pascal, opt-in STRATA_DENSE_F32=1: the dense projections' FP16 GEMMs as cublasSgemm on FP32 copies, bitwise vs
     # the cuBLAS FP16 call over a sweep of chunk sizes (GPU, synthetic, no model; --full sweeps every size, --bench
     # adds timings).  Not a ctest: whether the two agree is a property of the cuBLAS build, which this checks.
+    # STRATA_DENSE_F16C's kernel against cuBLAS at the dense shapes: time and FP64 error (GPU, synthetic; not a ctest)
+    add_executable(gemm_f16c_bench src/prefill/gemm_f16c_bench.cu)
+    target_link_libraries(gemm_f16c_bench PRIVATE strata_prefill )
+    # pf-hc: the HC writes' inject fold and FP16 Dm rows against the default kernels and FP64 (GPU, synthetic; not a ctest)
+    add_executable(hc_bench src/prefill/hc_bench.cu)
+    target_link_libraries(hc_bench PRIVATE strata_prefill )
     add_executable(gemm_f32_parity src/prefill/gemm_f32_parity.cu)
     target_link_libraries(gemm_f32_parity PRIVATE strata_prefill )
     # the hyper-connection read's fused up projection + mix (gr_upmix, STRATA_HC_UPMIX) against cuBLAS + gr_mix_r,

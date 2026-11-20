@@ -221,5 +221,8 @@ int fp4g_group(int n, const void* const* gu, const void* const* dn, const float*
                const int32_t* bounds_d, int64_t r0, int64_t nr, int64_t max_rows, const void* xq, const float* xscale,
                const int32_t* yrows, int64_t x_rows, float* h, void* hq, float* hscale, float* sd, float* dm,
                void* stream);
+/// pf-hc (STRATA_PF_DM16H): from here on, mode 2's down writes FP16 rows (s_down applied, saturated) into dm's row
+/// slots and marks each such row with sd = -1 (the combines read it as FP16); false: FP32 rows as before.
+void fp4g_set_dm16(bool on);
 
 }  // namespace strata::prefill::mmq
