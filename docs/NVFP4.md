@@ -400,6 +400,44 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### Two GPUs under Windows: the pinned experts find the driver's limit (2026-11-21, release 0.2.15-nvfp4.6)
+
+A report from two RTX 5060 Ti (16 GB each) on Windows with 256 GB of RAM and the Unsloth UD-Q6_K_XL model (an expert
+arena of 101.75 GiB): the engine ended before it was ready in five starts out of five. The layer split pinned the arena
+stage by stage, each stage's layers in its own CUDA context. Stage 1 took all its 55.29 GiB, and stage 2 got 8-15 of its
+46.46 GiB before the driver refused a slice, at 64-70 GiB pinned in all. DXGI meanwhile reported a 115 GiB budget and
+58 GiB in use on BOTH adapters: the slices of one context were charged to the other adapter too. With everything pinned
+up to the refusal the drivers had no room left. `cudaMemGetInfo` failed on both cards ("out of memory"), the expert cache
+got 0 slots and the start ended.
+
+Now (`register_per_stage` in `src/core/pinned.cu`):
+- The stages take turns. The next slice goes to the stage with the smallest pinned share of its own layers, so wherever
+  the pin stops every GPU holds the same share. A split by VRAM gives the stages different sizes.
+- The driver's first refusal ends the pin on every GPU. The margin (`STRATA_PIN_MARGIN_GIB`, 4 GiB) is handed back from
+  the stages with the largest share.
+- Then every GPU must still answer: its free memory reads and a 256 MiB pinned probe is granted. If not, more slices go
+  back, one at a time.
+- A GPU's cap (its adapter's shared budget) is read again before each slice, not once a stage.
+
+The log says it in one line: `expert arena: the driver refused a slice on CUDA1 (...): one limit for all the GPUs;
+X GiB (N slices) handed back ..., Y GiB stay pinned (stage 1 a%, stage 2 b% of each stage's layers); every GPU answers`.
+One GPU is not affected: it never registers per stage.
+
+Checked on the RTX 5090 with one card and two stages (`--layer-split 24 --split-device 0`,
+`STRATA_ARENA_PIN_PER_STAGE=1`, the NVFP4 GPTQ, arena 63.28 GiB). `STRATA_TEST_PIN_BUDGET_MIB` simulates the driver's
+limit:
+
+| Engine | Limit | Pinned (stage 1 / stage 2) | Start | 32K prompt |
+|---|---|---|---|---|
+| 0.2.15-nvfp4.5 | 40 GiB | stage 1 first, up to the limit | ended before ready: "KV streaming: cannot pin 0.26 GiB" | - |
+| 0.2.15-nvfp4.6 | 40 GiB | 50% / 54%, 5.27 GiB handed back | ready in 12 s | 6,664 tok/s |
+| 0.2.15-nvfp4.6 | none | 100% / 100% | ready in 11 s | 9,289 tok/s |
+
+Handing back leaves nothing behind. Two starts compared: one reached 13 + 13 pinned layers by a refusal and the
+hand-back, the other reached the same 13 + 13 by `STRATA_ARENA_PIN_GIB=35` with no refusal. Their first-token logits and
+tokens are bit-identical on a 2K and a 32K prompt. Which layers are pinned changes the prompt path a little, as it did
+before this change: a 2K prompt's first logits differ by KL 1e-6 between 54% and 100% pinned, with the same tokens.
+
 ### RTX 50: decode rounds 3-5, long contexts, smaller cards (2026-11-21, release 0.2.15-nvfp4.5)
 
 Three decode rounds after 0.2.15-nvfp4.4, the picture reader inside the engine (see Images above), and fixes for

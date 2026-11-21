@@ -6199,8 +6199,10 @@ int main(int argc, char** argv) {
         }
         // the cap per GPU: STRATA_ARENA_PIN_GIB=N GiB each (0: none); unset (or auto) under WDDM what its adapter's shared
         // (non-local) budget has left less a margin (shared_pin_limit_for: DXGI QueryVideoMemoryInfo; 8 GiB when it
-        // cannot be read, as the portable cap); elsewhere none.  Each stage stops at its GPU's cap or the driver's first
-        // refusal; the rest stays resident in RAM and reaches the GPU through the prompt path's pinned staging ring.
+        // cannot be read, as the portable cap); elsewhere none.  The stages take turns, so each holds the same share of
+        // its layers, up to its GPU's cap (re-read before each slice) or the driver's first refusal, which ends them all:
+        // the margin goes back and every GPU must still answer (fix/mgpu-pin, register_per_stage).  The rest stays
+        // resident in RAM and reaches the GPU through the prompt path's pinned staging ring.
         const int pin_env = strata::core::arena_pin_cap_gib();   // -1 unset, -2 auto, 0 none, N GiB
         std::vector<uint64_t> caps((size_t) max_dev + 1, 0);
         std::vector<std::string> whys((size_t) max_dev + 1);

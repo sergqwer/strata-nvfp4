@@ -652,7 +652,7 @@ int arena_pin_cap_gib() {
 }
 
 uint64_t shared_pin_margin() {
-    // extras/wddm-pin: STRATA_PIN_MARGIN_GIB, what stays free of the shared-memory budget (default 4 GiB, #243's)
+    // extras/wddm-pin: STRATA_PIN_MARGIN_GIB, what stays free of the shared-memory budget, and what a layer split hands back after the driver's refusal (default 4 GiB, #243's)
     static const uint64_t v = [] {
         const char* e = std::getenv("STRATA_PIN_MARGIN_GIB");
         return e != nullptr && *e != '\0' && std::atof(e) >= 0.0 ? (uint64_t) (std::atof(e) * 1073741824.0) : (4ull << 30);
@@ -884,11 +884,18 @@ void lock_unregistered(PinnedArena& a, const std::vector<uint64_t>& bounds, uint
 
 // extras/wddm-pin: each device registers the slices it reads, in its own context, without cudaHostRegisterPortable:
 // a portable registration is mapped into EVERY context, and under WDDM every adapter then charges the whole pinned
-// range to its shared (non-local) segment - the 5080 + 3090 rig's refused allocations (#253).  Stage by stage in layer
-// order, each from its first slice up, until its room (the GPU's cap, or its adapter's budget read just before) or the
-// driver's first refusal (which ends every later stage on that GPU too).
+// range to its shared (non-local) segment - the 5080 + 3090 rig's refused allocations (#253).
+// fix/mgpu-pin: the stages take turns, one slice at a time to the stage with the smallest pinned share of its own bytes,
+// so wherever the pin stops every GPU holds the same share of its layers (a split by VRAM gives the stages different
+// sizes).  Two RTX 5060 Ti under WDDM (256 GB RAM) charged the slices pinned in one context to both adapters and refused
+// one at 64-70 GiB in all, far below the 115 GiB budget DXGI reported; stage 1 had taken all its layers first, and with
+// the drivers at their limit cudaMemGetInfo then failed on both cards: no expert cache, the start ended.  So the first
+// refusal ends the pin on EVERY GPU, the margin (STRATA_PIN_MARGIN_GIB, 4 GiB) is handed back from the stages with the
+// largest share, and more slices go back one at a time until every GPU reads its free memory and a 256 MiB pinned probe
+// is granted.  A GPU's cap (its adapter's budget, now re-read before each slice) holds as before.
 void register_per_stage(PinnedArena& a, const std::vector<uint64_t>& bounds, uint64_t bytes) {
     constexpr double GiB = 1073741824.0;
+    constexpr size_t kProbe = 256ull << 20;
     const SliceDevices& sd = slice_devices();
     const size_t n = bounds.size() - 1;
     a.per_stage = true;
@@ -898,86 +905,211 @@ void register_per_stage(PinnedArena& a, const std::vector<uint64_t>& bounds, uin
     a.slice_pinned.assign(n, 0);
     int prev = 0;
     if (cudaGetDevice(&prev) != cudaSuccess) { (void) cudaGetLastError(); prev = 0; }
-    // the stages: runs of consecutive slices with one owner, in layer order; a device's cap and a refusal by its
-    // driver hold for every stage on it (one adapter: --split-device 0 puts both stages on CUDA0)
-    std::vector<uint64_t> dev_got;
-    std::vector<std::string> dev_stop;
-    const auto t0 = std::chrono::steady_clock::now();
-    int stage = 0;
-    for (size_t s0 = 0; s0 < n;) {
+    // the stages: runs of consecutive slices with one owner, in layer order (--split-device 0 puts both on CUDA0; a
+    // device's cap holds for all its stages together)
+    struct Stage {
+        int dev = 0, number = 0;
+        size_t s0 = 0, s1 = 0, next = 0;   // its slices [s0, s1), of which [s0, next) are pinned
+        uint64_t want = 0, got = 0;
+        int back = 0;                      // slices handed back after the pin
+        double seconds = 0.0;
+        std::string stop, why_now;
+    };
+    std::vector<Stage> stages;
+    int max_dev = -1;
+    for (size_t s0 = 0, number = 0; s0 < n;) {
         const int d = sd.dev[s0];
         size_t s1 = s0;
-        while (s1 < n && sd.dev[s1] == d && (sd.stage.empty() || sd.stage[s1] == sd.stage[s0])) ++s1;   // one stage
-        stage = sd.stage.empty() ? stage + 1 : sd.stage[s0] + 1;
-        if (d < 0) { s0 = s1; continue; }
-        if ((size_t) d >= dev_got.size()) { dev_got.resize((size_t) d + 1, 0); dev_stop.resize((size_t) d + 1); }
-        // what this stage may pin: the GPU's cap less what its earlier stages pinned; with a live budget the room its
-        // adapter has NOW (budget - usage - margin, read just before this stage): whatever the earlier registrations,
-        // on this adapter or - if a driver charges a non-portable one to every adapter - on the others, it shows here
-        uint64_t room = UINT64_MAX;
-        std::string why_now;
+        while (s1 < n && sd.dev[s1] == d && (sd.stage.empty() || sd.stage[s1] == sd.stage[s0])) ++s1;
+        number = sd.stage.empty() ? number + 1 : (size_t) sd.stage[s0] + 1;
+        if (d >= 0) {
+            Stage st;
+            st.dev = d;
+            st.number = (int) number;
+            st.s0 = st.next = s0;
+            st.s1 = s1;
+            st.want = bounds[s1] - bounds[s0];
+            stages.push_back(st);
+            max_dev = std::max(max_dev, d);
+        }
+        s0 = s1;
+    }
+    std::vector<uint64_t> dev_got((size_t) (max_dev + 1), 0);
+    std::vector<std::string> dev_stop((size_t) (max_dev + 1));
+    int cur = -1;   // the device made current here
+    auto share = [](const Stage& s) { return s.want ? (double) s.got / (double) s.want : 1.0; };
+    std::string refused;   // the driver's refusal: it ends the pin on every GPU
+    int refused_dev = -1;
+    const auto t0 = std::chrono::steady_clock::now();
+    for (;;) {
+        Stage* st = nullptr;
+        for (Stage& s : stages)
+            if (s.next < s.s1 && s.stop.empty() && dev_stop[(size_t) s.dev].empty() && (st == nullptr || share(s) < share(*st)))
+                st = &s;
+        if (st == nullptr) break;
+        const int d = st->dev;
+        const size_t i = st->next;
+        const uint64_t off = bounds[i], len = bounds[i + 1] - bounds[i];
+        // the room: the GPU's cap less what its stages pinned; with a live budget what its adapter has left NOW (budget -
+        // usage - margin), whatever was pinned before - on this adapter or, by a driver that charges every adapter, on another
         const uint64_t cap = (size_t) d < sd.cap.size() ? sd.cap[(size_t) d] : 0;
+        uint64_t room = UINT64_MAX;
         if ((size_t) d < sd.live.size() && sd.live[(size_t) d]) {
             uint64_t lim = 0;
-            if (shared_pin_limit_for(d, lim, why_now)) room = lim;
+            if (shared_pin_limit_for(d, lim, st->why_now)) room = lim;
             else if (cap > 0) room = cap > dev_got[(size_t) d] ? cap - dev_got[(size_t) d] : 0;
         } else if (cap > 0) {
             room = cap > dev_got[(size_t) d] ? cap - dev_got[(size_t) d] : 0;
         }
-        uint64_t want = 0, got = 0;
-        int n_ok = 0;
-        std::string& stop = dev_stop[(size_t) d];
-        const auto td = std::chrono::steady_clock::now();
-        if (stop.empty() && cudaSetDevice(d) != cudaSuccess)
-            stop = std::string("cudaSetDevice failed: ") + cudaGetErrorString(cudaGetLastError());
-        for (size_t i = s0; i < s1; ++i) {
-            const uint64_t off = bounds[i], len = bounds[i + 1] - bounds[i];
-            want += len;
-            if (!stop.empty()) continue;
-            if (room != UINT64_MAX && got + len > room) {
-                char b[128];
-                std::snprintf(b, sizeof b, "the cap: %.1f GiB left for this stage on CUDA%d", (double) room / GiB, d);
-                stop = b;
+        if (room != UINT64_MAX && len > room) {
+            char b[128];
+            std::snprintf(b, sizeof b, "the cap: %.1f GiB left for this stage on CUDA%d", (double) room / GiB, d);
+            st->stop = b;
+            continue;
+        }
+        if (d != cur) {
+            const cudaError_t se = cudaSetDevice(d);
+            if (se != cudaSuccess) {
+                (void) cudaGetLastError();
+                dev_stop[(size_t) d] = std::string("cudaSetDevice failed: ") + cudaGetErrorString(se);
                 continue;
             }
-            const cudaError_t e = pin_register((uint8_t*) a.base + off, (size_t) len, cudaHostRegisterMapped);
+            cur = d;
+        }
+        const auto td = std::chrono::steady_clock::now();
+        const cudaError_t e = pin_register((uint8_t*) a.base + off, (size_t) len, cudaHostRegisterMapped);
+        st->seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - td).count();
+        if (e != cudaSuccess) {
+            (void) cudaGetLastError();
+            refused = cudaGetErrorString(e);
+            refused_dev = d;
+            break;
+        }
+        void* dp = nullptr;
+        if (cudaHostGetDevicePointer(&dp, (uint8_t*) a.base + off, 0) != cudaSuccess) {
+            (void) cudaGetLastError();
+            dp = nullptr;
+        }
+        a.slice_pinned[i] = 1;
+        a.slice_starts.push_back(off);
+        a.slice_index.push_back((int) i);
+        a.reg_dev.push_back(d);
+        a.reg_alias.push_back(dp);
+        st->got += len;
+        dev_got[(size_t) d] += len;
+        ++st->next;
+        ++a.registered_slices;
+    }
+    // the newest slice of the stage with the largest share goes back, in the context that registered it
+    auto hand_back = [&]() -> uint64_t {
+        Stage* st = nullptr;
+        for (Stage& s : stages)
+            if (s.next > s.s0 && (st == nullptr || share(s) > share(*st))) st = &s;
+        if (st == nullptr) return 0;
+        const size_t i = st->next - 1;
+        size_t k = 0;
+        while (k < a.slice_index.size() && a.slice_index[k] != (int) i) ++k;
+        if (k == a.slice_index.size()) return 0;
+        if (a.reg_dev[k] != cur && cudaSetDevice(a.reg_dev[k]) == cudaSuccess) cur = a.reg_dev[k];
+        if (pin_unregister((uint8_t*) a.base + a.slice_starts[k]) != cudaSuccess) {
+            (void) cudaGetLastError();
+            return 0;   // still registered: it stays in the books, and nothing more goes back
+        }
+        const uint64_t len = bounds[i + 1] - bounds[i];
+        a.slice_starts.erase(a.slice_starts.begin() + (std::ptrdiff_t) k);
+        a.slice_index.erase(a.slice_index.begin() + (std::ptrdiff_t) k);
+        a.reg_dev.erase(a.reg_dev.begin() + (std::ptrdiff_t) k);
+        a.reg_alias.erase(a.reg_alias.begin() + (std::ptrdiff_t) k);
+        a.slice_pinned[i] = 0;
+        st->got -= len;
+        dev_got[(size_t) st->dev] -= len;
+        --st->next;
+        ++st->back;
+        --a.registered_slices;
+        return len;
+    };
+    // every GPU of the split still answers: its free memory reads (what failed on both 5060 Ti) and a pinned probe is
+    // granted (portable, through the test budget's wrappers: STRATA_TEST_PIN_BUDGET_MIB reproduces the refusal)
+    auto answers = [&](std::string& bad) -> bool {
+        for (const Stage& s : stages) {
+            if (s.dev != cur) {
+                if (cudaSetDevice(s.dev) != cudaSuccess) {
+                    (void) cudaGetLastError();
+                    bad = "cudaSetDevice(" + std::to_string(s.dev) + ") failed";
+                    return false;
+                }
+                cur = s.dev;
+            }
+            size_t f = 0, t = 0;
+            const cudaError_t e = cudaMemGetInfo(&f, &t);
             if (e != cudaSuccess) {
                 (void) cudaGetLastError();
-                stop = std::string("the driver refused a slice (") + cudaGetErrorString(e) + ")";
-                continue;
+                bad = "CUDA" + std::to_string(s.dev) + "'s free memory could not be read (" + cudaGetErrorString(e) + ")";
+                return false;
             }
-            void* dp = nullptr;
-            if (cudaHostGetDevicePointer(&dp, (uint8_t*) a.base + off, 0) != cudaSuccess) {
-                (void) cudaGetLastError();
-                dp = nullptr;
-            }
-            a.slice_pinned[i] = 1;
-            a.slice_starts.push_back(off);
-            a.slice_index.push_back((int) i);
-            a.reg_dev.push_back(d);
-            a.reg_alias.push_back(dp);
-            got += len;
-            dev_got[(size_t) d] += len;
-            ++n_ok;
-            ++a.registered_slices;
+        }
+        auto& ps = pin_detail::st();
+        std::lock_guard<std::mutex> g(ps.mu);
+        void* p = nullptr;
+        const cudaError_t e = pin_detail::alloc_locked(ps, &p, kProbe, cudaHostAllocPortable);
+        if (e != cudaSuccess) {
+            (void) cudaGetLastError();
+            bad = std::string("a 256 MiB pinned probe was refused (") + cudaGetErrorString(e) + ")";
+            return false;
+        }
+        pin_detail::free_locked(ps, p);
+        return true;
+    };
+    uint64_t back = 0;
+    int n_back = 0;
+    bool fine = true;
+    std::string first_bad, bad;
+    if (!refused.empty() || (a.registered_slices > 0 && !answers(first_bad))) {
+        const uint64_t margin = shared_pin_margin();
+        for (uint64_t u = 0; back < margin && (u = hand_back()) != 0; ++n_back) back += u;
+        for (uint64_t u = 0; !(fine = answers(bad)) && (u = hand_back()) != 0; ++n_back) back += u;
+    }
+    cudaSetDevice(prev);
+    for (const Stage& s : stages) {
+        std::string why;
+        if (s.got < s.want) {
+            if (!s.stop.empty()) why = s.stop;
+            else if (!dev_stop[(size_t) s.dev].empty()) why = dev_stop[(size_t) s.dev];
+            else if (!refused.empty()) why = "the driver refused a slice on CUDA" + std::to_string(refused_dev) + " (" + refused + ")";
+            else why = "handed back: " + first_bad;
+            if (s.back > 0) why += ", " + std::to_string(s.back) + " handed back after it";
         }
         char b[384];
         std::snprintf(b, sizeof b, "%sstage %d layers %lld-%lld: pinned %.2f of %.2f GiB (%d of %d slices) in the context of "
-                                   "cuda%d in %.1f s%s%s", a.stage_note.empty() ? "" : "; ", stage, (long long) s0,
-                      (long long) s1 - 1, (double) got / GiB, (double) want / GiB, n_ok, (int) (s1 - s0), d,
-                      std::chrono::duration<double>(std::chrono::steady_clock::now() - td).count(),
-                      got < want ? ", the rest unpinned: " : "", got < want ? stop.c_str() : "");
+                                   "cuda%d in %.1f s%s%s", a.stage_note.empty() ? "" : "; ", s.number, (long long) s.s0,
+                      (long long) s.s1 - 1, (double) s.got / GiB, (double) s.want / GiB, (int) (s.next - s.s0),
+                      (int) (s.s1 - s.s0), s.dev, s.seconds, why.empty() ? "" : ", the rest unpinned: ", why.c_str());
         a.stage_note += b;
-        if (!why_now.empty()) a.stage_note += " (cap read now: " + why_now + ")";
-        else if ((size_t) d < sd.why.size() && !sd.why[(size_t) d].empty()) a.stage_note += " (cap: " + sd.why[(size_t) d] + ")";
-        if (stop.rfind("the cap: ", 0) == 0) stop.clear();   // a cap ends this stage only: the next stage reads its own
-        s0 = s1;
+        if (!s.why_now.empty()) a.stage_note += " (cap read now: " + s.why_now + ")";
+        else if ((size_t) s.dev < sd.why.size() && !sd.why[(size_t) s.dev].empty()) a.stage_note += " (cap: " + sd.why[(size_t) s.dev] + ")";
     }
-    cudaSetDevice(prev);
+    if (!refused.empty() || n_back > 0 || !fine) {
+        std::string shares;
+        uint64_t total = 0;
+        for (const Stage& s : stages) {
+            char b[96];
+            std::snprintf(b, sizeof b, "%sstage %d %.0f%%", shares.empty() ? "" : ", ", s.number, 100.0 * share(s));
+            shares += b;
+            total += s.got;
+        }
+        const std::string cause = !refused.empty() ?
+            "the driver refused a slice on CUDA" + std::to_string(refused_dev) + " (" + refused + "): one limit for all the GPUs" :
+            "a GPU did not answer after the pin (" + first_bad + ")";
+        std::fprintf(stderr, "strata generate: expert arena: %s; %.2f GiB (%d slices) handed back so the drivers keep room "
+                             "(STRATA_PIN_MARGIN_GIB), %.2f GiB stay pinned (%s of each stage's layers); %s\n",
+                     cause.c_str(), (double) back / GiB, n_back, (double) total / GiB, shares.c_str(),
+                     fine ? "every GPU answers (its free memory reads, a 256 MiB pinned probe is granted)" :
+                            ("a GPU still does not answer: " + bad).c_str());
+    }
     for (size_t i = 0; i < n && a.slice_pinned[i]; ++i) a.registered_bytes = bounds[i + 1];   // the pinned PREFIX
     char t[64];
     std::snprintf(t, sizeof t, " (%.1f s)", std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
-    a.note = "cudaHostRegister per stage, each stage's layers in its own CUDA context, not portable "
+    a.note = "cudaHostRegister per stage, the stages in turns, each stage's layers in its own CUDA context, not portable "
              "(STRATA_ARENA_PIN_PER_STAGE)" + std::string(t) + ": " + a.stage_note + "; " + a.note;
     lock_unregistered(a, bounds, bytes);
 }

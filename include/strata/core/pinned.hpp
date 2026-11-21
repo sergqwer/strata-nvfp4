@@ -36,8 +36,10 @@ void set_arena_pin_order(const std::vector<int>& slices);
 /// extras/wddm-pin: per-stage registration.  `slice_dev[i]` is the CUDA device that reads slice i (a layer split: the
 /// stage that runs layer i); each slice is then registered in THAT device's context only (cudaHostRegisterMapped, not
 /// Portable), so under WDDM each adapter accounts only its own stage's share of the arena in its shared (non-local)
-/// segment.  `per_dev_cap[d]` (bytes, 0 = none) caps what device d pins; its slices go from its first layer up and stop
-/// at the cap or at the driver's first refusal (the rest stays resident through the working-set lock).  Empty = off.
+/// segment.  `per_dev_cap[d]` (bytes, 0 = none) caps what device d pins.  The stages take turns (the smallest pinned
+/// share of its own layers next), each from its first layer up, to the cap or to the driver's first refusal, which ends
+/// every stage (fix/mgpu-pin: one WDDM limit for all the GPUs); after a refusal the margin goes back and every GPU is
+/// checked to answer.  The rest stays resident through the working-set lock.  Empty = off.
 void set_arena_slice_devices(const std::vector<int>& slice_dev, const std::vector<uint64_t>& per_dev_cap,
                              const std::vector<int>& slice_stage = {},
                              const std::vector<std::string>& per_dev_why = {},

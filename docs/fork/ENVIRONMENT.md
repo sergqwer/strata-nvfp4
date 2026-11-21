@@ -108,7 +108,7 @@ the measurements:
 
 ## All environment variables
 
-Every variable the code of 0.2.15-nvfp4.5 reads, collected by a scan of `src/`, `include/`,
+Every variable the code of 0.2.15-nvfp4.6 reads, collected by a scan of `src/`, `include/`,
 `metal/src/`, `sycl/src/` (the engine, with `tools/settings_register.py`'s own scan), `strata_control/`, `serve/`,
 `setup.py`, `tools/` and `release/`, one table per area. Many are upstream's, and many apply only to one backend.
 
@@ -1138,7 +1138,7 @@ Every variable the code of 0.2.15-nvfp4.5 reads, collected by a scan of `src/`, 
 | `STRATA_PIN_BY_NEED` | unset |  | Nor with upstream's STRATA_PIN_BY_NEED=1 (#1905, opt-in): its pinned set is chosen before the arena opens, from the GPU cache's size estimated once the weights, session and drafter are in - the arena then opens where... (from the code comment) | `src/program/generate.cpp` |
 | `STRATA_PIN_BY_NEED_SKIP` | unset |  | (no description in the code) | `src/program/generate.cpp` |
 | `STRATA_PIN_GUARD` | unset |  | (no description in the code) | `src/core/expert_source.cpp` |
-| `STRATA_PIN_MARGIN_GIB` | unset |  | extras/wddm-pin: STRATA_PIN_MARGIN_GIB, what stays free of the shared-memory budget (default 4 GiB, #243's) (from the code comment) | `src/core/pinned.cu` |
+| `STRATA_PIN_MARGIN_GIB` | unset |  | extras/wddm-pin: STRATA_PIN_MARGIN_GIB, what stays free of the shared-memory budget, and what a layer split hands back after the driver's refusal (default 4 GiB, #243's) (from the code comment) | `src/core/pinned.cu` |
 | `STRATA_PIPED_CONCURRENT_UNPIN` | unset |  | STRATA_PIPED_CONCURRENT_UNPIN=0 keeps the inherited CPUs (an A/B); (from the code comment) | `src/program/generate.cpp` |
 | `STRATA_PIPELINE_ADAPT_ASYNC` | unset |  | (no description in the code) | `src/program/generate.cpp` |
 | `STRATA_PIPE_ADAPT_EVERY` | unset |  | "(opt-in; unset or 0: off, as before)". (from the settings register) | `src/program/generate.cpp` |

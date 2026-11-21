@@ -4,6 +4,20 @@ Every release of Strata NVFP4, the newest first. Each version links to its GitHu
 changed in it; [docs/NVFP4.md](docs/NVFP4.md) has the measurements behind each one. Back to the
 [README](README.md); this page replaces its What's new list.
 
+## 0.2.15-nvfp4.6
+
+Released 2026-11-21: [release page](https://github.com/sergqwer/strata-nvfp4/releases/tag/v0.2.15-nvfp4.6).
+
+- **Two GPUs under Windows start where the driver limits pinned memory (0.2.15-nvfp4.6).** A layer split pinned its
+  experts stage by stage up to the driver's refusal. Two RTX 5060 Ti with 256 GB of RAM got 64-70 GiB pinned while Windows
+  reported a 115 GiB budget, and then neither card could read its free memory, so the start ended. Now the stages take
+  turns (each card the same share of its layers, whatever its VRAM), the first refusal ends the pin on every card, 4 GiB
+  go back (`STRATA_PIN_MARGIN_GIB`) and every card must answer before the engine goes on. No setting is needed
+  ([details](docs/NVFP4.md#two-gpus-under-windows-the-pinned-experts-find-the-drivers-limit-2026-11-21-release-0215-nvfp46)).
+- **The same text.** One GPU is unchanged. With two, the change only decides which layers stay pinned.
+- **Update:** close the server. In a clone run `UPDATE.bat`; in the release folder run `update.cmd`. No new model
+  files.
+
 ## 0.2.15-nvfp4.5
 
 Released 2026-11-21: [release page](https://github.com/sergqwer/strata-nvfp4/releases/tag/v0.2.15-nvfp4.5).
