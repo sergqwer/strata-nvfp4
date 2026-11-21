@@ -400,6 +400,72 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### RTX 50: decode rounds 3-5, long contexts, smaller cards (2026-11-21, release 0.2.15-nvfp4.5)
+
+Three decode rounds after 0.2.15-nvfp4.4, the picture reader inside the engine (see Images above), and fixes for
+smaller RTX 50 cards and for two GPUs. Every decode and prompt change here is exact: the prompt texts and first-token
+logits at 16K and 64K and the decode texts stay bit-identical in the fixed-placement check. The picture reader is a
+different implementation of the encoder (its embeddings agree with the CPU reader's to a row cosine of 0.9992 or better). Past the model's native 262,144 positions
+(dynamic RoPE, prompts of 294K-360K tokens, CLI and serve) the text with the new elastic tables equals the text with
+`STRATA_SESSION_GROW=0`.
+
+**Short answers**, serve, the tray's GPTQ arguments, 3 pairs in alternating order, RTX 5090 at 600 W, tokens/s. The two
+steps were measured on different days, so compare within each step only (during the first step ~1 GiB of VRAM was held
+by another process in both arms):
+
+| answer | 0.2.15-nvfp4.4 | rounds 3-4 | | rounds 3-4 | rounds 3-5 (0.2.15-nvfp4.5) |
+| --- | ---: | ---: | --- | ---: | ---: |
+| JSON | 423 | 444 (+5.0%) | | 454 | 462 (+1.7%) |
+| chat | 255 | 261 (+2.6%) | | 265 | 268 (+1.0%) |
+| English prose | 255 | 263 (+3.0%) | | 259 | 266 (+3.0%) |
+| Ukrainian | 236 | 237 (+0.2%) | | 239 | 240 (+0.6%) |
+
+**Long contexts.** One serve engine and one dialog that grows from 2K to 370K tokens; at each length the same JSON
+continuation (identical text at every length) and a prose one. Rounds 3-4 against 0.2.15-nvfp4.5, both portable release
+builds, 3 runs each, the tray's uncensored arguments, tokens/s:
+
+| context | JSON | prose |
+| ---: | ---: | ---: |
+| 2K | 357 -> 382 (one slow run in the first arm; the other two are equal) | 298 -> 307 |
+| 32K | 363 -> 378 (+4.1%) | 195 -> 201 (+3.0%) |
+| 64K | 370 -> 388 (+4.9%) | 175 -> 182 (+4.1%) |
+| 128K | 366 -> 389 (+6.3%) | 168 -> 175 (+3.8%) |
+| 256K | 353 -> 400 (+13.4%) | 162 -> 172 (+6.2%) |
+| 370K | 324 -> 367 (+13.3%) | 164 -> 166 (+1.6%) |
+
+Where a JSON window's time went from 2K to 370K before round 5 (+3.5 ms a window): the indexer's block scores +3.1 ms
+(286 us a layer for a window of 8 at 370K, against a bandwidth floor of ~31 us), top-k +0.27, the K/V resolve +0.17, the
+drafter +0.44 (flat from 32K). The CPU expert pool, the draft acceptance and the dynamic RoPE stay flat. Round 5's DX
+scorer takes most of the scores' growth; prose gains less because its windows are short (about 3 rows against 8).
+
+**Pictures** read inside the engine: the time to the first token is 1,352 -> 631 ms for 329 picture tokens and
+4,777 -> 924 ms for 1,085 against 0.2.15-nvfp4.4's CPU reader.
+
+| switch | what it does | round | output |
+| --- | --- | --- | --- |
+| `STRATA_SELECT_LONG=1`, `SCORES_DX=1`, `SELECT_LONG_AT=24576` | from 24,576 cells the decode windows score the indexer's blocks with the DX kernel, which reads each pooled key once for all of the window's queries; the same scores bit for bit, so the same blocks (RTX 50 table; the kernels now build for every CUDA card) | 5 | exact |
+| `STRATA_KV_RESIDENT_FAST=1` | a new dialog's K/V blocks start mapped to the VRAM window's slots in order, so the resolve step ends at once while every selected block lies in that resident prefix: -0.07 to -0.14 ms a window below 32,768 cells (every CUDA card) | 5 | exact |
+| `STRATA_MTP_ATTN_PIPE=1`, `STRATA_MTP_MERGE_FAST=1` | the drafter's attention over its 32,768-cell window in one wave of blocks, the next chunk's K/V copied during this one's softmax, and a parallel merge: -32% a drafter step at 32K (the pipe on RTX 50, the merge on every CUDA card) | 5 | exact (the same drafts) |
+| `STRATA_SESSION_GROW=1` | under KV streaming the indexer's pooled keys and the RoPE table grow with the context instead of being sized for the whole context at the start: +320 expert slots at short contexts (`STRATA_SESSION_GROW_CHECK=1` verifies every grow) | 4 | exact |
+| `STRATA_EARLY_READ=0` | the early hyper-connection read of 0.2.15-nvfp4.4 is off by default now (not slower without it); `=1` still turns it on, and it is skipped on a card where its 220 waiting blocks would not all fit beside the combine they wait for (`STRATA_EARLY_READ_FIT=0` skips that check) | 4 | exact |
+| `STRATA_MTP_PDL=1` | programmatic dependent launch in the drafter's graphs (RTX 50 table) | 3 | exact |
+| `STRATA_MMVF_EXACT78=1` | exact router kernels for windows of 7 and 8 tokens | 3 | exact |
+| `STRATA_GDN_MID_DEPTH=1`, `GDN_MID_PIECES=4` | the DeltaNet kernel keeps 10.6 KiB in flight a block instead of ~85 KiB (a bounded stream); `=0` the old ring | 3 | exact |
+| `STRATA_HC8_LOSTAGE=1`, `ER_LATE_PASS=1` | the 8-bit hyper-connection read issues all its loads before its stores; the gated read counts its pass after the dots | 3 | exact |
+| `STRATA_SCORES_PAIRS=1`, `KV_RESOLVE_ILP=1`, `IDX_APPEND_PAR=1`, `IDX_FORK=1` | the indexer chain: block scores one (block, query) pair a warp, batched resolve lookups, the window append in parallel and on its own branch beside the query projection | 3 | exact |
+| `STRATA_WDDM_SHARED_RESERVE_MIB` | with two or more CUDA cards the pinned experts are cut to the Windows shared segment, less this reserve (upstream #3725) | fix | - |
+
+Also fixed: on cards with fewer multiprocessors than the 5090 (RTX 5080, 5070, 5060, two-card splits) the early read
+could wait 2 s a window for a combine that had no room to run; and a layer split over two cards now sizes the DeltaNet
+kernel's grid and the prompt's hyper-connection buffer for each card. `STRATA_EMULATE_SMS=N` holds all but N
+multiprocessors with an idle kernel, to test a smaller card on a large one.
+
+Measured and dropped (all exact): an elastic VRAM K/V window (+109 slots, no measurable gain), fusing the k/v and
+norm-RoPE steps (they run beside the indexer branch and wait for it, so no gain), a multi-CTA top-k (slower than the
+cluster top-k), windows wider than 8 (slower on JSON at every width), the adaptive tier's decay at 0.90 (faster on JSON,
+slower on prose), the PCIe share by copy engine (slower), CPU expert rows with register accumulators (the pool is bound
+by DRAM, not the cores).
+
 ### RTX 50: faster prompts (2026-11-20, release 0.2.15-nvfp4.4)
 
 A second round on the prompt path, after a probe of what the 5090 computes fastest for each data type
@@ -502,7 +568,7 @@ mode with fixed expert placement.
 | `STRATA_PREFILL_EQUAL=2` | equal prompt chunks | ours | rounds (chunk order) |
 | `STRATA_GDN_TC=1`, `GDN_CONVL2=2`, `GDN_TC_NP=1` | the prompt's DeltaNet scan on tensor cores | ours | rounds (first-token KL ~0.001) |
 | `STRATA_PF_GROUP_SCRATCH=1`, `PF_HC_REGION=2` | smaller prompt buffers, fewer expert slots borrowed | ours | exact |
-| `STRATA_EARLY_READ=1` | the next layer's first hyper-connection read starts before the combine and waits on its counter | ours | exact |
+| `STRATA_EARLY_READ=1` | the next layer's first hyper-connection read starts before the combine and waits on its counter (off by default since 0.2.15-nvfp4.5) | ours | exact |
 | `STRATA_GDN_MID_HEAD=2` | the DeltaNet kernel only prefetches into L2 before its wait, so its weight burst does not stall that read | ours | exact |
 | `STRATA_ROUTE_DB=2` | the router and the doorbell in one kernel | ours | exact |
 

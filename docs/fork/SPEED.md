@@ -3,6 +3,25 @@
 How fast this fork runs, and where the detailed tables are. Back to the [README](../../README.md). The README's
 [models table](../../README.md#models) has decode and 32K-prompt numbers for every model.
 
+## Long dialogs in 0.2.15-nvfp4.5
+
+RTX 5090 at 600 W, the NVFP4 GPTQ set, serve, greedy. One engine and one dialog that grows from 2K to 370K tokens;
+at each length the same JSON continuation (identical text at every length) and a prose one. 0.2.15-nvfp4.5 against
+the build before its round 5, both release builds, 3 runs each, tokens/s:
+
+| Context | JSON | prose |
+| ---: | ---: | ---: |
+| 32K | 363 -> 378 (+4%) | 195 -> 201 (+3%) |
+| 64K | 370 -> 388 (+5%) | 175 -> 182 (+4%) |
+| 128K | 366 -> 389 (+6%) | 168 -> 175 (+4%) |
+| 256K | 353 -> 400 (+13%) | 162 -> 172 (+6%) |
+| 370K | 324 -> 367 (+13%) | 164 -> 166 (+2%) |
+
+Short answers against 0.2.15-nvfp4.4 (two steps on two days, multiplied): JSON about +7%, chat +4%, English prose +6%,
+Ukrainian +1%. Pictures read in the engine: the first token of a 329-token picture after 631 ms instead of 1,352.
+The text is bit-identical to 0.2.15-nvfp4.4's in the fixed-placement check. The switches and the runs:
+[RTX 50: decode rounds 3-5](../NVFP4.md#rtx-50-decode-rounds-3-5-long-contexts-smaller-cards-2026-11-21-release-0215-nvfp45).
+
 ## RTX 50 in 0.2.15-nvfp4.4
 
 RTX 5090, Ryzen 9 9950X3D, 128 GB, the NVFP4 GPTQ set, serve, greedy, the tray's arguments, one run of each in

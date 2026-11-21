@@ -4,6 +4,36 @@ Every release of Strata NVFP4, the newest first. Each version links to its GitHu
 changed in it; [docs/NVFP4.md](docs/NVFP4.md) has the measurements behind each one. Back to the
 [README](README.md); this page replaces its What's new list.
 
+## 0.2.15-nvfp4.5
+
+Released 2026-11-21: [release page](https://github.com/sergqwer/strata-nvfp4/releases/tag/v0.2.15-nvfp4.5).
+
+- **Long dialogs decode faster on RTX 50 (0.2.15-nvfp4.5).** Past 24,576 cells the indexer scores its blocks with a
+  kernel that reads each pooled key once for all of the window's queries (the same scores bit for bit), the drafter's
+  attention runs pipelined, and the K/V resolve ends at once while every block is resident. RTX 5090, one dialog
+  growing to 370K tokens, against the build before this round: JSON 353 -> 400 tokens/s at 256K and 324 -> 367 at
+  370K (+13%), +4-6% at 32-128K; prose +2-6%
+  ([measurements](docs/NVFP4.md#rtx-50-decode-rounds-3-5-long-contexts-smaller-cards-2026-11-21-release-0215-nvfp45)).
+- **Short answers a little faster (0.2.15-nvfp4.5).** Two more decode rounds of exact kernel changes: against
+  0.2.15-nvfp4.4 a JSON answer about +7%, a chat +4%, English prose +6%, Ukrainian +1%.
+- **The engine reads pictures itself, on the GPU (0.2.15-nvfp4.5).** It borrows ~360 expert slots only while it
+  encodes a picture and refills them right after. The first token of a 329-token picture comes after 631 ms instead of
+  1,352, of a 1,085-token one after 924 ms instead of 4,777. Setup and the release's config turn it on
+  (`"in_engine": true`; `update.cmd` keeps a config you edited, so add it to that one's `vision` section yourself);
+  `STRATA_VISION_IN_ENGINE=0` keeps the CPU reader ([Images](docs/NVFP4.md#images-2026-09-30)).
+- **Fixes for smaller RTX 50 cards and two GPUs (0.2.15-nvfp4.5).** 0.2.15-nvfp4.4's early hyper-connection read
+  (`STRATA_EARLY_READ`) could wait 2 s a window on cards with fewer multiprocessors than the 5090 (RTX 5080, 5070,
+  5060): it is off by default now and skipped where it cannot fit. With two cards the pinned experts are cut to the
+  Windows shared segment (upstream #3725), and a layer split sizes its DeltaNet grid and prompt buffer per card.
+- **The session tables grow with the context (0.2.15-nvfp4.5).** Under KV streaming the indexer's pooled keys and the
+  RoPE table are no longer sized for the whole context at the start: +320 expert slots at short contexts
+  (`STRATA_SESSION_GROW=0` keeps the old tables). The text past 262,144 positions (dynamic RoPE) is unchanged.
+- **The same text.** Every decode and prompt change is exact: the decode texts and the 16K / 64K prompt texts and
+  first-token logits are bit-identical to 0.2.15-nvfp4.4's in the fixed-placement check. The new switches and their
+  `=0`: [Switches](docs/fork/ENVIRONMENT.md#rtx-50-in-0215-nvfp45).
+- **Update:** close the server. In a clone run `UPDATE.bat`; in the release folder run `update.cmd`. No new model
+  files.
+
 ## 0.2.15-nvfp4.4
 
 Released 2026-11-20: [release page](https://github.com/sergqwer/strata-nvfp4/releases/tag/v0.2.15-nvfp4.4).

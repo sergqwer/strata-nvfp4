@@ -51,6 +51,13 @@ Each change was measured (first-token KL against a reference, interleaved speed 
   `tools/draft_vocab.py --add cjk` builds upstream's CJK subset
   ([Upstream 0.1.28 merged](../NVFP4.md#upstream-0128-merged-2026-09-30)).
 - **The server starts a fresh engine after a reply of "!"** ([Troubleshooting](TROUBLESHOOTING.md#if-a-reply-turns-into-)).
+- **Long dialogs decode faster on RTX 50** (0.2.15-nvfp4.5): past 24,576 cells the indexer scores its blocks with a
+  kernel that reads each pooled key once for the whole draft window, plus a faster drafter attention and K/V resolve;
+  RTX 5090, JSON +13% at 256-370K tokens and +4-6% at 32-128K, prose +2-6%, the same text
+  ([measurements](../NVFP4.md#rtx-50-decode-rounds-3-5-long-contexts-smaller-cards-2026-11-21-release-0215-nvfp45)).
+- **The engine reads pictures itself, on the GPU** (0.2.15-nvfp4.5): it borrows ~360 expert slots only while it encodes
+  a picture; the first token of a picture turn comes 2-5 times sooner than with the CPU reader
+  ([Images](../NVFP4.md#images-2026-09-30)).
 - **RTX 50 decode kernels and drafting after [Basalt](https://github.com/jesdga95/basalt)** (0.2.15-nvfp4.4): the int8
   tensor-core dense GEMV, the 8-bit hyper-connection read, staged INT8 attention, the persistent DeltaNet layer, the
   attention layer's placement and Basalt's MTP drafting (the two-stage draft head, the cumulative window rule, a window

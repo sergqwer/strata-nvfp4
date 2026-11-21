@@ -86,9 +86,29 @@ switch of the set, what it does, where it came from and whether it changes round
   `STRATA_DENSE_F16C`, `STRATA_PF_HC_INJ`, `STRATA_PF_DM16H`, `STRATA_PF_GRAPH`, `STRATA_PF_SHARED_LATE`,
   `STRATA_KV_PREFETCH`, `STRATA_PF_KV_UNSTAGE_SIDE`, `STRATA_PF_UPMIX_SKIP32`, `STRATA_PF_REFILL_BG`).
 
+## RTX 50 in 0.2.15-nvfp4.5
+
+0.2.15-nvfp4.5 adds decode switches, all exact. Each one's `=0` turns it off:
+
+| switch | what it does | on by default |
+| --- | --- | --- |
+| `STRATA_SELECT_LONG`, `STRATA_SCORES_DX` | from `STRATA_SELECT_LONG_AT` (24576) cells the decode windows score the indexer's blocks with the DX kernel, which reads each pooled key once for all of the window's queries (the long-context speedup) | RTX 50 |
+| `STRATA_MTP_ATTN_PIPE` | the drafter's attention over its 32,768-cell window in one wave of blocks, the next chunk copied during this one's softmax | RTX 50 |
+| `STRATA_MTP_MERGE_FAST` | the drafter attention's partials merged in parallel, in the same order | every CUDA card |
+| `STRATA_KV_RESIDENT_FAST` | a new dialog's K/V blocks start mapped to the VRAM window in order, so the resolve step ends at once below 32,768 cells | every CUDA card |
+| `STRATA_SESSION_GROW` | under KV streaming the indexer's pooled keys and the RoPE table grow with the context (`=0`: sized for the whole context at the start, 320 fewer expert slots) | yes |
+| `STRATA_EARLY_READ` | the next layer's first hyper-connection read starts before the combine and waits on its counter; skipped on a card where its waiting blocks cannot all fit | off since 0.2.15-nvfp4.5 (`=1` turns it on) |
+| `STRATA_VISION_IN_ENGINE` | `=0` keeps the CPU picture reader instead of the engine's (the config's `vision.in_engine`) | with `in_engine` |
+| `STRATA_EMULATE_SMS` | test mode: all but N multiprocessors held by an idle kernel, to try a smaller card on a large one | off |
+
+The rounds' other switches (`STRATA_MTP_PDL`, `STRATA_MMVF_EXACT78`, `STRATA_GDN_MID_DEPTH`, `STRATA_HC8_LOSTAGE`,
+`STRATA_ER_LATE_PASS`, `STRATA_SCORES_PAIRS`, `STRATA_KV_RESOLVE_ILP`, `STRATA_IDX_APPEND_PAR`, `STRATA_IDX_FORK`) and
+the measurements:
+[RTX 50: decode rounds 3-5](../NVFP4.md#rtx-50-decode-rounds-3-5-long-contexts-smaller-cards-2026-11-21-release-0215-nvfp45).
+
 ## All environment variables
 
-Every variable the code of main 61c2451dd (0.2.15-nvfp4.4) reads, collected by a scan of `src/`, `include/`,
+Every variable the code of 0.2.15-nvfp4.5 reads, collected by a scan of `src/`, `include/`,
 `metal/src/`, `sycl/src/` (the engine, with `tools/settings_register.py`'s own scan), `strata_control/`, `serve/`,
 `setup.py`, `tools/` and `release/`, one table per area. Many are upstream's, and many apply only to one backend.
 
@@ -140,7 +160,7 @@ Every variable the code of main 61c2451dd (0.2.15-nvfp4.4) reads, collected by a
 | `STRATA_UPDATE_TRUSTED_KEYS` | unset |  | (no description in the code) | `strata_control/signing.py` |
 | `STRATA_VCVARS` | unset |  | (no description in the code) | `setup.py` |
 
-### Serve and drafting (120)
+### Serve and drafting (126)
 
 | Variable | Default | sm_120 table | What it does | Read in |
 | --- | --- | --- | --- | --- |
@@ -187,6 +207,7 @@ Every variable the code of main 61c2451dd (0.2.15-nvfp4.4) reads, collected by a
 | `STRATA_MTP_AHEAD` | unset |  | (no description in the code) | `src/core/mtp.cpp` |
 | `STRATA_MTP_ATTN_GQ` | unset |  | STRATA_MTP_ATTN_GQ=0 keeps the gate and the quantizer apart (from the code comment) | `src/kernels/cuda/qsa_decode_attn.cu` |
 | `STRATA_MTP_ATTN_GRID` | 0 |  | STRATA_MTP_ATTN_GRID=N caps the blocks a KV head (each then loops over chunks: one wave of 2 x 170 measured slower on struct, 13 vs 9 us, the chunks' latency is serial) (from the code comment) | `src/kernels/cuda/qsa_decode_attn.cu` |
+| `STRATA_MTP_ATTN_PIPE` | unset | `1` | the drafter's attention over its 32,768-cell window in one wave of blocks, the next chunk copied during this one's softmax | `src/kernels/cuda/qsa_decode_attn.cu` |
 | `STRATA_MTP_ATTN_STAGED` | unset |  | STRATA_MTP_ATTN_STAGED=0 keeps qsa_decode_attn_batch; (from the code comment) | `src/kernels/cuda/qsa_decode_attn.cu` |
 | `STRATA_MTP_BATCH` | unset |  | Only the _F16 sibling "(the A/B)" shows in evidence; this base switch unclear. (from the settings register) | `src/prefill/prefill.cpp`, `sycl/src/prefill/prefill.cpp` |
 | `STRATA_MTP_BATCH_F16` | on |  | CUDA / HIP: on unless set to 0 (src/prefill/prefill.cpp:2319, the MTP drafter's prompt pass on FP16 GEMMs instead of Q8_0 MMQ; =0 is MMQ's form until MMQ leaves the build); SYCL: off unless set to 1 (no MMQ there). Not d (from the settings register) | `src/prefill/prefill.cpp`, `sycl/src/prefill/prefill.cpp` |
@@ -198,9 +219,10 @@ Every variable the code of main 61c2451dd (0.2.15-nvfp4.4) reads, collected by a
 | `STRATA_MTP_HC8` | unset |  | (no description in the code) | `src/core/mtp.cpp` |
 | `STRATA_MTP_HIGH_PRIO` | unset |  | STRATA_MTP_HIGH_PRIO=1 (CUDA): the draft streams at the highest priority in every mode, as STRATA_MTP_HIP_PRIO on HIP - the round no longer waits behind the commit graph the verifier launched just before it (its 6912-... (from the code comment) | `src/core/mtp.cpp` |
 | `STRATA_MTP_KEEP` | unset |  | Not with DFlash2 (its own block decides), a split, or STRATA_MTP_KEEP=1. (from the code comment) | `src/program/generate.cpp` |
+| `STRATA_MTP_MERGE_FAST` | unset |  | the drafter attention's partials merged in parallel, in the same order | `src/kernels/cuda/qsa_decode_attn.cu` |
 | `STRATA_MTP_MULTI_COPY` | on |  | (no description in the code) | `src/kernels/cuda/elementwise.cu`, `src/kernels/verify_parity.cpp` |
 | `STRATA_MTP_OVERLAP` | unset |  | (no description in the code) | `src/core/mtp.cpp` |
-| `STRATA_MTP_PDL` | off |  | (no description in the code) | `src/core/mtp.cpp` |
+| `STRATA_MTP_PDL` | off | `1` | programmatic dependent launch in the drafter's graphs (RTX 50 table) | `src/core/mtp.cpp` |
 | `STRATA_MTP_PREFILL_SYNC` | unset |  | STRATA_MTP_PREFILL_SYNC: the prompt pass's per-group loop (see MtpDrafter::prefill); (from the code comment) | `src/core/mtp.cpp`, `sycl/src/core/mtp.cpp` |
 | `STRATA_MTP_PRE_NEXT` | unset |  | (no description in the code) | `src/core/mtp.cpp` |
 | `STRATA_MTP_PRIORITY` | unset |  | --pipeline-windows 2 (the forcing graphs): the chain shares its card with stage 1's windows and the next launch on stage 0 waits for it, so its stream gets the highest priority there (STRATA_MTP_PRIORITY=0: the default) (from the code comment) | `src/core/mtp.cpp`, `sycl/src/core/mtp.cpp` |
@@ -263,9 +285,13 @@ Every variable the code of main 61c2451dd (0.2.15-nvfp4.4) reads, collected by a
 | `STRATA_TELEMETRY_KEY` | unset |  | (no description in the code) | `serve/server.py`, `strata_control/benchmarking.py` |
 | `STRATA_UMA_RESERVE_GIB` | unset |  | Reserve for Strix Halo UMA; "0 = the old sizing", shipped 0.2.2. (from the settings register) | `include/strata/core/uma_cache.hpp` |
 | `STRATA_UNDECLARED_TOOL_CALLS` | unset |  | (no description in the code) | `serve/server.py` |
+| `STRATA_VISION_GPU_BLAS_KEEP` | unset |  | the cuBLAS handle goes with the room and is made again at the next picture: 138 -> 74 MiB of VRAM left outside the slots after the first picture, no time measured (STRATA_VISION_GPU_BLAS_KEEP=1 keeps it) (from the code comment) | `tools/vision/own/vit_gpu.cu` |
+| `STRATA_VISION_GPU_REFILL_BG` | unset |  | (no description in the code) | `src/program/generate.cpp` |
+| `STRATA_VISION_IN_ENGINE` | unset |  | `=0` keeps the CPU picture reader instead of the engine's (the config's `vision.in_engine`) | `serve/server.py` |
 | `STRATA_VISION_TOWER` | unset |  | Without --tower the environment's STRATA_VISION_TOWER decides (the model's run config carries STRATA_VISION_TOWER=mtmd when someone picks llama.cpp's reader in the settings; an older strata-vision ignores it). (from the code comment) | `tools/vision/strata_vision.cpp` |
+| `STRATA_WDDM_SHARED_RESERVE_MIB` | 2048 |  | with two or more CUDA cards the pinned experts are cut to the Windows shared segment, less this reserve (upstream #3725) | `src/core/expert_source.cpp` |
 
-### Engine, general (393)
+### Engine, general (398)
 
 | Variable | Default | sm_120 table | What it does | Read in |
 | --- | --- | --- | --- | --- |
@@ -400,6 +426,8 @@ Every variable the code of main 61c2451dd (0.2.15-nvfp4.4) reads, collected by a
 | `STRATA_I8_N8` | unset |  | The 8-entry slices of the tile-2..4 int8 expert kernel (STRATA_EXPERT_I8's prompt path; two weight rows and one entry of each 8-entry slice per thread; output bit-identical). Not set: on for tile 2 (up to about 1,950 tok (from the settings register) | `src/kernels/cuda/iq_kernels.cu` |
 | `STRATA_I8_TM` | unset |  | Research: the tile of STRATA_EXPERT_I8's kernels, 2, 3 or 4 rows of 16 entries per thread (32, 48 or 64 entries a block), 8 = the 128-entry tile. Unset: chosen by the entries per expert. (from the settings register) | `src/kernels/cuda/iq_kernels.cu` |
 | `STRATA_I8_WG` | 1 |  | (no description in the code) | `sycl/src/prefill/esimd_moe.dp.cpp` |
+| `STRATA_IDX_APPEND_PAR` | unset |  | the indexer chain: block scores one (block, query) pair a warp, batched resolve lookups, the window append in parallel and on its own branch beside the query projection | `src/kernels/cuda/native_qsa_indexer.cu` |
+| `STRATA_IDX_FORK` | unset |  | the indexer chain: block scores one (block, query) pair a warp, batched resolve lookups, the window append in parallel and on its own branch beside the query projection | `src/core/verify.cpp` |
 | `STRATA_IGPU_DEFAULTS` | on |  | iGPU defaults on gfx1103/1150/1151; =0 turns them all off. (from the settings register) | `src/core/arch_defaults.cpp` |
 | `STRATA_IL_PAD` | 1 |  | "bit 0, default on, =0 off" for 6-column padded IQ4_XS kernel (v0.2.10). (from the settings register) | `src/kernels/cuda/native_mmvq.cu` |
 | `STRATA_INDEXER_PER_TOKEN` | off |  | STRATA_INDEXER_PER_TOKEN=1: the old (from the code comment) | `src/prefill/prefill.cpp`, `sycl/src/prefill/prefill.cpp` |
@@ -443,6 +471,7 @@ Every variable the code of main 61c2451dd (0.2.15-nvfp4.4) reads, collected by a
 | `STRATA_LOOKUP_MAX_T` | unset |  | strata-nvfp4: off unless set (see fork_env_or) (from the code comment) | `src/program/generate.cpp` |
 | `STRATA_MANIFEST` | unset |  | [checked] Run manifest file for measurement (include/strata/core/run_manifest.hpp:5, 'OFF by default'); strata_control/split_engine.py:506 sets it for the split engine's own runs. (from the settings register) | `include/strata/core/run_manifest.hpp` |
 | `STRATA_MIRROR_MIB` | 0 |  | Free RAM less 4 GiB | `sycl/src/program/generate.cpp` |
+| `STRATA_MMVF_EXACT78` | unset |  | exact router kernels for windows of 7 and 8 tokens | `src/kernels/cuda/native_bf16.cu` |
 | `STRATA_MMVF_ROWS` | off |  | decode layouts and kernels (packed Q8_0 / Q6_K weights, 4-row BF16 GEMV, one-cell-per-thread attention scores) | `src/kernels/cuda/native_bf16.cu`, `src/kernels/mmvf_rows_parity.cpp`, `sycl/src/kernels/cuda/native_bf16.dp.cpp` |
 | `STRATA_MMVQ_A2` | unset |  | (no description in the code) | `sycl/src/kernels/cuda/native_mmvq.dp.cpp` |
 | `STRATA_MMVQ_CSPLIT` | off |  | STRATA_MMVQ_CSPLIT (strata-nvfp4): Q8_0 windows of 5..8 columns as two column groups of neighbouring blocks (the kernel's CSPLIT, bitwise the same outputs). (from the code comment) | `src/kernels/cuda/native_mmvq.cu` |
@@ -574,15 +603,16 @@ Every variable the code of main 61c2451dd (0.2.15-nvfp4.4) reads, collected by a
 | `STRATA_RING_BYTES` | on |  | (no description in the code) | `src/prefill/prefill.cpp`, `sycl/src/prefill/prefill.cpp` |
 | `STRATA_RING_TIMEOUT_S` | 20 |  | Ring wait timeout for hang diagnosis. (from the settings register) | `sycl/src/core/verify.cpp` |
 | `STRATA_S2_SWIGLU_Q8` | on |  | (no description in the code) | `src/kernels/cuda/s2_expert_grouped.cu`, `sycl/src/kernels/cuda/s2_expert_grouped.dp.cpp` |
-| `STRATA_SCORES_DX` | unset |  | Used with TOPK_MULTI in a parity test. (from the settings register) | `src/kernels/cuda/qsa_select.cu`, `src/kernels/qsa_select_long_parity.cpp` |
+| `STRATA_SCORES_DX` | unset | `1` | from `STRATA_SELECT_LONG_AT` (24576) cells the decode windows score the indexer's blocks with the DX kernel, which reads each pooled key once for all of the window's queries (the long-context speedup) | `src/kernels/cuda/qsa_select.cu`, `src/kernels/qsa_select_long_parity.cpp` |
 | `STRATA_SCORES_HALVE` | -1 |  | (no description in the code) | `src/kernels/cuda/qsa_select.cu` |
 | `STRATA_SCORES_MULTI` | unset |  | (no description in the code) | `src/kernels/cuda/qsa_scores_gfx1100_test.cu`, `src/kernels/cuda/qsa_select.cu`, `src/kernels/qsa_slots_parity.cpp` +1 |
+| `STRATA_SCORES_PAIRS` | unset |  | the indexer chain: block scores one (block, query) pair a warp, batched resolve lookups, the window append in parallel and on its own branch beside the query projection | `src/kernels/cuda/qsa_select.cu` |
 | `STRATA_SCORES_THREAD` | -1 |  | On by default for gfx12; =0 turns it off. (from the settings register) | `src/kernels/cuda/qsa_select.cu`, `src/kernels/qsa_scores_gfx1100_parity.cpp` |
 | `STRATA_SELECT_ALT_MIN_TOKENS` | on |  | "no gain below 32K. A gfx12 default therefore ..." threshold tuning. (from the settings register) | `src/core/gfx12_extra_test.cpp`, `src/kernels/cuda/qsa_select.cu` |
 | `STRATA_SELECT_GEMM` | -1 |  | STRATA_SELECT_GEMM=0: the warp kernel always, =1: the GEMM always (on every card). (from the code comment) | `sycl/src/prefill/prefill.cpp` |
 | `STRATA_SELECT_GEMM_MIN` | unset |  | blocks (4 cells each) (from the code comment) | `sycl/src/prefill/prefill.cpp` |
-| `STRATA_SELECT_LONG` | unset |  | STRATA_SELECT_LONG=1 (opt-in): a window graph past select_long_at() cells takes the long-context QSA select (qsa_block_topk_long's multi-CTA top-k through topk_scratch_, qsa_block_scores_long's shuffle-free decode sco... (from the code comment) | `src/core/verify.cpp` |
-| `STRATA_SELECT_LONG_AT` | unset |  | STRATA_SELECT_LONG_AT: the threshold in cells (default 65536; 0: always) (from the code comment) | `src/core/verify.cpp` |
+| `STRATA_SELECT_LONG` | unset | `1` | from `STRATA_SELECT_LONG_AT` (24576) cells the decode windows score the indexer's blocks with the DX kernel, which reads each pooled key once for all of the window's queries (the long-context speedup) | `src/core/verify.cpp` |
+| `STRATA_SELECT_LONG_AT` | unset | `24576` | from 24,576 cells the decode windows score the indexer's blocks with the DX kernel, which reads each pooled key once for all of the window's queries; the same scores bit for bit, so the same blocks (RTX 50 table; the kernels now build for every CUDA card) | `src/core/verify.cpp` |
 | `STRATA_SELECT_OLD` | off |  | Old warp kernel kept via =1 behind new tensor-core selection; used to perturb baselines. (from the settings register) | `src/prefill/prefill.cpp`, `sycl/src/prefill/prefill.cpp` |
 | `STRATA_SELECT_SIMT` | unset |  | QSA block scores on the FP32 tiled scorer instead of the warp kernel; helps long prompts (128K: +7.4%). Not bitwise the warp kernel. [Data](../../bench/results/2026-10-07-rdna2-qsa-select-simt/README.md). | `src/kernels/cuda/qsa_select.cu` |
 | `STRATA_SELECT_TWO_PASS` | on |  | (no description in the code) | `src/kernels/cuda/qsa_select.cu`, `src/kernels/qsa_two_pass_parity.cpp`, `src/prefill/prefill.cpp` +1 |
@@ -590,6 +620,7 @@ Every variable the code of main 61c2451dd (0.2.15-nvfp4.4) reads, collected by a
 | `STRATA_SELECT_WMMA` | on |  | The block scorer on the matrix cores | `src/core/arch_defaults.cpp`, `src/core/gfx12_extra_test.cpp`, `src/kernels/cuda/qsa_select.cu` +1 |
 | `STRATA_SEL_OVERLAP` | off |  | STRATA_SEL_OVERLAP (debug, D-1's question): how much do neighbouring queries' selections share? Per tile of 16 queries: the union of their selected cells against the sum of their widths. (from the code comment) | `src/prefill/prefill.cpp`, `sycl/src/prefill/prefill.cpp` |
 | `STRATA_SESSION_BUFFERED` | off |  | (no description in the code) | `src/core/conversation_file.cpp`, `src/core/conversation_file_test.cpp` |
+| `STRATA_SESSION_GROW` | on |  | under KV streaming the indexer's pooled keys and the RoPE table grow with the context (`=0`: sized for the whole context at the start, 320 fewer expert slots) | `src/program/generate.cpp` |
 | `STRATA_SETTINGS_FILE` | unset |  | (no description in the code) | `setup.py`, `strata_control/discovery.py`, `tools/strata_mcp.py` |
 | `STRATA_SHARD1` | unset |  | default: $STRATA_SHARD1, else the development layout (<Strata>/Q2_0 beside <Strata>/Public/Engine) (from the code comment) | `tools/canonical_xcheck.py` |
 | `STRATA_SH_FORK_LATE` | on |  | STRATA_SH_FORK_LATE=0 forks at the top as before (from the code comment) | `src/core/verify.cpp`, `sycl/src/core/verify.cpp` |
@@ -663,7 +694,7 @@ Every variable the code of main 61c2451dd (0.2.15-nvfp4.4) reads, collected by a
 | `STRATA_WMMA_BF16` | off |  | STRATA_WMMA_BF16=0 excludes bf16): RDNA3 / RDNA3.5 WMMA dense GEMM, before hipBLASLt; it returns false for shapes it does not take (and off gfx11) and this falls through (from the code comment) | `src/prefill/gemm.cu`, `sycl/src/prefill/gemm.dp.cpp` |
 | `STRATA_WMMA_GEMM` | off |  | 313 (opt-in STRATA_WMMA_GEMM=1; (from the code comment) | `src/prefill/gemm.cu`, `sycl/src/prefill/gemm.dp.cpp` |
 
-### Decode (94)
+### Decode (97)
 
 | Variable | Default | sm_120 table | What it does | Read in |
 | --- | --- | --- | --- | --- |
@@ -684,11 +715,14 @@ Every variable the code of main 61c2451dd (0.2.15-nvfp4.4) reads, collected by a
 | `STRATA_DF_BRANCH` | unset |  | (no description in the code) | `src/core/verify.cpp` |
 | `STRATA_DF_PDL` | off (0) | `1` | programmatic dependent launch in the doorbell graphs too | `src/core/verify.cpp`, `src/kernels/cuda/verify_kernels.cu`, `src/kernels/pdl_parity.cpp` |
 | `STRATA_DF_QB_Q4` | unset |  | the per-token GEMVs / norms / RoPEs / copies of this layer as one launch over the window's rows each - row-wise identical arithmetic (STRATA_DEC_BATCH=0: token by token) STRATA_DF_QB_Q4 (default on since 0.1.45; STRAT... (from the code comment) | `src/core/verify.cpp` |
-| `STRATA_EARLY_READ` | unset | `1` | the next layer's first hyper-connection read starts before the combine and waits on its counter | `src/core/verify.cpp` |
+| `STRATA_EARLY_READ` | unset |  | the next layer's first hyper-connection read starts before the combine and waits on its counter; skipped on a card where its waiting blocks cannot all fit | `src/core/verify.cpp`, `src/kernels/cuda/fused_gr.cu` |
+| `STRATA_EARLY_READ_FIT` | unset |  | =0: skip this check (tests: the failure it prevents) (from the code comment) | `src/kernels/cuda/fused_gr.cu` |
 | `STRATA_FUSE_DECODE` | off |  | The decode GEMV / MoE fusions of #1097. Bitwise the unfused kernels. | `include/strata/kernels/fuse_decode.hpp` |
 | `STRATA_GDN_MID` | unset | `1` | a DeltaNet layer's middle (q/k/v and z projections, gates, recurrence, norm, output projection) in one persistent kernel | `src/core/verify.cpp` |
+| `STRATA_GDN_MID_DEPTH` | 1 |  | the DeltaNet kernel keeps 10.6 KiB in flight a block instead of ~85 KiB (a bounded stream); `=0` the old ring | `src/kernels/cuda/gdn_mid.cu` |
 | `STRATA_GDN_MID_EF` | 1 |  | (no description in the code) | `src/kernels/cuda/gdn_mid.cu` |
 | `STRATA_GDN_MID_HEAD` | 7 | `2` | the DeltaNet kernel only prefetches into L2 before its wait, so its weight burst does not stall that read | `src/kernels/cuda/gdn_mid.cu` |
+| `STRATA_GDN_MID_PIECES` | 4 |  | the DeltaNet kernel keeps 10.6 KiB in flight a block instead of ~85 KiB (a bounded stream); `=0` the old ring | `src/kernels/cuda/gdn_mid.cu` |
 | `STRATA_GDN_MID_SPLIT` | 1 |  | (no description in the code) | `src/kernels/cuda/gdn_mid.cu` |
 | `STRATA_GRAPH_PRIO` | unset | `1` | the attention layer's query rows first, the gate rows later on 48 blocks, stream priorities kept in the graphs | `src/core/verify.cpp` |
 | `STRATA_GR_DOWN_DIRECT` | unset |  | (no description in the code) | `sycl/src/kernels/cuda/fused_gr.dp.cpp` |
@@ -990,7 +1024,7 @@ Every variable the code of main 61c2451dd (0.2.15-nvfp4.4) reads, collected by a
 | `STRATA_WS_FAST` | 0 |  | opt-in (from the code comment) | `src/prefill/moe_ws.cu` |
 | `STRATA_XN_F16` | on |  | the hyper-connection's xn16 straight as the FP16 the tensor-core GEMM reads (its two readers then skip the conversion pass; the same values): STRATA_XN_F16=0 keeps the BF16 image (from the code comment) | `src/prefill/prefill.cpp` |
 
-### K/V, cache and memory (142)
+### K/V, cache and memory (144)
 
 | Variable | Default | sm_120 table | What it does | Read in |
 | --- | --- | --- | --- | --- |
@@ -1072,7 +1106,9 @@ Every variable the code of main 61c2451dd (0.2.15-nvfp4.4) reads, collected by a
 | `STRATA_KV_MAIN_OFF` | off |  | A/B only: STRATA_KV_RING_OFF keeps the drafter fully resident, STRATA_KV_MAIN_OFF the main layers (from the code comment) | `src/core/layer.cpp`, `sycl/src/core/layer.cpp` |
 | `STRATA_KV_POST` | unset |  | (no description in the code) | `src/kernels/cuda/kv_q8.cu` |
 | `STRATA_KV_PREFETCH` | unset | `1` | KV streaming's copies on their own stream, ordered by events | `src/prefill/prefill.cpp`, `sycl/src/prefill/prefill.cpp` |
+| `STRATA_KV_RESIDENT_FAST` | 1 |  | a new dialog's K/V blocks start mapped to the VRAM window in order, so the resolve step ends at once below 32,768 cells | `src/kernels/cuda/kv_stream.cu` |
 | `STRATA_KV_RESIDENT_MIN` | 0 |  | STRATA_KV_RESIDENT_MIN=N overrides (the selection reads at most idx_top_k + idx_block - 1 cells per row, so a window of a few thousand cells holds it; the pool must hold the blocks of every row of a verify window). (from the code comment) | `src/core/layer.cpp` |
+| `STRATA_KV_RESOLVE_ILP` | unset |  | the indexer chain: block scores one (block, query) pair a warp, batched resolve lookups, the window append in parallel and on its own branch beside the query projection | `src/kernels/cuda/kv_stream.cu` |
 | `STRATA_KV_RING_OFF` | off |  | A/B only: STRATA_KV_RING_OFF keeps the drafter fully resident, STRATA_KV_MAIN_OFF the main layers (from the code comment) | `src/core/layer.cpp`, `sycl/src/core/layer.cpp` |
 | `STRATA_KV_ROT` | off |  | int8 K/V without the Hadamard rotation | `src/program/generate.cpp`, `sycl/src/program/generate.cpp` |
 | `STRATA_KV_STAGE_OWN` | off |  | the staging pool of a streamed session: every page of one layer (same sequence in init and bytes_needed) STRATA_KV_STAGE_OWN (A/B only): the staging pool gets its own allocation instead of borrowed expert slots, so a... (from the code comment) | `src/prefill/prefill.cpp`, `sycl/src/prefill/prefill.cpp` |
@@ -1291,7 +1327,7 @@ Every variable the code of main 61c2451dd (0.2.15-nvfp4.4) reads, collected by a
 | `STRATA_SYCL_TLA_ATTN` | off |  | Opt-in (=1), off by default, and compiled only in builds that define the macro of the same name: the TLA attention kernel for batch 32 with a 2,051 cap (sycl/src/prefill/prefill.cpp:3638). Read from the code only; the in (from the settings register) | `sycl/src/prefill/prefill.cpp` |
 | `STRATA_VISION_HIP_ARCHS` | unset |  | (no description in the code) | `tools/hip/build_windows.bat` |
 
-## Debug and test probes (189)
+## Debug and test probes (195)
 
 Not for normal use: dumps, parity checks, emulation, checks, traces and timing lines. Name and where it is read.
 
@@ -1353,6 +1389,7 @@ Not for normal use: dumps, parity checks, emulation, checks, traces and timing l
 | `STRATA_DUMP_WINDOW_TOP2` | `sycl/src/program/generate.cpp` |
 | `STRATA_EMULATE_CC` | `include/strata/core/emulate.hpp` |
 | `STRATA_EMULATE_RAM_GIB` | `src/platform/memory.cpp` |
+| `STRATA_EMULATE_SMS` | `include/strata/core/emulate.hpp` |
 | `STRATA_ESIMD_DBG` | `sycl/src/kernels/cuda/qsa_prompt_attn_esimd.dp.cpp` |
 | `STRATA_FILE_TIER_PROBE` | `src/core/expert_source.cpp` |
 | `STRATA_FORCE_AVX2` | `src/kernels/cpu/expert_layout.cpp` |
@@ -1361,6 +1398,7 @@ Not for normal use: dumps, parity checks, emulation, checks, traces and timing l
 | `STRATA_FOUR_CARD_PROFILE` | `strata_control/amd_four_card.py` |
 | `STRATA_FS_VERIFY` | `src/core/expert_source.cpp` |
 | `STRATA_GDN_CHUNK_PROF` | `src/prefill/gdn_chunk.cu` |
+| `STRATA_GDN_PARITY_REPS` | `src/kernels/gdn_parity.cpp` |
 | `STRATA_GDN_PARITY_TRACE` | `src/kernels/gdn_parity.cpp` |
 | `STRATA_GDN_VERIFY_BENCH` | `sycl/src/kernels/gdn_parity.cpp` |
 | `STRATA_GFX906_ATTN_QUERY_SWIZZLE_TRACE` | `src/kernels/cuda/qsa_decode_attn.cu` |
@@ -1376,6 +1414,7 @@ Not for normal use: dumps, parity checks, emulation, checks, traces and timing l
 | `STRATA_IO_STATS` | `src/program/generate.cpp` |
 | `STRATA_KVA_PARITY` | `include/strata/prefill/kva.hpp` |
 | `STRATA_KVG_CHECK` | `src/program/generate.cpp` |
+| `STRATA_KV_RESOLVE_PROF` | `src/kernels/cuda/kv_stream.cu` |
 | `STRATA_LAUNCH_PROBE` | `src/core/verify.cpp` |
 | `STRATA_LAYER_SPLIT_PROBE` | `src/program/generate.cpp` |
 | `STRATA_LOGITS_DUMP` | `src/core/verify.cpp` |
@@ -1432,6 +1471,7 @@ Not for normal use: dumps, parity checks, emulation, checks, traces and timing l
 | `STRATA_SCORES_THREAD_TRACE` | `src/kernels/cuda/qsa_select.cu` |
 | `STRATA_SELECT_TWO_PASS_CHECK` | `src/kernels/cuda/qsa_select.cu` |
 | `STRATA_SESSION_GOLDEN_PRINT` | `src/core/conversation_file_test.cpp` |
+| `STRATA_SESSION_GROW_CHECK` | `src/core/layer.cpp` |
 | `STRATA_SNAPSHOT_VERIFY` | `src/program/generate.cpp` |
 | `STRATA_SPEC_TRACE` | `src/program/generate.cpp` |
 | `STRATA_SPEC_TRACE_NOPICK` | `src/program/generate.cpp` |
@@ -1483,6 +1523,8 @@ Not for normal use: dumps, parity checks, emulation, checks, traces and timing l
 | `STRATA_VERIFY_STEPPED` | `sycl/src/core/verify.cpp` |
 | `STRATA_VERIFY_TRACE` | `src/core/verify.cpp` |
 | `STRATA_VISION_ARCH_CHECK` | `tools/vision/strata_vision.cpp` |
+| `STRATA_VISION_GPU_LOG` | `src/program/generate.cpp` |
+| `STRATA_VISION_GPU_TEST_FAIL` | `src/program/generate.cpp` |
 | `STRATA_VIT_PROF` | `serve/server.py` |
 | `STRATA_VIT_TEST_FAIL` | `tools/vision/own/own_reader.cpp` |
 | `STRATA_WIN_LOG` | `src/program/generate.cpp` |
