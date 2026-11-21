@@ -6235,6 +6235,68 @@ int main(int argc, char** argv) {
                                (double) caps[(size_t) d] / 1073741824.0);
             capsum += b;
         }
+        // fix/mgpu-pin-limit: under WDDM one limit holds for the pin of ALL the GPUs together, near 64 GiB whatever the
+        // DXGI budget says: two RTX 5060 Ti (256 GB of RAM, a 115 GiB budget on each adapter, both charged every pinned
+        // byte) were refused at 63.7-70.1 GiB in all over seven starts - 63.74 GiB whether one stage or both took it -
+        // and after the refusal no GPU of the process took memory again.  So the split pins at most 62 GiB in all
+        // (STRATA_PIN_TOTAL_GIB, 0 = no such limit).  A refusal below that is written to wddm-pin-limit.txt
+        // (%LOCALAPPDATA%/strata; STRATA_PIN_LIMIT_FILE, 0 = none) for this RAM, these GPUs and this driver, the engine
+        // ends, and the next start pins 2 GiB less than what was pinned then (strata serve starts it again by itself).
+        uint64_t total_cap = 0;
+        std::string total_why, rec_file, rec_key;
+        if (under_wddm()) {
+            constexpr uint64_t GiB = 1ull << 30;
+            const char* te = std::getenv("STRATA_PIN_TOTAL_GIB");
+            const bool te_set = te != nullptr && *te != '\0' && std::atof(te) >= 0.0;
+            total_cap = te_set ? (uint64_t) (std::atof(te) * (double) GiB) : 62 * GiB;
+            total_why = te_set ? std::string("STRATA_PIN_TOTAL_GIB=") + te : "one WDDM limit near 64 GiB for all the GPUs";
+            const char* fe = std::getenv("STRATA_PIN_LIMIT_FILE");
+            if (fe != nullptr && *fe != '\0') {
+                rec_file = std::string(fe) == "0" ? "" : fe;
+            } else {
+#ifdef _WIN32
+                const char* base = std::getenv("LOCALAPPDATA");
+                const std::string dir = base && *base ? std::string(base) + "/strata" : "";
+#else
+                const char* xdg = std::getenv("XDG_CACHE_HOME");
+                const char* home = std::getenv("HOME");
+                const std::string dir = xdg && *xdg ? std::string(xdg) + "/strata"
+                                                    : home && *home ? std::string(home) + "/.cache/strata" : "";
+#endif
+                std::error_code ec;
+                if (!dir.empty()) std::filesystem::create_directories(dir, ec);
+                if (!dir.empty() && !ec) rec_file = dir + "/wddm-pin-limit.txt";
+            }
+            // the key: what the limit depends on - the RAM, the GPUs of the split, the driver
+            int drv = 0;
+            if (cudaDriverGetVersion(&drv) != cudaSuccess) { (void) cudaGetLastError(); drv = 0; }
+            std::string gpus;
+            for (int d = 0; d <= max_dev; ++d) {
+                if (std::find(owner.begin(), owner.end(), d) == owner.end()) continue;
+                cudaDeviceProp p{};
+                if (cudaGetDeviceProperties(&p, d) != cudaSuccess) { (void) cudaGetLastError(); continue; }
+                gpus += (gpus.empty() ? "" : " + ") + std::string(p.name);
+            }
+            char k[64];
+            std::snprintf(k, sizeof k, "RAM %.0f GiB, ", (double) strata::platform::total_physical_memory() / (double) GiB);
+            rec_key = k + gpus + ", CUDA driver " + std::to_string(drv);
+            for (char& ch : rec_key) if (ch == '\t' || ch == '\n' || ch == '\r') ch = ' ';
+            uint64_t was = 0;
+            std::string when;
+            if (strata::core::arena_pin_record_read(rec_file, rec_key, was, when)) {
+                const uint64_t cap2 = was > 2 * GiB ? was - 2 * GiB : 1;   // 1 byte: no slice fits
+                if (total_cap == 0 || cap2 < total_cap) {
+                    total_cap = cap2;
+                    char b[96];
+                    std::snprintf(b, sizeof b, "the driver refused at %.2f GiB", (double) was / GiB);
+                    total_why = b + std::string(when.empty() ? "" : " on " + when) + " (" + rec_file + "), less 2 GiB";
+                }
+            }
+            strata::core::set_arena_pin_total(total_cap, total_why, rec_file, rec_key);
+            char b[64];
+            if (total_cap > 0) std::snprintf(b, sizeof b, "; for all the GPUs together: %.2f GiB (", (double) total_cap / GiB);
+            capsum += total_cap > 0 ? b + total_why + ")" : std::string("; for all the GPUs together: no limit (STRATA_PIN_TOTAL_GIB=0)");
+        }
         strata::core::set_arena_slice_devices(owner, caps, stage_of_l, whys, live);
         std::fprintf(stderr, "strata generate: expert arena: registered per stage, each stage's layers in its own CUDA "
                              "context (not portable; STRATA_ARENA_PIN_PER_STAGE=%s); the cap per GPU: %s\n",

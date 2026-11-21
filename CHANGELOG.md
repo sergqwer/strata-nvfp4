@@ -4,6 +4,21 @@ Every release of Strata NVFP4, the newest first. Each version links to its GitHu
 changed in it; [docs/NVFP4.md](docs/NVFP4.md) has the measurements behind each one. Back to the
 [README](README.md); this page replaces its What's new list.
 
+## 0.2.15-nvfp4.7
+
+Released 2026-11-21: [release page](https://github.com/sergqwer/strata-nvfp4/releases/tag/v0.2.15-nvfp4.7).
+
+- **Two GPUs under Windows: the pin stops below the driver's limit (0.2.15-nvfp4.7).** On the two RTX 5060 Ti,
+  0.2.15-nvfp4.6 still failed. The driver refused at the same 63.74 GiB in all however the cards shared it, and after the
+  refusal it took nothing back, so the start hung. Now a layer split under Windows pins at most 62 GiB of experts on all
+  its GPUs together. If the driver refuses earlier, the engine writes where it happened
+  (`%LOCALAPPDATA%\strata\wddm-pin-limit.txt`) and ends; strata serve starts it again by itself, and it pins 2 GiB less
+  than before. No setting is needed
+  ([details](docs/NVFP4.md#two-gpus-under-windows-one-limit-of-about-64-gib-for-all-the-gpus-2026-11-21-release-0215-nvfp47)).
+- **The same text.** One GPU is unchanged. With two, the change only decides which layers stay pinned.
+- **Update:** close the server. In a clone run `UPDATE.bat`; in the release folder run `update.cmd`. No new model
+  files.
+
 ## 0.2.15-nvfp4.6
 
 Released 2026-11-21: [release page](https://github.com/sergqwer/strata-nvfp4/releases/tag/v0.2.15-nvfp4.6).

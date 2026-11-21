@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <algorithm>
 #include <fstream>
 #include <iterator>
@@ -616,6 +617,8 @@ struct SliceDevices {
     std::vector<int> stage;   ///< per slice: its stage (a new stage starts where it changes); empty: where dev changes
     std::vector<std::string> why;   ///< per device: where its cap came from (the log line)
     std::vector<char> live;         ///< per device: re-read its adapter's budget before each of its stages registers
+    uint64_t total_cap = 0;         ///< fix/mgpu-pin-limit: what all the GPUs pin together (0: no such limit)
+    std::string total_why, record_file, record_key;
 };
 SliceDevices& slice_devices() {
     static SliceDevices v;
@@ -634,6 +637,65 @@ void set_arena_slice_devices(const std::vector<int>& slice_dev, const std::vecto
 }
 
 bool arena_slice_devices_set() { return !slice_devices().dev.empty(); }
+
+void set_arena_pin_total(uint64_t total_cap, const std::string& why, const std::string& record_file,
+                         const std::string& record_key) {
+    slice_devices().total_cap = total_cap;
+    slice_devices().total_why = why;
+    slice_devices().record_file = record_file;
+    slice_devices().record_key = record_key;
+}
+
+// fix/mgpu-pin-limit: the record file, one line per PC (its key: RAM, GPUs, driver): "<key>\t<MiB pinned>\t<date>"
+namespace {
+std::vector<std::string> record_lines(const std::string& file) {
+    std::vector<std::string> v;
+    std::FILE* f = std::fopen(file.c_str(), "rb");
+    if (f == nullptr) return v;
+    std::string cur;
+    for (int c; (c = std::fgetc(f)) != EOF;) {
+        if (c == '\n') { v.push_back(cur); cur.clear(); }
+        else if (c != '\r') cur += (char) c;
+    }
+    if (!cur.empty()) v.push_back(cur);
+    std::fclose(f);
+    return v;
+}
+}  // namespace
+
+bool arena_pin_record_read(const std::string& file, const std::string& key, uint64_t& pinned, std::string& when) {
+    if (file.empty() || key.empty()) return false;
+    for (const std::string& l : record_lines(file)) {
+        const size_t t1 = l.find('\t');
+        if (t1 == std::string::npos || l.compare(0, t1, key) != 0 || t1 != key.size()) continue;
+        const size_t t2 = l.find('\t', t1 + 1);
+        const double mib = std::atof(l.substr(t1 + 1, t2 == std::string::npos ? std::string::npos : t2 - t1 - 1).c_str());
+        if (mib <= 0.0) return false;
+        pinned = (uint64_t) (mib * 1048576.0);
+        when = t2 == std::string::npos ? std::string() : l.substr(t2 + 1);
+        return true;
+    }
+    return false;
+}
+
+bool arena_pin_record_write(const std::string& file, const std::string& key, uint64_t pinned) {
+    if (file.empty() || key.empty()) return false;
+    std::vector<std::string> keep;
+    for (const std::string& l : record_lines(file))
+        if (!(l.size() > key.size() && l.compare(0, key.size(), key) == 0 && l[key.size()] == '\t') && !l.empty())
+            keep.push_back(l);
+    char when[32] = "";
+    const std::time_t now = std::time(nullptr);
+    if (const std::tm* tm = std::localtime(&now)) std::strftime(when, sizeof when, "%Y-%m-%d %H:%M", tm);
+    char line[64];
+    std::snprintf(line, sizeof line, "\t%.0f\t", (double) pinned / 1048576.0);
+    keep.push_back(key + line + when);
+    std::FILE* f = std::fopen(file.c_str(), "wb");
+    if (f == nullptr) return false;
+    bool ok = true;
+    for (const std::string& l : keep) ok = ok && std::fputs((l + "\n").c_str(), f) >= 0;
+    return std::fclose(f) == 0 && ok;
+}
 
 int arena_pin_per_stage_env() {
     const char* e = std::getenv("STRATA_ARENA_PIN_PER_STAGE");
@@ -893,6 +955,10 @@ void lock_unregistered(PinnedArena& a, const std::vector<uint64_t>& bounds, uint
 // refusal ends the pin on EVERY GPU, the margin (STRATA_PIN_MARGIN_GIB, 4 GiB) is handed back from the stages with the
 // largest share, and more slices go back one at a time until every GPU reads its free memory and a 256 MiB pinned probe
 // is granted.  A GPU's cap (its adapter's budget, now re-read before each slice) holds as before.
+// fix/mgpu-pin-limit (0.2.15-nvfp4.7): on the real 5060 Ti pair the turns refused at the same 63.74 GiB in all, and after
+// the refusal nothing could be handed back.  The split now pins at most 62 GiB in all (sd.total_cap), and with a record
+// file the first refusal (or a GPU that does not answer) is written down and ends the process (end_here): the next
+// start pins 2 GiB less than that.  Without a record file (not WDDM) the hand-back above stays.
 void register_per_stage(PinnedArena& a, const std::vector<uint64_t>& bounds, uint64_t bytes) {
     constexpr double GiB = 1073741824.0;
     constexpr size_t kProbe = 256ull << 20;
@@ -940,6 +1006,7 @@ void register_per_stage(PinnedArena& a, const std::vector<uint64_t>& bounds, uin
     auto share = [](const Stage& s) { return s.want ? (double) s.got / (double) s.want : 1.0; };
     std::string refused;   // the driver's refusal: it ends the pin on every GPU
     int refused_dev = -1;
+    uint64_t total_got = 0;   // what all the stages pinned (sd.total_cap)
     const auto t0 = std::chrono::steady_clock::now();
     for (;;) {
         Stage* st = nullptr;
@@ -965,6 +1032,12 @@ void register_per_stage(PinnedArena& a, const std::vector<uint64_t>& bounds, uin
             char b[128];
             std::snprintf(b, sizeof b, "the cap: %.1f GiB left for this stage on CUDA%d", (double) room / GiB, d);
             st->stop = b;
+            continue;
+        }
+        if (sd.total_cap > 0 && total_got + len > sd.total_cap) {   // fix/mgpu-pin-limit: all the GPUs together
+            char b[96];
+            std::snprintf(b, sizeof b, "the limit for all the GPUs together: %.2f GiB (", (double) sd.total_cap / GiB);
+            st->stop = b + sd.total_why + ")";
             continue;
         }
         if (d != cur) {
@@ -997,9 +1070,38 @@ void register_per_stage(PinnedArena& a, const std::vector<uint64_t>& bounds, uin
         a.reg_alias.push_back(dp);
         st->got += len;
         dev_got[(size_t) d] += len;
+        total_got += len;
         ++st->next;
         ++a.registered_slices;
     }
+    // fix/mgpu-pin-limit: with a record file the driver's refusal ends the process.  Two RTX 5060 Ti: after it nothing
+    // could be handed back (cudaHostUnregister failed too) and no GPU read its free memory, so the start hung.  What
+    // was pinned is written down; the next start pins 2 GiB less (strata serve starts it again by itself).
+    auto end_here = [&](const std::string& what) {
+        uint64_t total = 0;
+        std::string shares;
+        for (const Stage& s : stages) {
+            char b[128];
+            std::snprintf(b, sizeof b, "%sstage %d %d of %d slices (%.0f%%)", shares.empty() ? "" : ", ", s.number,
+                          (int) (s.next - s.s0), (int) (s.s1 - s.s0), 100.0 * share(s));
+            shares += b;
+            total += s.got;
+        }
+        const bool saved = arena_pin_record_write(sd.record_file, sd.record_key, total);
+        const uint64_t next = total > (2ull << 30) ? total - (2ull << 30) : 0;
+        char then[96] = "";
+        if (saved) std::snprintf(then, sizeof then, ": the next start pins at most %.2f GiB in all", (double) next / GiB);
+        std::fprintf(stderr, "strata generate: expert arena: %s with %.2f GiB pinned on all the GPUs (%s); %s %s%s; the "
+                             "engine ends here: after such a refusal the GPUs of this process take no more memory - start "
+                             "it again (strata serve does so by itself) (fix/mgpu-pin-limit)\n",
+                     what.c_str(), (double) total / GiB, shares.c_str(),
+                     saved ? "written to" : "it could NOT be written to", sd.record_file.c_str(), then);
+        std::fflush(stderr);
+        std::fflush(stdout);
+        std::_Exit(kArenaPinRefusedExit);
+    };
+    if (!refused.empty() && !sd.record_file.empty())
+        end_here("the driver refused a slice on CUDA" + std::to_string(refused_dev) + " (" + refused + ")");
     // the newest slice of the stage with the largest share goes back, in the context that registered it
     auto hand_back = [&]() -> uint64_t {
         Stage* st = nullptr;
@@ -1068,6 +1170,7 @@ void register_per_stage(PinnedArena& a, const std::vector<uint64_t>& bounds, uin
         const uint64_t margin = shared_pin_margin();
         for (uint64_t u = 0; back < margin && (u = hand_back()) != 0; ++n_back) back += u;
         for (uint64_t u = 0; !(fine = answers(bad)) && (u = hand_back()) != 0; ++n_back) back += u;
+        if (!fine && !sd.record_file.empty()) end_here("a GPU does not answer after the pin (" + bad + ")");
     }
     cudaSetDevice(prev);
     for (const Stage& s : stages) {

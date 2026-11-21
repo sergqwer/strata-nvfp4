@@ -45,6 +45,18 @@ void set_arena_slice_devices(const std::vector<int>& slice_dev, const std::vecto
                              const std::vector<std::string>& per_dev_why = {},
                              const std::vector<char>& per_dev_live = {});
 bool arena_slice_devices_set();
+/// fix/mgpu-pin-limit: the per-stage pin's limit for ALL the GPUs together (bytes, 0 = none), beside each GPU's own cap,
+/// and where a refusal is remembered (`record_file` + `record_key`; empty: nowhere).  With a record file the driver's
+/// first refusal - or a GPU that no longer answers after the pin - writes what was pinned then and ends the process
+/// with kArenaPinRefusedExit: under WDDM the drivers of that process take no more memory after it, so the next start
+/// (strata serve starts it again by itself) pins 2 GiB less than that.
+void set_arena_pin_total(uint64_t total_cap, const std::string& why, const std::string& record_file,
+                         const std::string& record_key);
+constexpr int kArenaPinRefusedExit = 75;
+/// What the record file says was pinned when the driver refused, for `key` (false: nothing for it); `when` its date.
+bool arena_pin_record_read(const std::string& file, const std::string& key, uint64_t& pinned, std::string& when);
+/// Writes `pinned` for `key` (the key's earlier line goes); false when the file cannot be written.
+bool arena_pin_record_write(const std::string& file, const std::string& key, uint64_t pinned);
 /// STRATA_ARENA_PIN_PER_STAGE: 1 forces the per-stage registration on a layer split (any OS, also --split-device 0),
 /// 0 keeps the portable one; -1 unset (the engine decides: on under WDDM on a multi-GPU layer split).
 int arena_pin_per_stage_env();

@@ -771,6 +771,25 @@ def transient_start_failure(log: str | None, offset: int, elapsed_s: float, rc: 
     return not engine_lines and rc != 1 and not engine_crashed(rc)
 
 
+# fix/mgpu-pin-limit (engine 0.2.15-nvfp4.7): a layer split under Windows whose driver refused the experts' pinned memory
+# below the engine's limit writes where it happened (wddm-pin-limit.txt) and exits with this code: that process's GPUs
+# take no more memory.  The next start pins 2 GiB less, so it is started again by itself (at most PIN_LIMIT_RETRIES).
+PIN_LIMIT_EXIT = 75
+PIN_LIMIT_MARK = "(fix/mgpu-pin-limit)"
+PIN_LIMIT_RETRIES = 3
+
+
+def pin_limit_restart(log: str | None, offset: int, rc: int | None) -> str | None:
+    """The engine's own line when this start ended because the driver refused pinned memory and the limit was written
+    for the next start, else None (also when it could not be written: a second start would only repeat it)."""
+    if rc != PIN_LIMIT_EXIT:
+        return None
+    for line in start_log_text(log, offset).splitlines():
+        if PIN_LIMIT_MARK in line and "the next start pins at most" in line:
+            return line.strip()
+    return None
+
+
 def echo_requests(log_path: str, offset: int) -> None:
     """STRATA_REQUEST_LINES=1: one stdout line per finished request, from the engine's own summary in its log.
 
@@ -1142,7 +1161,7 @@ class StrataEngine:
 
     def __init__(self, exe: str, args: list[str], cwd: str | None = None, log: str | None = None,
                  env: dict | None = None, lazy: bool = False, cpus: list[int] | None = None, _attempt: int = 0,
-                 retry_args: list[str] | None = None, retry_vram_args: list[str] | None = None):
+                 retry_args: list[str] | None = None, retry_vram_args: list[str] | None = None, _pin_attempt: int = 0):
         # retry_args: the arguments to start again with, once, when this start ends before the engine is ready (an Auto start that picked DFlash2: mtp_retry_args)
         # retry_vram_args: the same start with no drafter (nodraft_retry_args), used instead when the engine ended because a card ran out of memory: swapping DFlash2 for
         # the MTP takes MORE memory from a card that is already short, so that direction is never taken then
@@ -1263,6 +1282,22 @@ class StrataEngine:
                     self.log.close()
             except (OSError, subprocess.TimeoutExpired):
                 pass
+            pin_line = None if timed_out or _pin_attempt >= PIN_LIMIT_RETRIES else \
+                pin_limit_restart(log, log_start, proc.returncode)
+            if pin_line:                                # before the out-of-memory retry below: the line says "out of memory" too
+                at = pin_line.split("the next start pins at most", 1)[1].split(";", 1)[0].strip()
+                print(f"[strata] Windows refused pinned memory for the experts on the GPUs: starting the engine again, "
+                      f"now with at most {at} (try {_pin_attempt + 2} of {PIN_LIMIT_RETRIES + 1})", flush=True)
+                try:
+                    with open(log, "a", encoding="utf-8") as handle:
+                        handle.write(f"[strata] {time.strftime('%Y-%m-%d %H:%M:%S')} the engine ended because the driver refused "
+                                     f"pinned memory (exit code {proc.returncode}); starting it again with at most {at}\n")
+                except (OSError, TypeError):
+                    pass
+                time.sleep(2.0)                         # the old process's GPU memory goes back first
+                StrataEngine.__init__(self, exe, args, cwd, log, env, lazy, cpus, _attempt, retry_args, retry_vram_args,
+                                      _pin_attempt + 1)
+                return
             if not timed_out and _attempt < START_RETRIES and \
                     transient_start_failure(log, log_start, time.monotonic() - spawned_at, proc.returncode):
                 wait_s = 2.0 * (2 ** _attempt)              # 2, 4, 8 s: the previous process's GPU queues go away

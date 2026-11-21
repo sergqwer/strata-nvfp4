@@ -400,6 +400,36 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### Two GPUs under Windows: one limit of about 64 GiB for all the GPUs (2026-11-21, release 0.2.15-nvfp4.7)
+
+0.2.15-nvfp4.6 (below) did not help the two RTX 5060 Ti. Its first start on that PC, with the stages taking turns, was
+refused at 34.17 + 29.57 GiB: 63.74 GiB in all, the same total as 0.2.15-nvfp4.5's 55.29 + 8.45. Over seven starts the
+refusal came at 63.7-70.1 GiB in all, while DXGI reported 44 GiB of room just before it. After the refusal nothing could
+be handed back ("0.00 GiB (0 slices) handed back"), CUDA0 still could not read its free memory, and the start hung until
+serve gave up after 900 s. The hand-back had only met a simulated refusal on the RTX 5090 (`STRATA_TEST_PIN_BUDGET_MIB`),
+never a real driver after its own refusal.
+
+So the pin must stop before the refusal. Now (`register_per_stage` in `src/core/pinned.cu`, the caps in
+`src/program/generate.cpp`):
+- Under WDDM a layer split pins at most **62 GiB in all**, on all its GPUs together (`STRATA_PIN_TOTAL_GIB`, 0 = no such
+  limit). Each GPU's own cap (its adapter's shared budget) still holds, and the stages still take turns.
+- If the driver refuses below that, or a GPU does not answer after the pin, the engine writes what was pinned then to
+  `%LOCALAPPDATA%\strata\wddm-pin-limit.txt` (`STRATA_PIN_LIMIT_FILE`), one line per RAM size, GPUs and CUDA driver, and
+  ends at once with exit code 75 instead of going on with GPUs that take no memory.
+- strata serve sees that exit and starts the engine again by itself, at most three times. The next start pins 2 GiB less
+  than what the refused start had.
+
+Checked on the RTX 5090 with one card and two stages, as below:
+
+| Run | Pinned (stage 1 / stage 2) | Start |
+|---|---|---|
+| Driver's refusal simulated at 40 GiB | first start: refused at 38.23 GiB (62% / 58%), written down, exit 75 within 5 s; serve started it again; second start: 35.60 GiB (14 / 13 slices) under the 36.23 GiB limit | ready, 32K prompt 6,962 tok/s |
+| `STRATA_PIN_TOTAL_GIB=20` | 10.55 / 9.23 GiB (8 / 7 slices), nothing written | ready in 10 s, 32K prompt 5,982 tok/s |
+| Defaults (62 GiB in all; this card's own cap 95.73 GiB) | 31.64 / 30.32 GiB (24 / 23 slices), nothing written | ready in 11 s, 32K prompt 9,206 tok/s |
+
+On the two RTX 5060 Ti the slices are about 2.1 GiB. 62 GiB in all is 29 of them, one slice below the 63.74 GiB that
+every one of the seven starts there was granted.
+
 ### Two GPUs under Windows: the pinned experts find the driver's limit (2026-11-21, release 0.2.15-nvfp4.6)
 
 A report from two RTX 5060 Ti (16 GB each) on Windows with 256 GB of RAM and the Unsloth UD-Q6_K_XL model (an expert
