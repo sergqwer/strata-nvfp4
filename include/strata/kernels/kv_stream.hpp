@@ -75,12 +75,23 @@ struct KvStreamMap {
     int64_t n_slots = 0;
 };
 
-inline constexpr int kKvCtlInts = 16;   ///< [0] epoch [1] hand [2] misses [3] overflow; u64 at [4] misses, [6] lookups, [8] calls
+inline constexpr int kKvCtlInts = 34;   ///< [0] epoch [1] hand [2] misses [3] overflow; u64 at [4] misses, [6] lookups, [8] calls; [10..30] r5 F5 STRATA_KV_RESOLVE_PROF; [31] resident prefix; u64 at [32] fast calls
+inline constexpr int kKvCtlResident = 31;   ///< r5 F5: blocks [0, ctl[31]) are resident (STRATA_KV_RESIDENT_FAST)
 /// Bytes of the map's arrays besides the page table (which the state already has): 5 per-slot ints + ctl.
 inline uint64_t kv_stream_map_bytes(int64_t n_slots) { return (uint64_t) n_slots * 4 * 5 + kKvCtlInts * 4; }
 
 /// Every block evicted: page table all -1, slots free, counters zero.
 void kv_stream_reset(const KvStreamMap& m, void* stream);
+
+/// r5 F5 (STRATA_KV_RESIDENT_FAST, default on): the map of a sequence whose slots are current for its first
+/// `blocks` blocks - a NEW sequence (nothing written yet: pass n_slots), or one whose slots were just refilled from
+/// the host copy - with blocks [0, w) resident in slots 0..w-1, w = min(blocks, n_slots), the rest as kv_stream_reset.
+/// The resolve then ends at once while a window's selection stays below w.  Returns w (0 = the switch is off: a plain
+/// kv_stream_reset was done).
+int64_t kv_stream_reset_resident(const KvStreamMap& m, int64_t blocks, void* stream);
+bool kv_stream_resident_fast();
+/// Test hook: 1 / 0 forces STRATA_KV_RESIDENT_FAST, -1 = the environment.
+void kv_stream_set_resident_fast(int on);
 
 /// Make every block named by the selections of `n_q` queries resident (ids [n_q][cap], width from
 /// steps[q * kStepCount + kStepWidth]). Capturable. `n_slots` must hold the distinct blocks of one call
@@ -113,7 +124,13 @@ void kv_stream_set_resolve_ilp(int on);
 struct KvStreamCounters {
     uint64_t misses = 0, lookups = 0, calls = 0;
     bool overflow = false;
+    // r5 F5 STRATA_KV_RESOLVE_PROF=1 only (else 0): resolve phases and the copy kernel, ns summed over calls
+    uint64_t lookup_ns = 0, sweep_ns = 0, table_ns = 0, sweep_steps = 0, miss_calls = 0, copy_ns = 0, gap_ns = 0, fresh = 0;
+    uint64_t fast_calls = 0;   ///< r5 F5: calls that ended on the resident-prefix fast path (always counted)
+    int64_t resident = 0;      ///< r5 F5: the resident prefix in blocks (ctl[kKvCtlResident])
 };
+/// Test hook (r5 F5, qsa_front_bench): evict the `n` blocks listed in device memory (their slots become free).
+void kv_stream_test_evict(const KvStreamMap& m, const int32_t* blocks, int n, void* stream);
 /// Synchronous read of the counters (debug and the end-of-request summary).
 KvStreamCounters kv_stream_counters(const KvStreamMap& m);
 

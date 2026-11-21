@@ -2,7 +2,7 @@
 // (block_scores_dx_kernel) and qsa_block_topk_long (the multi-CTA top-k) against qsa_block_scores and qsa_block_topk,
 // bit for bit (GPU, synthetic data, no model).
 //
-// Needs the CUDA build with STRATA_EXPERIMENTAL_SM60 (elsewhere the _long calls forward to the plain ones and there is
+// Needs a CUDA build (since r5 F2 every one; on HIP the _long calls forward to the plain ones and there is
 // nothing to compare; the test skips with 77) and STRATA_SCORES_DX=1 STRATA_TOPK_MULTI=1 in the environment, which make
 // the new kernels run on any card (on compute capability 6.x they are the default).  STRATA_TOPK_MULTI_N=<n> fixes the
 // CTAs per query (the ctest "n3" case), otherwise one per 2,048 blocks of capacity.
@@ -175,7 +175,7 @@ int main(int argc, char** argv) {
     }
     ck(cudaSetDevice(device), "cudaSetDevice");
     if (k::qsa_topk_multi_scratch_ints(1) <= 0) {
-        std::puts("SKIP: this build has no multi-CTA select (CUDA with STRATA_EXPERIMENTAL_SM60)");
+        std::puts("SKIP: this build has no multi-CTA select (a CUDA build)");
         return 77;
     }
     const char* dx = std::getenv("STRATA_SCORES_DX");
@@ -193,7 +193,9 @@ int main(int argc, char** argv) {
     const k::QsaShapes s = k::qsa_real_shapes();
     std::mt19937 rng(20261026u);
     for (int nq : {1, 2, 3, 5, 8})
-        for (int64_t nb : {(int64_t) 8, (int64_t) 31, (int64_t) 32, (int64_t) 33, (int64_t) 1000, (int64_t) 70001, (int64_t) 131072})
+        for (int64_t nb : {(int64_t) 8, (int64_t) 31, (int64_t) 32, (int64_t) 33, (int64_t) 1000, (int64_t) 70001, (int64_t) 131072,
+                           // r5 F2: the serve sweep's contexts 2K / 32K / 131K / 262K / 370K (blocks of 4 cells)
+                           (int64_t) 500, (int64_t) 8000, (int64_t) 32768, (int64_t) 65536, (int64_t) 92500})
             check_scores(s, nq, nb, rng);
 
     bool multi_ran = false;

@@ -193,12 +193,14 @@ inline bool g_mmvq_il() { static const bool on = [] { const char* v = std::geten
 // both compute capability 6.x by default, the same ids and score bits).  Each costs ~6 more kernels a call, which only
 // a longer context pays back (4x GP100: 0.5 ms a window more at 1K, even at 30K, 4.0-4.7 ms less at 300K), so the
 // verifier keeps a second set of window graphs for it.  Off: no scratch, no second graphs.
+// r5 F2: built into every CUDA build; the sm_120 table (nv_defaults.cpp) turns it on with STRATA_SCORES_DX=1 (the DX
+// scorer only: the multi-CTA top-k stays off there) from STRATA_SELECT_LONG_AT=24576 cells; STRATA_SELECT_LONG=0: the old path.
 inline bool select_long_on() {
     static const bool on = [] {
         const char* v = std::getenv("STRATA_SELECT_LONG");
         if (v == nullptr || v[0] != '1') return false;
         if (strata::kernels::qsa_topk_multi_scratch_ints(1) <= 0) {   // a build without the multi-CTA kernels: no second graphs
-            std::fprintf(stderr, "strata verify: STRATA_SELECT_LONG=1 needs the CUDA build with STRATA_EXPERIMENTAL_SM60; "
+            std::fprintf(stderr, "strata verify: STRATA_SELECT_LONG=1 needs a CUDA build; "
                                  "ignored\n");
             return false;
         }
@@ -3735,6 +3737,7 @@ bool Verifier::run(int T, const int32_t* tokens, int64_t pos0, PoolMultiFn pool,
     if (!pre) refresh_ar();
     // STRATA_SELECT_LONG: the select kernels this window's context pays off with (the same on every stage)
     sel_long_ = select_long_on() && pos0 + T >= select_long_at() ? 1 : 0;
+    ++sel_windows_[sel_long_];   // r5 F2: the dispatch proof (select_long_windows)
     if (!capture(T, err) || !capture_commit(err)) return false;
     const bool chain = chain_overlap();
     if (chain) {   // capture the next stage's window here, on this thread, so the helper only stages and launches
@@ -5943,6 +5946,13 @@ void Verifier::diag_pipelined(std::FILE* f, const char* name) const {
                  rd(h_flagB_), ev(ev_done_), ev(ev_commit_), (int) commit_live_);
 }
 
+void Verifier::select_long_windows(uint64_t& plain, uint64_t& lng, int64_t& at, int64_t& dx) const {
+    plain = sel_windows_[0];
+    lng = sel_windows_[1];
+    at = select_long_on() ? select_long_at() : -1;
+    dx = strata::kernels::qsa_scores_dx_launches();
+}
+
 bool Verifier::capture_all(std::string& err) {
     const OnDevice on_device(device_);
     if (g_ == nullptr) { err = "verify: capture_all before init"; return false; }
@@ -6016,6 +6026,7 @@ bool Verifier::pl_launch(int T, const int32_t* tokens, int64_t pos0, std::string
     SessionState& ss = *ss_;
     if (pos0 + T > ss.qsa_states[ss.qsa_primary()].max_cells) { err = "verify: the window runs past the context"; return false; }
     const int sl = select_long_on() && pos0 + T >= select_long_at() ? 1 : 0;   // the variant this window's context pays off with
+    ++sel_windows_[sl];   // r5 F2
     if (exec_[sl][T] == nullptr || commit_exec_ == nullptr || ev_done_ == nullptr || pl_ple_rows_.empty()) {
         err = "verify: pipelined window not prepared (capture_all)";
         return false;

@@ -6,6 +6,11 @@
 //   time:   graphs of 12 layers (own buffers each, L2 scrubbed before each replay), us per layer: each kernel alone and
 //           the chain wik -> append -> wiq -> norm+rope -> scores -> top-k -> resolve -> copy, old and new kernels,
 //           and with the append forked beside the query (FORK).
+//   dx:     r5 F2: the long-context select's DX block scorer (qsa_block_scores_long, STRATA_SCORES_DX=1) against the
+//           default scores kernel on the same window, T 1..8 at four cell offsets: every score bitwise and the top-k's
+//           ids identical (the cluster top-k on both rows).  QFB_MAX_CELLS: the capacity (the engine's 524288).
+//   f5:     r5 F5 resolve with the resident-prefix fast path vs F2 (all runs of every resident block, 5 map states);
+//           f5t: the resolve's timing, all hits, with M blocks evicted inside the graph, and on the fast path.
 #include "strata/core/geometry.hpp"
 #include "strata/kernels/bf16_gemv.hpp"
 #include "strata/kernels/kv_stream.hpp"
@@ -151,6 +156,9 @@ void k_app(const Layer& y, int T, cudaStream_t s) {
 void k_sc(const Layer& y, int T, cudaStream_t s) {
     k::qsa_block_scores(y.pooled, y.dead, y.qidx, g_steps, T, g_max_blocks, S, y.scores, s);
 }
+void k_scx(const Layer& y, int T, cudaStream_t s) {   // r5 F2: the long-context select's scorer (DX with STRATA_SCORES_DX=1)
+    k::qsa_block_scores_long(y.pooled, y.dead, y.qidx, g_steps, T, g_max_blocks, S, y.scores, s, -1);
+}
 void k_tk(const Layer& y, int T, cudaStream_t s) { k::qsa_block_topk(y.scores, g_steps, T, g_max_blocks, g_cap, S, y.sel, s); }
 void k_res(const Layer& y, int T, cudaStream_t s) {
     k::kv_stream_resolve(y.m, y.slots, g_host, k::kKvInt8, y.sel, g_steps, T, g_cap, S, s);
@@ -285,6 +293,138 @@ int parity(std::vector<Layer>& Ls, int64_t ctx) {
     return bad + rbad;
 }
 
+// r5 F2: DX scores + top-k against the default kernels on a prompt of ctx cells
+int dx_parity(std::vector<Layer>& Ls, int64_t ctx) {
+    std::mt19937 rng(17);
+    Layer& y = Ls[0];
+    prefill(y, ctx + TMAX, rng);
+    const long long dx0 = (long long) k::qsa_scores_dx_launches();
+    int bad = 0, n = 0;
+    for (int T = 1; T <= TMAX; ++T)
+        for (int off = 0; off < 4; ++off) {
+            set_steps(ctx - (ctx % 4) + off, T);
+            new_raw(y, rng);
+            k_wiq(y, T, g_s); k_nr(y, T, g_s);
+            std::vector<float> sc[2];
+            std::vector<int32_t> id[2];
+            for (int v = 0; v < 2; ++v) {
+                ck(cudaMemsetAsync(y.scores, 0x7f, TMAX * g_max_blocks * 4, g_s), "m");
+                ck(cudaMemsetAsync(y.sel, 0xff, TMAX * g_cap * 4, g_s), "m");
+                if (v == 0) k_sc(y, T, g_s); else k_scx(y, T, g_s);
+                k_tk(y, T, g_s);
+                ck(cudaStreamSynchronize(g_s), "dx");
+                sc[v] = down(y.scores, TMAX * g_max_blocks);
+                id[v] = down(y.sel, TMAX * g_cap);
+            }
+            const bool ok = std::memcmp(sc[0].data(), sc[1].data(), sc[0].size() * 4) == 0 && id[0] == id[1];
+            ++n; bad += !ok;
+            if (!ok) std::printf("*** dx T %d off %d differs\n", T, off);
+        }
+    const long long dx = (long long) k::qsa_scores_dx_launches() - dx0;
+    std::printf("dx parity ctx %lld: %d / %d cases bitwise (scores + ids), DX launches %lld\n", (long long) ctx, n - bad, n, dx);
+    if (dx < n) { std::printf("*** the DX kernel did not run for every case (set STRATA_SCORES_DX=1)\n"); ++bad; }
+    return bad;
+}
+
+// ---- r5 F5: the resolve with the resident-prefix fast path (STRATA_KV_RESIDENT_FAST) against F2's resolve from the
+// same map state; kinds 0 all misses, 1 all hits, 2 a mix, 3 clock evictions (the slots filled by earlier random
+// windows first), 4 a new sequence's resident map.  Every run of every resident block checked against the host.
+bool slots_ok_all(const Layer& y, const MapSnap& z) {
+    const int64_t rows = S.n_head_kv * S.page_size, codes = rows * S.head_dim, scales = rows * (S.head_dim / 64);
+    auto kq = down((const int8_t*) y.slots.k_q, g_n_slots * codes);
+    auto vq = down((const int8_t*) y.slots.v_q, g_n_slots * codes);
+    auto ks = down((const uint16_t*) y.slots.k_scale, g_n_slots * scales);
+    auto vs = down((const uint16_t*) y.slots.v_scale, g_n_slots * scales);
+    for (int64_t b = 0; b < g_n_blocks; ++b) {
+        const int sl = z.pt[b];
+        if (sl < -1) return false;
+        if (sl < 0) continue;
+        if (std::memcmp(kq.data() + sl * codes, g_host.k_q + b * codes, codes) != 0 ||
+            std::memcmp(vq.data() + sl * codes, g_host.v_q + b * codes, codes) != 0 ||
+            std::memcmp(ks.data() + sl * scales, g_host.k_scale + b * scales, scales * 2) != 0 ||
+            std::memcmp(vs.data() + sl * scales, g_host.v_scale + b * scales, scales * 2) != 0)
+            return false;
+    }
+    return true;
+}
+void select_at(Layer& y, int64_t p0, int T) {
+    set_steps(p0, T);
+    k_wiq(y, T, g_s); k_nr(y, T, g_s); k_sc(y, T, g_s); k_tk(y, T, g_s);
+}
+int f5_parity(std::vector<Layer>& Ls, int64_t ctx) {
+    std::mt19937 rng(23);
+    Layer& y = Ls[0];
+    prefill(y, ctx + TMAX, rng);
+    struct Arm { int fast; const char* name; };
+    const Arm arms[] = {{1, "fast"}};
+    int bad = 0, n = 0;
+    long long misses_seen = 0, evict_cases = 0, fast_cases = 0;
+    // kind 4: a new sequence's resident map (kv_stream_reset_resident) with the slots filled from the host copy, as
+    // the appends would have written them; below the window the fast path must leave the same table and data
+    for (int T = 1; T <= TMAX; ++T)
+        for (int kind = 0; kind < 5; ++kind) {
+            k::kv_stream_set_resident_fast(0);
+            k::kv_stream_reset(y.m, g_s);
+            if (kind == 4) {
+                k::kv_stream_set_resident_fast(1);
+                const int64_t w = k::kv_stream_reset_resident(y.m, g_n_slots, g_s);
+                k::kv_stream_set_resident_fast(0);
+                k::kv_ring_restore(y.slots, g_host, k::kKvInt8, 0, w, g_n_slots, S, g_s);
+            }
+            if (kind == 1) { select_at(y, ctx, T); k_res(y, T, g_s); }
+            if (kind == 2) { select_at(y, ctx / 3, 1); k_res(y, 1, g_s); }
+            if (kind == 3)
+                for (int r = 0; r < 24; ++r) {
+                    const int64_t p = 64 + (int64_t) (rng() % (uint32_t) (ctx - 64));
+                    select_at(y, p, TMAX);
+                    k_res(y, TMAX, g_s);
+                }
+            select_at(y, ctx, T);
+            ck(cudaStreamSynchronize(g_s), "pre");
+            const MapSnap z = snap_map(y);
+            k_res(y, T, g_s);
+            ck(cudaStreamSynchronize(g_s), "ref");
+            const MapSnap a = snap_map(y);
+            const bool aok = slots_ok_all(y, a);
+            misses_seen += a.ctl[2];
+            int evicted = 0;
+            for (int64_t i = 0; i < g_n_slots; ++i) evicted += z.sb[i] >= 0 && a.sb[i] != z.sb[i];
+            evict_cases += evicted > 0;
+            for (const Arm& m : arms) {
+                restore_map(y, z);
+                k::kv_stream_set_resident_fast(m.fast);
+                const auto f0 = k::kv_stream_counters(y.m).fast_calls;
+                k_res(y, T, g_s);
+                ck(cudaStreamSynchronize(g_s), "arm");
+                const bool took_fast = k::kv_stream_counters(y.m).fast_calls != f0;
+                const MapSnap b = snap_map(y);
+                const bool bok = slots_ok_all(y, b);
+                bool ok = aok && bok;
+                if (took_fast)   // only the stamps, reference bits and lookup counter differ: nothing was looked up
+                    ok = ok && a.ctl[2] == 0 && b.ctl[2] == 0 && a.pt == b.pt && a.sb == b.sb && kind == 4;
+                else {
+                    ok = ok && std::equal(a.ctl.begin(), a.ctl.begin() + 10, b.ctl.begin()) && a.ss == b.ss && a.sr == b.sr;
+                    if (kind == 1) ok = ok && a.pt == b.pt && a.sb == b.sb;
+                    else
+                        for (int64_t i = 0; i < g_n_blocks && ok; ++i) ok = (a.pt[i] >= 0) == (b.pt[i] >= 0);
+                    // the resident prefix only shrinks, and only to a block this call evicted
+                    if (m.fast && kind == 4) ok = ok && b.ctl[k::kKvCtlResident] <= z.ctl[k::kKvCtlResident];
+                }
+                if (m.fast && kind == 4 && (int64_t) 4 * g_n_slots > ctx + T && !took_fast) ok = false;   // must have been fast
+                fast_cases += took_fast;
+                ++n; bad += !ok;
+                if (!ok) std::printf("*** f5 %s T %d kind %d differs (ref data %d arm data %d fast %d)\n", m.name, T, kind, aok,
+                                     bok, (int) took_fast);
+            }
+            if (T == 1 || T == TMAX)
+                std::printf("  f5 T %d kind %d: misses %d, slots re-assigned %d\n", T, kind, a.ctl[2], evicted);
+        }
+    k::kv_stream_set_resident_fast(-1);
+    std::printf("f5 parity ctx %lld: %d / %d cases (misses %lld, %lld cases with evictions, %lld on the fast path)\n",
+                (long long) ctx, n - bad, n, misses_seen, evict_cases, fast_cases);
+    return bad;
+}
+
 // ---- timing: a graph of the 12 layers, the L2 scrubbed before each replay; us per layer (median of reps)
 uint8_t* g_scrub = nullptr;
 const size_t kScrub = 256u << 20;
@@ -332,7 +472,7 @@ void timing(std::vector<Layer>& Ls, int64_t ctx, int reps) {
     const Row rows[] = {
         {"wik gemv", k_wik, -1, -1, -1}, {"wiq gemv", k_wiq, -1, -1, -1}, {"norm+rope", k_nr, -1, -1, -1},
         {"append old", k_app, 0, -1, -1}, {"append new", k_app, 1, -1, -1}, {"scores old", k_sc, -1, -1, 0},
-        {"scores new", k_sc, -1, -1, 1}, {"topk", k_tk, -1, -1, -1},
+        {"scores new", k_sc, -1, -1, 1}, {"scores dx", k_scx, -1, -1, -1}, {"topk", k_tk, -1, -1, -1},
         {"resolve+copy old", k_res, -1, 0, -1}, {"resolve+copy new", k_res, -1, 1, -1},
     };
     auto setsw = [](int par, int ilp, int pairs) {
@@ -384,10 +524,85 @@ void timing(std::vector<Layer>& Ls, int64_t ctx, int reps) {
     }
     setsw(-1, -1, -1);
     const char* names[] = {"wik gemv", "wiq gemv", "norm+rope", "append old", "append new", "scores old", "scores new",
-                           "topk", "resolve+copy old", "resolve+copy new", "CHAIN old", "CHAIN new", "CHAIN new+fork",
+                           "scores dx", "topk", "resolve+copy old", "resolve+copy new", "CHAIN old", "CHAIN new", "CHAIN new+fork",
                            "CHAIN new+par", "CHAIN old+par"};
-    for (int i = 0; i < 15; ++i) {
+    for (int i = 0; i < 16; ++i) {
         std::printf("%-26s", names[i]);
+        for (double x : res[i]) std::printf("%8.2f", x);
+        std::printf("\n");
+    }
+}
+
+// r5 F5 timing: the resolve + copy alone, all hits and with M blocks of each layer's selection evicted before its
+// resolve inside the graph (the evict kernel timed alone too), and on a new sequence's resident map (fast path)
+void f5_timing(std::vector<Layer>& Ls, int64_t ctx, int reps) {
+    std::mt19937 rng(5);
+    cudaStream_t s;
+    ck(cudaStreamCreate(&s), "stream");
+    ck(cudaMalloc(&g_scrub, kScrub), "scrub");
+    for (auto& y : Ls) prefill(y, ctx, rng), new_raw(y, rng);
+    std::printf("f5 ctx %lld, us per layer (median of %d replays of 12 layers, L2 scrubbed)\n", (long long) ctx, reps);
+    std::printf("%-30s", "T");
+    for (int T = 1; T <= TMAX; ++T) std::printf("%8d", T);
+    std::printf("\n");
+    const int Ms[] = {2, 32, 96, 192};
+    std::vector<int32_t*> ev(L * 4);
+    for (auto& p : ev) p = dalloc<int32_t>(256);
+    std::vector<std::string> names;
+    std::vector<std::vector<double>> res;
+    auto put = [&](size_t i, const std::string& nm, double v) {
+        if (res.size() <= i) { res.resize(i + 1); names.resize(i + 1); }
+        names[i] = nm; res[i].push_back(v);
+    };
+    for (int T = 1; T <= TMAX; ++T) {
+        k::kv_stream_set_resident_fast(0);
+        set_steps(ctx, T);
+        for (auto& y : Ls) { k_wiq(y, T, s); k_nr(y, T, s); k_sc(y, T, s); k_tk(y, T, s); k_res(y, T, s); }
+        ck(cudaStreamSynchronize(s), "warm");
+        // the evict lists: M distinct blocks of the last query's selection, spread over it
+        for (int i = 0; i < L; ++i) {
+            const auto sel = down(Ls[i].sel + (size_t) (T - 1) * g_cap, g_cap);
+            const int w = (int) k::qsa_selection_width(ctx + T, S);
+            std::vector<int32_t> blk;
+            for (int j = 0; j < w; ++j) if (blk.empty() || blk.back() != sel[j] / 4) blk.push_back(sel[j] / 4);
+            for (int mi = 0; mi < 4; ++mi) {
+                std::vector<int32_t> pick(256, 0);
+                const int M = std::min<int>(Ms[mi], (int) blk.size());
+                for (int j = 0; j < M; ++j) pick[j] = blk[(size_t) j * blk.size() / M];
+                up(ev[i * 4 + mi], pick);
+            }
+        }
+        size_t ri = 0;
+        put(ri++, "hits", time_graph([&](cudaStream_t st) { for (auto& y : Ls) k_res(y, T, st); }, reps, s));
+        for (int mi = 0; mi < 4; ++mi) {
+            const int M = Ms[mi];
+            char nm[64];
+            std::snprintf(nm, sizeof nm, "evict %d only", M);
+            put(ri++, nm, time_graph([&](cudaStream_t st) {
+                for (int i = 0; i < L; ++i) k::kv_stream_test_evict(Ls[i].m, ev[i * 4 + mi], M, st);
+            }, reps, s));
+            std::snprintf(nm, sizeof nm, "evict %d + resolve", M);
+            put(ri++, nm, time_graph([&](cudaStream_t st) {
+                for (int i = 0; i < L; ++i) { k::kv_stream_test_evict(Ls[i].m, ev[i * 4 + mi], M, st); k_res(Ls[i], T, st); }
+            }, reps, s));
+        }
+        // the resident fast path: a new sequence's map (slots filled from the host copy); with the selection past
+        // the window (ctx > 4 x 5,120 here) it is the slow path plus the check
+        k::kv_stream_set_resident_fast(1);
+        for (auto& y : Ls) {
+            const int64_t w = k::kv_stream_reset_resident(y.m, g_n_slots, s);
+            k::kv_ring_restore(y.slots, g_host, k::kKvInt8, 0, w, g_n_slots, S, s);
+            k_res(y, T, s);
+        }
+        ck(cudaStreamSynchronize(s), "fast warm");
+        put(ri++, "resident fast", time_graph([&](cudaStream_t st) { for (auto& y : Ls) k_res(y, T, st); }, reps, s));
+        k::kv_stream_set_resident_fast(0);
+        put(ri++, "resident, fast off", time_graph([&](cudaStream_t st) { for (auto& y : Ls) k_res(y, T, st); }, reps, s));
+        k::kv_stream_set_resident_fast(-1);
+        for (auto& y : Ls) k::kv_stream_reset(y.m, s);
+    }
+    for (size_t i = 0; i < res.size(); ++i) {
+        std::printf("%-30s", names[i].c_str());
         for (double x : res[i]) std::printf("%8.2f", x);
         std::printf("\n");
     }
@@ -399,7 +614,7 @@ int main(int argc, char** argv) {
     const int reps = argc > 2 ? std::atoi(argv[2]) : 60;
     const std::string mode = argc > 3 ? argv[3] : "all";
     std::setvbuf(stdout, nullptr, _IONBF, 0);
-    g_max_cells = 32768;
+    g_max_cells = std::getenv("QFB_MAX_CELLS") ? std::atoll(std::getenv("QFB_MAX_CELLS")) : 32768;   // r5: the engine capacity (524288)
     g_max_blocks = g_max_cells / 4 + 2;
     g_cap = k::qsa_selection_width(k::kTopkMaxCells, S);
     g_n_blocks = g_max_cells / S.page_size;
@@ -431,6 +646,9 @@ int main(int argc, char** argv) {
     int bad = 0;
     try {
         if (mode == "all" || mode == "parity") bad = parity(Ls, ctx);
+        if (mode == "dx") bad = dx_parity(Ls, ctx);
+        if (mode == "f5") bad = f5_parity(Ls, ctx);
+        if (mode == "f5t") f5_timing(Ls, ctx, reps);
         if (mode == "all" || mode == "time") timing(Ls, ctx, reps);
     } catch (const std::exception& e) {
         std::printf("exception: %s\n", e.what());

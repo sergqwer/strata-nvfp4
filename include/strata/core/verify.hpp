@@ -353,6 +353,9 @@ public:
         return true;
     }
     double ms_gate = 0;   ///< host time spent holding a layer's plan for the adaptive copies (decode timing prints it)
+    /// r5 F2: windows run so far on the plain [0] and the long-context [1] select graphs (STRATA_SELECT_LONG), the
+    /// threshold in cells (-1: the long select is off) and the DX scorer's host launches (captures); decode timing prints them
+    void select_long_windows(uint64_t& plain, uint64_t& lng, int64_t& at, int64_t& dx) const;
     cudaStream_t stream() const { return cs_; }
     int device() const { return device_; }
     /// dec/host: run() calls `f` once, on its own thread, as soon as the host has served the window's last layer (the
@@ -682,6 +685,7 @@ private:
     cudaGraphExec_t exec_nr_[2][strata::kernels::kVerifyLongT + 1] = {};   // #871: the doorbell variant of a stage that is all-resident otherwise
     bool launched_[2][strata::kernels::kVerifyLongT + 1] = {}, launched_nr_[2][strata::kernels::kVerifyLongT + 1] = {};   ///< this graph has been launched once (early_ple_flag: a cold first launch raises the PLE flag first)
     int sel_long_ = 0;
+    uint64_t sel_windows_[2] = {};   // r5 F2: windows run on each select variant (select_long_windows)
     // fork 34a35db (STRATA_SIDE_MIXER=1): the GDN gates and the QSA indexer on a branch of the window's graph beside the
     // mixer's projections, joined before the recurrence / the attention
     cudaStream_t side_ = nullptr;

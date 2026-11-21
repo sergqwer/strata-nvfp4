@@ -172,6 +172,21 @@ std::vector<std::pair<std::string, std::string>> nv_default_env(int major, int m
             // expert group's chain (gate/up, H quantize, down) replayed as CUDA graphs: under WDDM an eager launch costs ~10 us of
             // host and ~3 us of GPU idle.  The same kernels and arguments (bitwise); 64K read -2.7% at 600 W.
             {"STRATA_PF_GRAPH", "7"},
+            // decode round 5 F2 (= R5-1): past 32768 cells the decode windows take the long-context select graphs with the
+            // shuffle-free DX block scorer (block_scores_dx_kernel: each pooled key read once for all of the window's queries,
+            // bitwise the pairs kernel's scores, so the same ids); the cluster top-k is kept (STRATA_TOPK_MULTI stays off).
+            // Indexer scores 286 us/layer at T 8 at 370K were the long-context loss (gpu-probe DECODE-PLAN-R5.md); serve
+            // A/B in strata-r5 bench-r5 NOTES-r5.md F2.  STRATA_SELECT_LONG=0 (or STRATA_SCORES_DX=0) gives the old path.
+            // The threshold from qsa_front_bench (us/layer, pairs vs DX): DX is faster for T >= 2 from 24K cells (T 3: 8.43 vs
+            // 7.07, T 8: 19.7 vs 10.3) and slower below 16K (8K T 3: 4.17 vs 5.70).
+            {"STRATA_SELECT_LONG", "1"},
+            {"STRATA_SCORES_DX", "1"},
+            {"STRATA_SELECT_LONG_AT", "24576"},
+            // decode round 5 F6 (= R5-2): the MTP drafter's attention over its 32768-cell window on the pipelined chunk kernel
+            // (attn_chunk_draft_pipe_kernel: one wave of blocks looping over chunks, the next chunk's K/V copied during this
+            // one's softmax and fold; the same partials bit for bit).  Its fast merge (STRATA_MTP_MERGE_FAST) is on for every
+            // CUDA card.  Bench and serve A/B in strata-r5 bench-r5 NOTES-r5.md F6; STRATA_MTP_ATTN_PIPE=0 gives the old kernel.
+            {"STRATA_MTP_ATTN_PIPE", "1"},
         };
     }
     return t;

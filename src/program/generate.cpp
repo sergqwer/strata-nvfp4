@@ -23546,6 +23546,14 @@ int main(int argc, char** argv) {
                                  (d1.entries - ds0.entries) / (w * L), (d1.hits - ds0.hits) / (w * L), (d1.pcie - ds0.pcie) / (w * L),
                                  dt_adapt_wait / w, dt_adapt_join / w, (double) ((ajob ? a_swapped : adapt_nswaps) - dt_sw0) / w);
                 }
+                {   // r5 F2: which select graphs the windows ran (cumulative over the engine's life)
+                    uint64_t sw_plain = 0, sw_long = 0;
+                    int64_t sw_at = -1, sw_dx = 0;
+                    ver.select_long_windows(sw_plain, sw_long, sw_at, sw_dx);
+                    std::fprintf(stderr, "strata decode select: %llu windows on the long-context select (from %lld cells), %llu on the plain one; "
+                                         "DX scorer captured %lld times (engine total)\n",
+                                 (unsigned long long) sw_long, (long long) sw_at, (unsigned long long) sw_plain, (long long) sw_dx);
+                }
                 if (ah_rounds > 0)   // dec/host: the adaptive rounds' own time (cumulative over the engine's life)
                     std::fprintf(stderr, "strata decode adapt rounds: %lld, %.3f ms each; %lld started early, %.3f ms before the window's run returned\n",
                                  (long long) ah_rounds, a_work_ms / (double) ah_rounds, (long long) a_early_n,
@@ -24033,15 +24041,33 @@ int main(int argc, char** argv) {
                 // (this device's owned ordinals; a split's other stages hold theirs)
                 uint64_t miss = 0, look = 0;
                 bool over = false;
+                strata::kernels::KvStreamCounters pr;   // r5 F5 STRATA_KV_RESOLVE_PROF sums
                 for (int64_t j = 0; j < ss.qsa_alloc; ++j) {
                     const strata::kernels::KvStreamCounters c =
                         strata::kernels::kv_stream_counters(ss.qsa_states[ss.qsa_ord0 + j].map);
                     miss += c.misses; look += c.lookups; over = over || c.overflow;
+                    pr.calls += c.calls; pr.lookup_ns += c.lookup_ns; pr.sweep_ns += c.sweep_ns; pr.table_ns += c.table_ns;
+                    pr.sweep_steps += c.sweep_steps; pr.miss_calls += c.miss_calls; pr.copy_ns += c.copy_ns;
+                    pr.gap_ns += c.gap_ns; pr.fresh += c.fresh; pr.fast_calls += c.fast_calls;
+                    if (j == 0) pr.resident = c.resident;
                 }
                 std::fprintf(stderr, "strata serve: KV streaming: %.2f%% of %llu block reads hit VRAM, %.1f MiB read "
                                      "from RAM%s\n", look ? 100.0 * (double) (look - miss) / (double) look : 100.0,
                              (unsigned long long) look, (double) miss * 4224.0 / 1048576.0,
                              over ? " - OVERFLOW (too few resident cells)" : "");
+                if (strata::kernels::kv_stream_resident_fast())   // r5 F5: the dispatch proof (cumulative, as above)
+                    std::fprintf(stderr, "strata serve: KV resident fast path: %llu of %llu resolves (STRATA_KV_RESIDENT_FAST), "
+                                         "resident prefix now %lld blocks\n", (unsigned long long) pr.fast_calls,
+                                 (unsigned long long) pr.calls, (long long) pr.resident);
+                if (std::getenv("STRATA_KV_RESOLVE_PROF") != nullptr)   // r5 F5: cumulative raw sums (diff per request)
+                    std::fprintf(stderr, "strata serve: KV resolve prof: calls %llu misses %llu fresh %llu lookups %llu "
+                                         "miss_calls %llu sweep_steps %llu ns: lookup %llu sweep %llu table %llu copy %llu "
+                                         "gap %llu\n",
+                                 (unsigned long long) pr.calls, (unsigned long long) miss, (unsigned long long) pr.fresh,
+                                 (unsigned long long) look, (unsigned long long) pr.miss_calls,
+                                 (unsigned long long) pr.sweep_steps, (unsigned long long) pr.lookup_ns,
+                                 (unsigned long long) pr.sweep_ns, (unsigned long long) pr.table_ns,
+                                 (unsigned long long) pr.copy_ns, (unsigned long long) pr.gap_ns);
             }
             if (sfx_windows > 0)
                 std::fprintf(stderr, "strata serve: suffix drafts: %lld windows, %lld of %lld drafts accepted\n",
@@ -25336,6 +25362,18 @@ int main(int argc, char** argv) {
                     "speculation", (long long) rounds, o.spec, (long long) drafts_ok, (long long) drafts_total,
                     drafts_total > 0 ? (double) drafts_ok / (double) drafts_total : 0.0,
                     rounds > 0 ? (double) (drafts_ok + rounds) / (double) rounds : 0.0);
+        // r5 F5: the resident fast path's dispatch proof on the CLI path (serve prints it per request)
+        if (g.n_qsa_layers() > 0 && ss.qsa_states[ss.qsa_primary()].kv_mode == 1 &&
+            strata::kernels::kv_stream_resident_fast()) {
+            uint64_t fast = 0, calls = 0, miss = 0;
+            for (int64_t j = 0; j < ss.qsa_alloc; ++j) {
+                const auto c = strata::kernels::kv_stream_counters(ss.qsa_states[ss.qsa_ord0 + j].map);
+                fast += c.fast_calls; calls += c.calls; miss += c.misses;
+            }
+            std::fprintf(stderr, "strata generate: KV resident fast path: %llu of %llu resolves (STRATA_KV_RESIDENT_FAST), "
+                                 "%llu blocks read from RAM\n", (unsigned long long) fast, (unsigned long long) calls,
+                         (unsigned long long) miss);
+        }
         if (!follow.empty())
             std::printf("%-24s %lld of %lld emitted tokens differ from the argmax\n", "follow",
                         (long long) follow_differ, (long long) follow_emitted);

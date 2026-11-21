@@ -141,8 +141,8 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   endif()
   # PR #3820: STRATA_SELECT_LONG's multi-CTA top-k and shuffle-free decode scorer against qsa_block_topk and
   # qsa_block_scores, bitwise, on random scores (GPU, synthetic, no model).  The switches force the new kernels on any
-  # card; the "n3" case fixes three CTAs a query.  Only in the experimental sm_60 build (skips with 77 otherwise).
-  if(STRATA_BUILD_TESTS AND STRATA_ENABLE_CUDA AND STRATA_EXPERIMENTAL_SM60)
+  # card; the "n3" case fixes three CTAs a query.  Every CUDA build since r5 F2 (the sm_120 default takes the DX scorer).
+  if(STRATA_BUILD_TESTS AND STRATA_ENABLE_CUDA)
     add_executable(qsa_select_long_parity src/kernels/qsa_select_long_parity.cpp)
     target_include_directories(qsa_select_long_parity PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
     target_link_libraries(qsa_select_long_parity PRIVATE strata_kernels CUDA::cudart)

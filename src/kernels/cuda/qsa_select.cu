@@ -1815,7 +1815,7 @@ bool scores_early_exit() {
     return on;
 }
 
-#if !defined(__HIPCC__) && defined(STRATA_EXPERIMENTAL_SM60)
+#if !defined(__HIPCC__)   // r5 F2: every CUDA build (was STRATA_EXPERIMENTAL_SM60 only)
 // STRATA_SELECT_LONG (verify.cpp): the long-context decode select, qsa_block_scores_long / qsa_block_topk_long.
 // ---- decode block scores bit for bit block_scores_multi_kernel's, without its shuffles (STRATA_SCORES_DX, default on
 // 6.x, under STRATA_SELECT_LONG).  The multi kernel gives a block to a warp and pays 5 shuffles per head per (block, query) for 4 products per
@@ -2192,7 +2192,7 @@ __global__ void __launch_bounds__(MT_T) block_topk_multi_emit_kernel(const float
       }
     }
 }
-#endif  // !__HIPCC__ && STRATA_EXPERIMENTAL_SM60
+#endif  // !__HIPCC__
 }  // namespace
 
 bool qsa_block_scores_slots(const float* const* pooled, const float* const* dead, const float* q_idx,
@@ -3262,9 +3262,11 @@ void qsa_block_topk(const float* scores, const int32_t* steps, int64_t nq, int64
     if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_topk: %s\n", cudaGetErrorString(e)); std::exit(1); }
 }
 
-#if !defined(__HIPCC__) && defined(STRATA_EXPERIMENTAL_SM60)
+#if !defined(__HIPCC__)
 // STRATA_SCORES_DX: 0 off, 1 on for any CUDA card; unset: on for compute capability 6.x (block_scores_dx_kernel).
+// r5 F2: the sm_120 table (nv_defaults.cpp) sets it to 1 with STRATA_SELECT_LONG=1.
 // `sms`: the device's multiprocessors (the grid: as many CTAs as fit on each).
+std::atomic<long long> g_dx_launches{0};   // host calls that launched the DX kernel (qsa_scores_dx_launches)
 static bool scores_dx_device(int& sms) {
     static const int env = [] {
         const char* v = std::getenv("STRATA_SCORES_DX");
@@ -3323,11 +3325,15 @@ static bool qsa_block_scores_dx(const float* pooled, const float* dead, const fl
     block_scores_tail_kernel<<<(unsigned) nq, 32, 0, st>>>(dead, q_idx, steps, max_blocks, scores);
     const cudaError_t e = cudaGetLastError();
     if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_scores (dx): %s\n", cudaGetErrorString(e)); std::exit(1); }
+    // r5 F2: the dispatch proof (a graph capture counts once; the verifier counts the long graphs' launches)
+    strata::dispatch::note("qsa scores: decode DX kernel (STRATA_SCORES_DX)");
+    if (g_dx_launches.fetch_add(1, std::memory_order_relaxed) == 0)
+        std::fprintf(stderr, "strata qsa: decode block scores on the DX kernel (STRATA_SCORES_DX, %d SMs)\n", sms);
     return true;
 }
 #endif
 
-#if !defined(__HIPCC__) && defined(STRATA_EXPERIMENTAL_SM60)
+#if !defined(__HIPCC__)
 // STRATA_TOPK_MULTI: 0 off, 1 on for any CUDA card and capacity; unset: on for compute capability 6.x past the register
 // kernel's reach (GP100: 0.39 -> 0.04 ms per call at 300K cells; see block_topk_multi_hist_kernel)
 static int topk_multi_mode() {
@@ -3373,8 +3379,16 @@ static bool qsa_block_topk_multi(const float* scores, const int32_t* steps, int6
 
 // ---- STRATA_SELECT_LONG (verify.cpp, opt-in): the decode select past ~64K cells.  Outside the SM60 build (and on HIP)
 // these are the plain calls; the scratch is never asked for.
+int64_t qsa_scores_dx_launches() {
+#if !defined(__HIPCC__)
+    return g_dx_launches.load(std::memory_order_relaxed);
+#else
+    return 0;
+#endif
+}
+
 int64_t qsa_topk_multi_scratch_ints(int64_t nq) {
-#if !defined(__HIPCC__) && defined(STRATA_EXPERIMENTAL_SM60)
+#if !defined(__HIPCC__)
     return (nq < MT_MAXQ ? nq : MT_MAXQ) * (int64_t) MT_Q_INTS;
 #else
     (void) nq;
@@ -3384,7 +3398,7 @@ int64_t qsa_topk_multi_scratch_ints(int64_t nq) {
 
 void qsa_block_topk_long(const float* scores, const int32_t* steps, int64_t nq, int64_t max_blocks, int64_t cap,
                          const QsaShapes& s, int32_t* ids, void* stream, int64_t active_blocks, int32_t* multi_scratch) {
-#if !defined(__HIPCC__) && defined(STRATA_EXPERIMENTAL_SM60)
+#if !defined(__HIPCC__)
     // several CTAs per query through the caller's scratch (decode calls: no active count, a few queries)
     static const bool old = std::getenv("STRATA_TOPK_OLD") != nullptr;
     if (nq > 0 && multi_scratch != nullptr && !old && active_blocks <= 0 && nq <= MT_MAXQ && s.idx_block == R &&
@@ -3402,7 +3416,7 @@ void qsa_block_topk_long(const float* scores, const int32_t* steps, int64_t nq, 
 
 void qsa_block_scores_long(const float* pooled, const float* dead, const float* q_idx, const int32_t* steps, int64_t nq,
                            int64_t max_blocks, const QsaShapes& s, float* scores, void* stream, int64_t active_blocks) {
-#if !defined(__HIPCC__) && defined(STRATA_EXPERIMENTAL_SM60)
+#if !defined(__HIPCC__)
     if (nq > 0 && s.idx_dim == IDX_DIM && s.idx_n_head == IDX_HEADS && s.idx_block == R && scores_multi_on() &&
         nq <= MQ && active_blocks <= 0 &&
         qsa_block_scores_dx(pooled, dead, q_idx, steps, nq, max_blocks, scores, stream))

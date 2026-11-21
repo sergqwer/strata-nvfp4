@@ -1159,7 +1159,10 @@ void qsa_state_zero(const QsaState& st, const ModelGeometry& g, void* stream) {
     // A streamed state starts over with nothing resident. Its host copy is not cleared (GBs over PCIe per new
     // conversation): no reader names a cell before this sequence has written it, and a block copied in whole
     // carries the unwritten cells past the end, which nothing reads.
-    if (st.kv_mode == 1) strata::kernels::kv_stream_reset(st.map, stream);
+    // r5 F5 (STRATA_KV_RESIDENT_FAST): or with its first n_slots blocks resident in slots 0..n_slots-1 - nothing is
+    // written yet, so the appends (prompt and decode) write those blocks' slots too and the resolve has nothing to do
+    // until the selection reaches past the VRAM window.
+    if (st.kv_mode == 1) strata::kernels::kv_stream_reset_resident(st.map, st.n_slots, stream);
     cudaMemsetAsync(st.idx_tail, 0, (size_t) (s.idx_block - 1) * s.idx_dim * 4, cs);
     cudaMemsetAsync(st.idx_dead, 0, (size_t) s.idx_dim * 4, cs);
     // (an elastic pooled array: what is mapped; a chunk mapped later is zeroed then)
