@@ -34,6 +34,8 @@ struct QsaScoreRows {
 /// keys; the same arithmetic in the same order: bit-identical scores).
 void qsa_block_scores_rows(const QsaScoreRows& rows, const float* q_idx, const int32_t* steps, int64_t nq,
                            int64_t max_blocks, const QsaShapes& s, float* scores, void* stream);
+/// Test hook (dec3 D5): 1 / 0 forces the decode call's pair-parallel scorer on / off, -1 = STRATA_SCORES_PAIRS.
+void qsa_set_scores_pairs(int on);
 void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx, const int32_t* steps, int64_t nq,
                       int64_t max_blocks, const QsaShapes& s, float* scores, void* stream,
                       int64_t active_blocks = -1);   ///< perf-review C-1: > 0 launches only this many blocks (the

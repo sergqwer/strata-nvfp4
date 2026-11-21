@@ -629,16 +629,22 @@ struct ElasticPool {
     strata::core::VmmRange range;
     std::vector<uint64_t> off, per_slot;   // each array's offset in the range (whole chunks) and bytes per page slot
     int64_t n_slots = 0, page_size = 0;
+    int64_t extra = 0;   // slots past ceil(cells / page_size) the cells need (the pooled keys' 2 spare rows)
     int owner = 0;
+    // E2 (session buffers): a table's host copy, one per array (the RoPE table): a fresh chunk gets its rows from it
+    std::vector<std::vector<float>> host;
 };
 std::vector<std::unique_ptr<ElasticPool>> g_pools;
+// E2: under KV streaming the indexer's pooled keys and the RoPE table are elastic too (STRATA_SESSION_GROW=0: off)
+bool g_sess_elastic = false;
+bool g_sess_made = false;   // at least one such pool was made
 
 int64_t pool_chunks(const ElasticPool& p, size_t a, int64_t slots) {
     const uint64_t G = strata::core::vmm_granularity();
     return (int64_t) (((uint64_t) slots * p.per_slot[a] + G - 1) / G);
 }
 int64_t pool_slots(const ElasticPool& p, int64_t cells) {
-    return std::min<int64_t>(p.n_slots, std::max<int64_t>((cells + p.page_size - 1) / p.page_size, 1));
+    return std::min<int64_t>(p.n_slots, std::max<int64_t>((cells + p.page_size - 1) / p.page_size + p.extra, 1));
 }
 /// Whole page slots every array of the pool has mapped.
 int64_t pool_slots_mapped(const ElasticPool& p) {
@@ -685,6 +691,19 @@ bool pool_grow(ElasticPool& p, int64_t cells, const std::function<strata::core::
                              cudaGetErrorString(cudaGetLastError()));
                 return false;
             }
+        if (a < p.host.size()) {   // E2: a table's chunk gets the table's values (the caller syncs before anything reads them)
+            const uint64_t len = (uint64_t) p.n_slots * p.per_slot[a];
+            for (const int64_t c : fresh) {
+                const uint64_t at = (uint64_t) (c - c0) * G;
+                if (at >= len) continue;
+                if (cudaMemcpy(p.range.base() + (uint64_t) c * G, (const uint8_t*) p.host[a].data() + at,
+                               (size_t) std::min<uint64_t>(G, len - at), cudaMemcpyHostToDevice) != cudaSuccess) {
+                    std::fprintf(stderr, "strata: an elastic table could not be filled: %s\n",
+                                 cudaGetErrorString(cudaGetLastError()));
+                    return false;
+                }
+            }
+        }
     }
     return true;
 }
@@ -696,10 +715,28 @@ void qsa_set_kv_elastic(bool enabled, int64_t init_cells) {
 }
 bool qsa_kv_elastic() { return g_kv_elastic; }
 void qsa_set_kv_elastic_owner(int owner) { g_kv_elastic_owner = owner; }
+void qsa_set_session_elastic(bool enabled) { g_sess_elastic = enabled && strata::core::vmm_available(); }
+int qsa_elastic_table_store(const float* dev, const float* src, size_t floats) {
+    const uint64_t G = strata::core::vmm_granularity();
+    for (auto& p : g_pools)
+        for (size_t a = 0; a < p->host.size(); ++a) {
+            if ((const float*) (p->range.base() + p->off[a]) != dev) continue;
+            if (floats * 4 != p->host[a].size() * 4) return 0;
+            std::copy(src, src + floats, p->host[a].begin());   // what a chunk mapped later gets
+            const int64_t c0 = (int64_t) (p->off[a] / G);
+            int64_t c = 0;
+            while (p->range.mapped(c0 + c) && (uint64_t) c * G < floats * 4) ++c;
+            const size_t n = (size_t) std::min<uint64_t>(floats * 4, (uint64_t) c * G);
+            return n == 0 || cudaMemcpy((void*) dev, src, n, cudaMemcpyHostToDevice) == cudaSuccess ? 1 : 0;
+        }
+    return -1;
+}
+bool qsa_session_elastic() { return g_sess_made; }
 int64_t qsa_kv_elastic_cells(int owner) {
     int64_t cells = std::numeric_limits<int64_t>::max();
     for (const auto& p : g_pools)
-        if (p->owner == owner) cells = std::min<int64_t>(cells, pool_slots_mapped(*p) * p->page_size);
+        if (p->owner == owner)
+            cells = std::min<int64_t>(cells, std::max<int64_t>(0, pool_slots_mapped(*p) - p->extra) * p->page_size);
     return cells;
 }
 int64_t qsa_kv_elastic_need(int64_t cells, int owner) {
@@ -731,7 +768,25 @@ bool qsa_kv_elastic_grow(int64_t cells, const std::function<strata::core::VmmChu
         ok = cudaSetDevice(d) == cudaSuccess && cudaDeviceSynchronize() == cudaSuccess && ok;
         cudaSetDevice(cur);
     }
-    return cudaDeviceSynchronize() == cudaSuccess && ok;
+    ok = cudaDeviceSynchronize() == cudaSuccess && ok;
+    // debug (STRATA_SESSION_GROW_CHECK=1): every mapped row of an elastic table read back against its host copy
+    if (static const bool chk = std::getenv("STRATA_SESSION_GROW_CHECK") != nullptr; chk && ok) {
+        const uint64_t G = strata::core::vmm_granularity();
+        for (auto& p : g_pools)
+            for (size_t a = 0; p->owner == owner && a < p->host.size(); ++a) {
+                const uint64_t len = (uint64_t) p->n_slots * p->per_slot[a];
+                const int64_t c0 = (int64_t) (p->off[a] / G);
+                int64_t c = 0;
+                while (p->range.mapped(c0 + c) && (uint64_t) c * G < len) ++c;
+                const size_t n = (size_t) std::min<uint64_t>(len, (uint64_t) c * G);
+                std::vector<uint8_t> back(n);
+                const bool same = cudaMemcpy(back.data(), p->range.base() + p->off[a], n, cudaMemcpyDeviceToHost) == cudaSuccess &&
+                                  std::memcmp(back.data(), p->host[a].data(), n) == 0;
+                std::fprintf(stderr, "strata: STRATA_SESSION_GROW_CHECK: table array %zu, %zu bytes mapped: %s\n", a, n,
+                             same ? "equal to its host copy" : "DIFFERENT");
+            }
+    }
+    return ok;
 }
 int64_t qsa_kv_elastic_shrink(int64_t cells, const std::function<void(strata::core::VmmChunk)>& give, int owner) {
     const uint64_t G = strata::core::vmm_granularity();
@@ -803,6 +858,46 @@ uint64_t kv_pool_bytes(const QsaShapes& s, int64_t pages, bool hybrid, bool int8
     return int8 ? (uint64_t) pages * s.page_size * strata::kernels::kv_q8_bytes_per_cell(s) + 64
                 : (uint64_t) pages * s.n_head_kv * s.page_size * s.head_dim * 2 * 2;
 }
+/// E2: a streamed main layer's pooled keys (and the primary's RoPE table) live in VMM ranges sized for the context
+bool sess_elastic_state(const KvPlan& p) { return g_sess_elastic && p.mode == 1; }
+/// One elastic table pool: `arrays` arrays of `n_slots` rows of `per_slot` bytes, a row per `page` cells, `extra`
+/// rows past the cells' own; the first `init_cells` cells mapped (zeroed, or from `fill`). nullptr: no VMM room.
+ElasticPool* make_table_pool(size_t arrays, int64_t n_slots, uint64_t per_slot, int64_t page, int64_t extra,
+                             std::vector<std::vector<float>> host) {
+    auto pool = std::make_unique<ElasticPool>();
+    const uint64_t G = strata::core::vmm_granularity();
+    uint64_t at = 0;
+    for (size_t a = 0; a < arrays; ++a) {
+        pool->off.push_back(at);
+        pool->per_slot.push_back(per_slot);
+        at += ((uint64_t) n_slots * per_slot + G - 1) / G * G;
+    }
+    pool->n_slots = n_slots;
+    pool->page_size = page;
+    pool->extra = extra;
+    pool->owner = g_kv_elastic_owner;
+    pool->host = std::move(host);
+    if (!pool->range.reserve(at) || !pool_grow(*pool, g_kv_elastic_init, [] { return (strata::core::VmmChunk) 0; })) {
+        std::fprintf(stderr, "strata: an elastic session table could not reserve or map its range\n");
+        return nullptr;
+    }
+    g_pools.push_back(std::move(pool));
+    g_sess_made = true;
+    return g_pools.back().get();
+}
+/// Bytes of `array` at its start that are mapped in an elastic pool (`full` when `p` is no elastic array).
+uint64_t elastic_live_bytes(const void* ptr, uint64_t full) {
+    const uint64_t G = strata::core::vmm_granularity();
+    for (const auto& p : g_pools)
+        for (size_t a = 0; a < p->off.size(); ++a) {
+            if (p->range.base() + p->off[a] != (const uint8_t*) ptr) continue;
+            const int64_t c0 = (int64_t) (p->off[a] / G);
+            int64_t c = 0;
+            while (p->range.mapped(c0 + c)) ++c;
+            return std::min<uint64_t>(full, (uint64_t) c * G);
+        }
+    return full;
+}
 }  // namespace
 
 void qsa_set_kv_resident(int64_t cells) { g_kv_resident = cells > 0 ? cells : 0; }
@@ -835,9 +930,10 @@ uint64_t qsa_state_bytes(const ModelGeometry& g, int64_t max_cells, bool with_ro
     if (p.mode == 1) n += strata::kernels::kv_stream_map_bytes(p.slots) + 6 * 16;   // the residency map
     n += (uint64_t) (s.idx_block - 1) * s.idx_dim * 4;                         // tail
     n += (uint64_t) s.idx_dim * 4;                                             // dead
-    n += (uint64_t) p.pooled_rows * s.idx_dim * 4;                             // pooled
+    const bool el = sess_elastic_state(p);   // E2: pooled keys / RoPE table in their own VMM ranges
+    if (!el) n += (uint64_t) p.pooled_rows * s.idx_dim * 4;                    // pooled
     n += 16;                                                                   // block_pos
-    if (with_rope) n += (uint64_t) max_cells * (s.n_rot / 2) * 4 * 2;          // cos + sin tables
+    if (with_rope && !el) n += (uint64_t) max_cells * (s.n_rot / 2) * 4 * 2;   // cos + sin tables
     n += strata::kernels::qsa_step_bytes() + 16;                               // counts and aligned attention status
     n += (uint64_t) s.n_head * 4;                                              // pos_dev
     return align_up16(n) + 256;
@@ -934,11 +1030,27 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
     st.idx_tail = c.take<float>((uint64_t) (s.idx_block - 1) * s.idx_dim);
     st.idx_dead = c.take<float>((uint64_t) s.idx_dim);
     st.idx_pooled_rows = p.pooled_rows;
-    st.idx_pooled = c.take<float>((uint64_t) p.pooled_rows * s.idx_dim);
+    const bool el = sess_elastic_state(p);
+    if (el) {   // E2: one row per idx_block cells (+2), mapped as the context grows, zeroed when mapped
+        ElasticPool* ep = make_table_pool(1, p.pooled_rows, (uint64_t) s.idx_dim * 4, s.idx_block, 2, {});
+        if (ep == nullptr) return 0;
+        st.idx_pooled = (float*) ep->range.base();
+    } else
+        st.idx_pooled = c.take<float>((uint64_t) p.pooled_rows * s.idx_dim);
     st.idx_block_pos = c.take<int32_t>(1);
     if (share_rope != nullptr) {
         st.cos_tab = share_rope->cos_tab;
         st.sin_tab = share_rope->sin_tab;
+    } else if (el) {
+        // the whole table built once on the host, as below; a chunk mapped later gets its rows from this copy
+        const size_t half = (size_t) (s.n_rot / 2);
+        std::vector<std::vector<float>> host(2, std::vector<float>((size_t) max_cells * half));
+        strata::kernels::build_rope_table((int) s.n_rot, strata::kernels::rope_scaling(), (int) max_cells,
+                                          host[0].data(), host[1].data());
+        ElasticPool* ep = make_table_pool(2, max_cells, (uint64_t) half * 4, 1, 0, std::move(host));
+        if (ep == nullptr) return 0;
+        st.cos_tab = (float*) (ep->range.base() + ep->off[0]);
+        st.sin_tab = (float*) (ep->range.base() + ep->off[1]);
     } else {
         st.cos_tab = c.take<float>((uint64_t) max_cells * (s.n_rot / 2));
         st.sin_tab = c.take<float>((uint64_t) max_cells * (s.n_rot / 2));
@@ -993,7 +1105,11 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
     // frequencies in float64 and reproducing that on device means double-precision `pow`/`cos` that need not
     // agree with the host's libm.  A table shorter than the sequence would have the rotation read past it.
     // The process's rope scaling (none by default) is INSIDE the table - the rotation kernels cannot tell.
-    if (share_rope == nullptr) {
+    if (share_rope == nullptr && el) {   // E2: the mapped rows are filled already (make_table_pool)
+        st.owns_rope = true;
+        if (s.n_rot == 64)
+            strata::kernels::rope_table_set(st.cos_tab, st.sin_tab, (int) max_cells, strata::kernels::rope_scaling());
+    } else if (share_rope == nullptr) {
         std::vector<float> hc((size_t) max_cells * (s.n_rot / 2)), hs((size_t) max_cells * (s.n_rot / 2));
         strata::kernels::build_rope_table((int) s.n_rot, strata::kernels::rope_scaling(), (int) max_cells,
                                           hc.data(), hs.data());
@@ -1046,7 +1162,8 @@ void qsa_state_zero(const QsaState& st, const ModelGeometry& g, void* stream) {
     if (st.kv_mode == 1) strata::kernels::kv_stream_reset(st.map, stream);
     cudaMemsetAsync(st.idx_tail, 0, (size_t) (s.idx_block - 1) * s.idx_dim * 4, cs);
     cudaMemsetAsync(st.idx_dead, 0, (size_t) s.idx_dim * 4, cs);
-    cudaMemsetAsync(st.idx_pooled, 0, (size_t) st.idx_pooled_rows * s.idx_dim * 4, cs);
+    // (an elastic pooled array: what is mapped; a chunk mapped later is zeroed then)
+    cudaMemsetAsync(st.idx_pooled, 0, (size_t) elastic_live_bytes(st.idx_pooled, (uint64_t) st.idx_pooled_rows * s.idx_dim * 4), cs);
 }
 
 strata::kernels::QsaAttnPools qsa_attn_pools(const QsaState& st) {

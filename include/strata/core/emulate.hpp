@@ -22,6 +22,16 @@ inline int emulated_cc() {
 }
 inline int cc_major_of(int real_major) { return emulated_cc() ? emulated_cc() / 10 : real_major; }
 inline int cc_minor_of(int real_minor) { return emulated_cc() ? emulated_cc() % 10 : real_minor; }
+/// STRATA_EMULATE_SMS=N (tests only, CUDA): a smaller card of this generation - the engine holds the other multiprocessors with an
+/// idle kernel (kernels::sm_hog_start) and the checks of co-resident grids read sms_of; every other query still sees the real count
+inline int emulated_sms() {
+    static const int n = [] {
+        const char* e = std::getenv("STRATA_EMULATE_SMS");
+        return e ? std::atoi(e) : 0;
+    }();
+    return n > 0 ? n : 0;
+}
+inline int sms_of(int real) { return emulated_sms() > 0 && emulated_sms() < real ? emulated_sms() : real; }
 /// cudaDevAttrMaxSharedMemoryPerBlockOptin as the emulated card reports it: 64 KB on Turing, 163 KB on the A100,
 /// 99 KB on the other Ampere and Ada cards
 inline int smem_optin_of(int real) {

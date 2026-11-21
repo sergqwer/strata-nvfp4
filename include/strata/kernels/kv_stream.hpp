@@ -108,6 +108,8 @@ void kv_stage_from_host(const QsaAttnPools& stage, const KvHostPools& host, int 
 void kv_unstage_to_host(const QsaAttnPools& stage, const KvHostPools& host, int fmt, int64_t b0, int64_t b1,
                         const QsaShapes& s, void* stream);
 
+/// Test hook (dec3 D5): 1 / 0 forces the resolve's batched lookups on / off, -1 = STRATA_KV_RESOLVE_ILP (default on).
+void kv_stream_set_resolve_ilp(int on);
 struct KvStreamCounters {
     uint64_t misses = 0, lookups = 0, calls = 0;
     bool overflow = false;

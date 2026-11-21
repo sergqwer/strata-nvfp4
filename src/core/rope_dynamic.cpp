@@ -75,9 +75,12 @@ bool rope_table_rebuild(const QsaState& owner, const strata::kernels::RopeScalin
     std::vector<float> hc(n), hs(n);
     const int threads = (int) std::max(1u, std::min(16u, std::thread::hardware_concurrency()));
     build_rope_table_mt((int) s.n_rot, to, (int) owner.max_cells, hc.data(), hs.data(), threads);
-    if (cudaDeviceSynchronize() != cudaSuccess ||
-        cudaMemcpy(owner.cos_tab, hc.data(), n * 4, cudaMemcpyHostToDevice) != cudaSuccess ||
-        cudaMemcpy(owner.sin_tab, hs.data(), n * 4, cudaMemcpyHostToDevice) != cudaSuccess) {
+    // E2: an elastic table (KV streaming) keeps the new rows in its host copy and uploads what is mapped
+    auto put = [&](float* dev, const std::vector<float>& h) {
+        const int r = qsa_elastic_table_store(dev, h.data(), n);
+        return r < 0 ? cudaMemcpy(dev, h.data(), n * 4, cudaMemcpyHostToDevice) == cudaSuccess : r == 1;
+    };
+    if (cudaDeviceSynchronize() != cudaSuccess || !put(owner.cos_tab, hc) || !put(owner.sin_tab, hs)) {
         error = "dynamic rope: the table upload failed";
         return false;
     }

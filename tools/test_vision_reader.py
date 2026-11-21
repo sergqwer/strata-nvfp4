@@ -132,6 +132,22 @@ class Choose(unittest.TestCase):
         self.assertIsNone(VR.cpu_fallback({"exe": "/e/strata-vision", "gpu": False}, same_program=True))
 
 
+class InEngine(unittest.TestCase):
+    def test_pictures_on_with_an_engine_that_reads_them(self):
+        for asked in (None, "yes", "gpu"):
+            with self.subTest(asked=asked):
+                self.assertTrue(VR.in_engine_wanted(asked, "cpu", True))
+
+    def test_the_cpu_reader_asked_for_is_kept(self):
+        self.assertFalse(VR.in_engine_wanted("cpu", "cpu", True))
+        self.assertFalse(VR.in_engine_wanted("CPU", "cpu", True))
+
+    def test_an_older_engine_or_pictures_off(self):
+        self.assertFalse(VR.in_engine_wanted("yes", "cpu", False))
+        self.assertFalse(VR.in_engine_wanted("no", "none", True))
+        self.assertFalse(VR.in_engine_wanted("gpu", "gpu", True))      # a GPU reader program of its own (a build with one) stays as it is
+
+
 class MacReader(unittest.TestCase):
     """A Mac has one picture program, strata-vision with Metal built in: --gpu reads on the GPU, without it on the CPU."""
 

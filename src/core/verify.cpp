@@ -820,6 +820,9 @@ Verifier::~Verifier() {
     if (copy_) { cudaStreamSynchronize(copy_); cudaStreamDestroy(copy_); }
     if (side_) cudaStreamDestroy(side_);
     if (side2_) cudaStreamDestroy(side2_);
+    if (side3_) cudaStreamDestroy(side3_);
+    for (cudaEvent_t e : {afork_, ajoin_})
+        if (e) cudaEventDestroy(e);
     if (l2pf_s_) cudaStreamDestroy(l2pf_s_);
     if (pcb_s_) cudaStreamDestroy(pcb_s_);
     for (cudaEvent_t e : {pcb_fork_, pcb_join_, pcb_plan_})
@@ -1385,6 +1388,19 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         cudaEventCreateWithFlags(&gfork_, cudaEventDisableTiming) != cudaSuccess)) {
         err = "verify: the mixer branch's stream / events could not be created";
         return false;
+    }
+    // dec3 D5 STRATA_IDX_FORK (default on with the side mixer, =0 in line): the indexer's append beside its query
+    // projection (the same kernels and inputs; the block scores join both).  qsa_front_bench: -0.9..-2.0 us a layer
+    {
+        const char* v = std::getenv("STRATA_IDX_FORK");
+        if (g_side_mixer() > 0 && side3_ == nullptr && (v == nullptr || std::atoi(v) != 0) &&
+            ((gprio ? make_stream(&side3_, gp_hi) : cudaStreamCreateWithFlags(&side3_, cudaStreamNonBlocking)) != cudaSuccess ||
+             cudaEventCreateWithFlags(&afork_, cudaEventDisableTiming) != cudaSuccess ||
+             cudaEventCreateWithFlags(&ajoin_, cudaEventDisableTiming) != cudaSuccess)) {
+            (void) cudaGetLastError();
+            if (side3_) cudaStreamDestroy(side3_);
+            side3_ = nullptr;   // in line
+        }
     }
     if (g_l2pf_mb() > 0 &&
         (cudaStreamCreateWithFlags(&l2pf_s_, cudaStreamNonBlocking) != cudaSuccess ||
@@ -2214,8 +2230,20 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                     if (!branch(mfork_, cs, side_, "fork")) return false;
                     idx_key(side_);
                     idx_snap(side_);
-                    idx_append(side_);
+                    // dec3 D5 STRATA_IDX_FORK: the append (after the key and the tail's snapshot) beside the query
+                    const bool afork = side3_ != nullptr && afork_ != nullptr && ajoin_ != nullptr;
+                    if (afork) {
+                        strata::dispatch::note("qsa layer: indexer append forked beside the query (STRATA_IDX_FORK)");
+                        if (!branch(afork_, side_, side3_, "fork")) return false;
+                        idx_append(side3_);
+                        if (cudaEventRecord(ajoin_, side3_) != cudaSuccess) { err = "verify: the indexer append's branch could not join"; return false; }
+                    } else
+                        idx_append(side_);
                     idx_query(side_);
+                    if (afork && cudaStreamWaitEvent(side_, ajoin_, 0) != cudaSuccess) {
+                        err = "verify: the indexer append's branch could not join";
+                        return false;
+                    }
                     idx_select(side_);
                     note_prio_tail(side_, 1);
                     if (cudaEventRecord(mjoin_, side_) != cudaSuccess) { err = "verify: the indexer's branch could not join"; return false; }

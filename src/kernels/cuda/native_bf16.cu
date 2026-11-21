@@ -435,8 +435,11 @@ void bf16_gemv_fp32_mmvf_multi(const float* x, int64_t ldx, const uint16_t* w, f
             throw std::runtime_error(std::string("bf16_gemv_fp32_mmvf_multi launch: ") + cudaGetErrorString(result));
         return;
     }
-    // 9..16 rows (wide builds only): one exact instantiation per row count, each row's dot independent of the others.  7 and 8
-    // rows stay with the default case below, the instantiation they always had.
+    // 9..16 rows (wide builds only): one exact instantiation per row count, each row's dot independent of the others.
+    // dec/round3 D1 (STRATA_MMVF_EXACT78=0 turns it off): 7 and 8 rows get exact instantiations too instead of the default
+    // case's <N, 8, false> with its runtime row guards; the same per-row FMAs and reductions (bitwise), router at T = 8
+    // 8.02 -> 6.02 us in gpu-probe's router_poc.
+    static const bool exact78 = [] { const char* v = std::getenv("STRATA_MMVF_EXACT78"); return !(v != nullptr && v[0] == '0'); }();
 #if STRATA_VERIFY_MAX_T > 8
 #define STRATA_MMVF_W(N, T) case T: launch_pdl(bf16_f32_mmvf_multi_kernel<N, T, true>, dim3((unsigned) n_out), dim3(N), 0, st, x, ldx, w, y, ldy, (int) n_in, n_tok, mmvf_fast()); break;
 #if STRATA_VERIFY_MAX_T > 12
@@ -459,6 +462,13 @@ void bf16_gemv_fp32_mmvf_multi(const float* x, int64_t ldx, const uint16_t* w, f
         case 4: launch_pdl(bf16_f32_mmvf_multi_kernel<N, 4, true>, dim3((unsigned) n_out), dim3(N), 0, st, x, ldx, w, y, ldy, (int) n_in, n_tok, mmvf_fast()); break; \
         case 5: launch_pdl(bf16_f32_mmvf_multi_kernel<N, 5, true>, dim3((unsigned) n_out), dim3(N), 0, st, x, ldx, w, y, ldy, (int) n_in, n_tok, mmvf_fast()); break; \
         case 6: launch_pdl(bf16_f32_mmvf_multi_kernel<N, 6, true>, dim3((unsigned) n_out), dim3(N), 0, st, x, ldx, w, y, ldy, (int) n_in, n_tok, mmvf_fast()); break; \
+        case 7: case 8: \
+            if (exact78) { \
+                if (n_tok == 7) launch_pdl(bf16_f32_mmvf_multi_kernel<N, 7, true>, dim3((unsigned) n_out), dim3(N), 0, st, x, ldx, w, y, ldy, (int) n_in, n_tok, mmvf_fast()); \
+                else launch_pdl(bf16_f32_mmvf_multi_kernel<N, 8, true>, dim3((unsigned) n_out), dim3(N), 0, st, x, ldx, w, y, ldy, (int) n_in, n_tok, mmvf_fast()); \
+                break; \
+            } \
+            [[fallthrough]]; \
         default: launch_pdl(bf16_f32_mmvf_multi_kernel<N, 8, false>, dim3((unsigned) n_out), dim3(N), 0, st, x, ldx, w, y, ldy, (int) n_in, n_tok, mmvf_fast()); break; \
     } break
     switch (mmvf_block_size(n_in)) {

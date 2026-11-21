@@ -251,6 +251,7 @@ struct GrMulti {
     const unsigned* gate = nullptr;
     unsigned gate_n = 0;
     unsigned* gate_pass = nullptr;
+    unsigned char hc_flag = 0;   // dec-round3 D3 (hc8 only, set by its launcher): 2 STRATA_ER_LATE_PASS, 4 STRATA_HC8_LOSTAGE
 };
 
 
@@ -3422,6 +3423,20 @@ int g_gr_fast = -1;
 #endif
 void fused_gr_set_fast(int on) { g_gr_fast = on; }
 void fused_gr_set_v4(int mode) { g_gr_v4 = mode < 0 ? -2 : mode; }
+void fused_gr_set_hc8_lostage(int on) {
+#if !defined(__HIPCC__)
+    hc8::hc8_lostage_ref() = on < 0 ? -2 : (on != 0);
+#else
+    (void) on;
+#endif
+}
+void fused_gr_set_er_late_pass(int on) {
+#if !defined(__HIPCC__)
+    hc8::er_late_pass_ref() = on < 0 ? -2 : (on != 0);
+#else
+    (void) on;
+#endif
+}
 void fused_gr_set_v5(int on) { g_gr_v5 = on < 0 ? -2 : (on == 1 ? 1 : 0); }
 
 // STRATA_GR_V3: the stream-split hyper-connection read (gr_down_v3_kernel / gr_up_v3_kernel).  Another summation order than the default
@@ -3997,6 +4012,31 @@ void fused_gr_v3_print_resources() {
     one("up T4 pf3", (const void*) gr_up_v3_kernel<1, 4, true, 3>, 0);
 #endif
 }
+#if !defined(__HIPCC__)
+// multiarch: the gated read's down blocks are placed before the combine they wait for and spin there (2 a multiprocessor,
+// 128 registers x 256 threads: every register of the SM).  On a card whose SMs they fill - 220 blocks against 2 x 110
+// (RTX 5080, 5070, 5060, RTX PRO 5000) - the combine finds no room, the gate times out after 2 s and every later read
+// takes stale inputs.  Taken only where they leave half an SM's worth of room per SM for the combine (the 5090: 340 - 220).
+static bool gated_read_fits() {
+    static int fit[64];   // 0 unknown, 1 yes, 2 no
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { cudaGetLastError(); return false; }
+    if (fit[dev] == 0) {
+        int sms = 0, occ = 0;
+        const int grid = (hc8::NRG + 1) * hc8::NS;
+        const bool ok = cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev) == cudaSuccess &&
+                        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, hc8::hc8_down_kernel<kFusedGrMaxT, 2>, THREADS, 0) == cudaSuccess;
+        if (!ok) cudaGetLastError();
+        sms = strata::sms_of(sms);   // STRATA_EMULATE_SMS (tests only)
+        const char* force = std::getenv("STRATA_EARLY_READ_FIT");   // =0: skip this check (tests: the failure it prevents)
+        fit[dev] = (ok && occ * sms >= grid + sms / 2) || (force != nullptr && force[0] == '0') ? 1 : 2;
+        if (fit[dev] == 2 && std::getenv("STRATA_EARLY_READ") != nullptr && std::atoi(std::getenv("STRATA_EARLY_READ")) != 0)
+            std::fprintf(stderr, "strata: STRATA_EARLY_READ: off on this card (%d SMs x %d blocks of its read against %d: they would fill "
+                                 "every SM before the combine they wait for)\n", sms, occ, grid);
+    }
+    return fit[dev] == 1;
+}
+#endif
 bool fused_gr_read_gated_ok(const FusedGrArgs* a, int n_tok) {
 #if defined(__HIPCC__)
     (void) a; (void) n_tok;
@@ -4004,7 +4044,7 @@ bool fused_gr_read_gated_ok(const FusedGrArgs* a, int n_tok) {
 #else
     return a != nullptr && n_tok >= 1 && n_tok <= kFusedGrMaxT && a[0].q8_down != nullptr && a[0].q8_up != nullptr &&
            hc8_is_split(a[0].q8_down) && hc8_is_split(a[0].q8_up) && a[0].w_inject != nullptr &&
-           hc8::hc8_down_variant() != 1 && hc8::hc8_up_variant() == 1;
+           hc8::hc8_down_variant() != 1 && hc8::hc8_up_variant() == 1 && gated_read_fits();
 #endif
 }
 bool fused_gr_read_multi_gated(const FusedGrArgs* a, int n_tok, float* xn_scratch, const unsigned* gate, unsigned gate_n,

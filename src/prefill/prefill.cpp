@@ -1043,6 +1043,8 @@ inline bool pf_hc_inj() {
 // the inject weights interleaved for the fused writes (hc_inj_interleave), made once per weight (80 KB each)
 inline const uint16_t* hc_wi4(const uint16_t* wi, void* stream) {
     static std::map<const uint16_t*, uint16_t*> made;
+    static std::mutex mu;   // a layer split's stage threads call this at once
+    std::lock_guard<std::mutex> lock(mu);
     auto it = made.find(wi);
     if (it != made.end()) return it->second;
     uint16_t* p = nullptr;
@@ -1051,10 +1053,15 @@ inline const uint16_t* hc_wi4(const uint16_t* wi, void* stream) {
     made.emplace(wi, p);
     return p;
 }
-// the parts of the folded inject sums (T x 16 floats), one buffer of the device, grown as the chunks need
+// the parts of the folded inject sums (T x 16 floats), one buffer per device, grown as the chunks need (a layer split's
+// stages run on their own cards: one buffer for the process was another card's memory to every stage but the first)
 inline float* hc_injp(int64_t T) {
-    static float* p = nullptr;
-    static int64_t cap = 0;
+    static float* ps[64] = {};
+    static int64_t caps[64] = {};
+    int dev = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { cudaGetLastError(); return nullptr; }
+    float*& p = ps[dev];
+    int64_t& cap = caps[dev];
     if (T * 16 > cap) {
         if (p) cudaFree(p);
         p = nullptr;

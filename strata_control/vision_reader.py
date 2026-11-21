@@ -190,6 +190,14 @@ def retry_gpu_start(*, linux: bool, arm: bool, hip: bool, text: str, retries_don
     return "ggml_cuda_init" in t or "cudasetdevice" in t or "cannot use gpu" in t
 
 
+def in_engine_wanted(asked: str | None, mode: str, engine_reads: bool) -> bool:
+    """The NVIDIA engine of this fork reads pictures itself (strata --vision-gpu: our own tower on the card, in expert slots it borrows for one picture and
+    refills right after, so no VRAM is held between pictures; serve/server.py EngineVision).  Setup writes "in_engine": true beside the CPU reader (its
+    fallback) when pictures are on (`mode` "cpu": the reader the folder has), the engine carries the option, and the person did not ask for the CPU reader
+    (`asked` "cpu" keeps the CPU reader alone, as before)."""
+    return mode == "cpu" and engine_reads and (asked or "").lower() != "cpu"
+
+
 def cpu_fallback(vision_cfg: dict, same_program: bool = False) -> dict | None:
     """The same section for the CPU reader, when the GPU reader has one to fall back on; None otherwise.  AMD and Intel name it (`cpu_exe`);
     the NVIDIA reader (`strata-vision`) is the CPU reader too, without --gpu - `same_program` takes that one (the on-demand reader's

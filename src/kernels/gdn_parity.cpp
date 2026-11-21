@@ -697,7 +697,8 @@ int main(int argc, char** argv) {
                 ma.qkv = d_qkv; ma.h = d_h; ma.gate = d_g; ma.beta = d_b; ma.z = d_z; ma.y = d_y; ma.yq = d_yq; ma.bo = d_bo;
                 ma.T = T; ma.layer = 5;
                 double us_chain = 0, us_mid = 0;
-                const int reps = 10;
+                // dec/round3 D2: STRATA_GDN_PARITY_REPS timed launches (default 10)
+                const int reps = std::getenv("STRATA_GDN_PARITY_REPS") ? std::atoi(std::getenv("STRATA_GDN_PARITY_REPS")) : 10;
                 for (int i = 0; i < reps + 1; ++i) {
                     float ms = 0;
                     strata::kernels::dense_tc(8, d_flush, d_xq, d_fly, n_embd, fl_rows, 1, st8);

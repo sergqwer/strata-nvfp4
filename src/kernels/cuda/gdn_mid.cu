@@ -16,6 +16,7 @@
 #undef FZ_DEV_ONLY
 
 #include "strata/kernels/gdn_mid.hpp"
+#include "strata/core/emulate.hpp"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -44,9 +45,12 @@ constexpr int OFF_PRED = 2 * PTILE, OFF_REC = 70144, OFF_ORED = 95232, OFF_BAR =
 constexpr int OFF_OX = 70016, OFF_OX4 = 35200, OXB = (ONIN / 32) * 36;   // the out phase's staged q8_1 rows (och 8 / 4), a row's bytes
 static_assert(16 * ORS4 <= OFF_OX4 && OFF_OX4 + MAXT * OXB <= OFF_ORED && 3 * OXB <= OFF_ORED - OFF_OX, "out x layout");
 enum { C_PAIR, C_PZ, C_AB, C_REC, C_DONE, NCTR = 8 };
+// dec/round3 D2 (STRATA_GDN_MID_DEPTH): the pair ring's tiles copied in NP pieces, at most `depth` pieces in flight per CTA
+// (the CTA's tiles in order); a piece's mbarrier at OFF_BAR + 8 (4 + slot * NPMAX + piece), then a slot's armed-piece count
+constexpr int NPMAX = 8, OFF_ARM = OFF_BAR + 8 * (4 + 2 * NPMAX);
 constexpr int kLayers = 64;
 static_assert(16 * ORS <= OFF_REC && OFF_PRED + 2 * 8 * 16 * kMaxCols * 4 <= OFF_ORED, "layout");
-static_assert(OFF_ORED + 8 * 16 * kMaxCols * 4 <= OFF_BAR && OFF_BAR + 64 <= SMEM, "layout");
+static_assert(OFF_ORED + 8 * 16 * kMaxCols * 4 <= OFF_BAR && OFF_ARM + 8 <= SMEM, "layout");
 
 struct RecSm {
     float sq[MAXT][S], sk[MAXT][S], sv[MAXT][S], oc[MAXT][S];
@@ -70,6 +74,8 @@ struct MidP {
     int ef;      // evict-first weight copies
     int head;    // dec/front STRATA_GDN_MID_HEAD: before the grid wait (else after it) bit 0 the first tile copy, bit 1 the L2 prefetches, bit 2 the second tile copy
     int split;   // 1: the rec CTAs take RQ qkv tiles each (the last ones), the others the rest of qkv, then z; 0: round robin
+    int depth;   // D2: pieces in flight per CTA (0: the two-tile ring, each tile one copy)
+    int np;      // D2: pieces per tile (1, 2, 4, 5 or 8)
     float eps;
     int T;
 };
@@ -176,11 +182,32 @@ __global__ void __launch_bounds__(gm::CT, 1) gdn_mid_kernel(const gm::MidP p) {
         const int i = b + k * nn;
         return i < QS ? i : i + HV * RQ;
     };
-    auto fill = [&](int k) {   // tile k into slot k & 1
+    auto tsrc = [&](int k) {
         const int tile = tile_of(k);
-        const uint8_t* src = tile < NTQ ? p.wq + (size_t) tile * PTILE : p.wz + (size_t) (tile - NTQ) * PTILE;
+        return tile < NTQ ? p.wq + (size_t) tile * PTILE : p.wz + (size_t) (tile - NTQ) * PTILE;
+    };
+    auto fill = [&](int k) {   // tile k into slot k & 1
         gm_mb_expect(bar + (k & 1), (uint32_t) PTILE);
-        gm_bulk_w(smem + (size_t) (k & 1) * PTILE, src, (uint32_t) PTILE, bar + (k & 1), p.ef != 0);
+        gm_bulk_w(smem + (size_t) (k & 1) * PTILE, tsrc(k), (uint32_t) PTILE, bar + (k & 1), p.ef != 0);
+    };
+    // D2, the bounded stream: piece n = tile n / np, part n % np; piece n is copied once piece n - depth has landed
+    const int dep = p.depth, np = p.np, pb = PTILE / np;
+    const int p0 = dep > 0 ? (dep < mine * np ? dep : mine * np) : 0;   // the pieces copied up front (no wait)
+    auto pbar = [&](int s, int j) { return bar + 4 + s * NPMAX + j; };
+    volatile int* armed = reinterpret_cast<volatile int*>(smem + OFF_ARM);   // [slot]: pieces armed in it so far
+    auto piece = [&](int n) {
+        const int k = n / np, j = n % np, s = k & 1;
+        gm_mb_expect(pbar(s, j), (uint32_t) pb);
+        gm_bulk_w(smem + (size_t) s * PTILE + (size_t) j * pb, tsrc(k) + (size_t) j * pb, (uint32_t) pb, pbar(s, j), p.ef != 0);
+        __threadfence_block();
+        armed[s] = (k >> 1) * np + j + 1;
+    };
+    // piece n has landed; the other slot's piece is waited for only once armed (else its barrier may still be on the phase
+    // before, two tiles back)
+    auto landed = [&](int n) {
+        const int k = n / np, j = n % np, s = k & 1;
+        while (armed[s] <= (k >> 1) * np + j) {}
+        gm_mb_wait(pbar(s, j), (uint32_t) ((k >> 1) & 1));
     };
     // the weights and the state do not depend on the kernel before: requested before the grid dependency wait
     // dec/front: each part before the grid wait (the head start) or after it (p.head; the tile copies flood the memory
@@ -192,16 +219,31 @@ __global__ void __launch_bounds__(gm::CT, 1) gdn_mid_kernel(const gm::MidP p) {
     };
     if (tid == 0) {
         gm_mb_init(bar); gm_mb_init(bar + 1); gm_mb_init(bar + 2); gm_mb_init(bar + 3);
+        if (dep > 0) {
+            for (int i = 0; i < 2 * NPMAX; ++i) gm_mb_init(bar + 4 + i);
+            armed[0] = armed[1] = 0;
+        }
         asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
-        for (int k = 0; k < 2 && k < mine; ++k)
-            if (p.head & (k == 0 ? 1 : 4)) fill(k);
+        if (dep > 0) {
+            if (p.head & 1)
+                for (int n = 0; n < p0; ++n) piece(n);
+        } else {
+            for (int k = 0; k < 2 && k < mine; ++k)
+                if (p.head & (k == 0 ? 1 : 4)) fill(k);
+        }
     }
     if (p.head & 2) pf();
     __syncthreads();
     pdl_wait();
-    if (tid == 0)
-        for (int k = 0; k < 2 && k < mine; ++k)
-            if (!(p.head & (k == 0 ? 1 : 4))) fill(k);
+    if (tid == 0) {
+        if (dep > 0) {
+            if (!(p.head & 1))
+                for (int n = 0; n < p0; ++n) piece(n);
+        } else {
+            for (int k = 0; k < 2 && k < mine; ++k)
+                if (!(p.head & (k == 0 ? 1 : 4))) fill(k);
+        }
+    }
     if (!(p.head & 2)) pf();
     pdl_trigger();   // the next read's first kernel may take the SMs this launch's CTAs leave (it waits for the whole grid)
     STAMP(1);
@@ -225,7 +267,21 @@ __global__ void __launch_bounds__(gm::CT, 1) gdn_mid_kernel(const gm::MidP p) {
             const bool isq = tile < NTQ;
             float* y = isq ? p.qkv : p.z;
             const int no = isq ? NQ : NZ, row0 = (isq ? tile : tile - NTQ) * 16;
-            gm_mb_wait(bar + slot, (uint32_t) ((k >> 1) & 1));
+            if (dep > 0) {
+                // the group's own tile: its pieces not copied up front, each after piece n - depth (the slot is free: the
+                // group read tile k - 2 out of it before its last barrier)
+                if (ltid == 0) {
+                    const int n0 = p0 > k * np ? p0 : k * np;
+                    if (n0 < (k + 1) * np) gm_pfence();
+                    for (int n = n0; n < (k + 1) * np; ++n) {
+                        if (n >= dep) landed(n - dep);
+                        piece(n);
+                    }
+                }
+                for (int j = 0; j < np; ++j) gm_mb_wait(pbar(slot, j), (uint32_t) ((k >> 1) & 1));
+            } else {
+                gm_mb_wait(bar + slot, (uint32_t) ((k >> 1) & 1));
+            }
             const uint8_t* sl = smem + (size_t) slot * PTILE;
             float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
             pair_terms_xr<8>(acc, sl + g * PROW, sl + (g + 8) * PROW, lw, hb, n, t, nchunk, xs, nullptr);
@@ -235,7 +291,7 @@ __global__ void __launch_bounds__(gm::CT, 1) gdn_mid_kernel(const gm::MidP p) {
             rw[(g + 8) * kMaxCols + 2 * t] = acc[2];
             rw[(g + 8) * kMaxCols + 2 * t + 1] = acc[3];
             gm_barn(2 + gi, 256);   // the slot is read and the warp sums are in
-            if (ltid == 0 && k + 2 < mine) {
+            if (dep == 0 && ltid == 0 && k + 2 < mine) {
                 gm_pfence();
                 fill(k + 2);
             }
@@ -517,11 +573,19 @@ __global__ void __launch_bounds__(gm::CT, 1) gdn_mid_kernel(const gm::MidP p) {
 #endif
 }
 
+// The grid per device: every CTA must be resident at once (the hand-offs spin), so a layer split's smaller card must not
+// take the grid the first card sized.  Set up on each device too (cudaFuncSetAttribute is per device).
 int mid_grid() {
-    static const int g = [] {
+    static std::atomic<int> grid_of[64];   // 0 unknown, else grid + 1
+    int cur = 0;
+    if (cudaGetDevice(&cur) != cudaSuccess || cur < 0 || cur >= 64) { (void) cudaGetLastError(); return 0; }
+    const int known = grid_of[cur].load(std::memory_order_acquire);
+    if (known != 0) return known - 1;
+    const int g = [] {
         int dev = 0, sms = 0, optin = 0;
         cudaGetDevice(&dev);
         cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
+        sms = strata::sms_of(sms);   // STRATA_EMULATE_SMS (tests only): its grid waits for every CTA
         cudaDeviceGetAttribute(&optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
         int major = 0;
         cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
@@ -532,6 +596,7 @@ int mid_grid() {
         if (occ < 1) return 0;
         return sms < 170 ? sms : 170;
     }();
+    grid_of[cur].store(g + 1, std::memory_order_release);
     return g;
 }
 
@@ -565,6 +630,21 @@ void gdn_mid(const GdnMidArgs& a, void* stream) {
     p.stamps = a.stamps;
     static const int split = [] { const char* v = std::getenv("STRATA_GDN_MID_SPLIT"); return v != nullptr ? std::atoi(v) : 1; }();
     p.split = split;
+    // dec/round3 D2: STRATA_GDN_MID_DEPTH pieces in flight per CTA (0: the two-tile ring), STRATA_GDN_MID_PIECES pieces a tile.
+    // Default 1 x 10880 B (10.6 KiB in flight; gpu-probe lat1: 8-16 KiB/SM is full DRAM rate, more only slows every L2 hit):
+    // bitwise, cold-L2 gdn_parity T 1/3/8 47.1/49.5/59.4 -> 46.3/47.3/55.3 us (bench-d3 NOTES-d3.md D2)
+    static const int pieces = [] {
+        const char* v = std::getenv("STRATA_GDN_MID_PIECES");
+        const int n = v != nullptr ? std::atoi(v) : 4;
+        return n == 1 || n == 2 || n == 4 || n == 5 || n == 8 ? n : 4;
+    }();
+    static const int depth = [] {
+        const char* v = std::getenv("STRATA_GDN_MID_DEPTH");
+        const int d = v != nullptr ? std::atoi(v) : 1;
+        return d < 0 ? 0 : d > 2 * pieces ? 2 * pieces : d;
+    }();
+    p.depth = depth;
+    p.np = pieces;
     static const int ef = [] { const char* v = std::getenv("STRATA_GDN_MID_EF"); return v != nullptr ? std::atoi(v) : 1; }();
     p.ef = ef;
     static const int head = [] { const char* v = std::getenv("STRATA_GDN_MID_HEAD"); return v != nullptr ? std::atoi(v) : 7; }();

@@ -686,6 +686,9 @@ private:
     // mixer's projections, joined before the recurrence / the attention
     cudaStream_t side_ = nullptr;
     cudaEvent_t mfork_ = nullptr, mjoin_ = nullptr;
+    // dec3 D5 STRATA_IDX_FORK: the indexer's key append on a branch off side_ beside its query projection
+    cudaStream_t side3_ = nullptr;
+    cudaEvent_t afork_ = nullptr, ajoin_ = nullptr;
     // fork b063c13 (STRATA_SIDE_MIXER=2): a second branch for the GDN gate projection and the QSA queries' chain
     cudaStream_t side2_ = nullptr;
     cudaEvent_t pfork_ = nullptr, pjoin_ = nullptr;

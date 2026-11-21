@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <thread>
+#include <type_traits>
 
 #if defined(STRATA_VIT_HIP)
 #include <hip/hip_fp16.h>
@@ -444,6 +445,33 @@ struct VitGpuImpl {
     size_t bytes = 0, work_bytes = 0;
     std::vector<void*> work;        // the work buffers (a prefix of allocs is weights, the rest are these)
     size_t n_weight_allocs = 0;
+    // The engine's in-process reader (VitGpu::stage / bind): M_STAGE lays the weights out in a host image (pinned once) at offsets from kFake, M_ARENA
+    // carves weights and work buffers from device memory the caller lends (the engine's borrowed expert slots).  M_DIRECT is the reader program's cudaMalloc.
+    enum Mode { M_DIRECT, M_STAGE, M_ARENA };
+    Mode mode = M_DIRECT;
+    static constexpr uintptr_t kFake = (uintptr_t) 1 << 44;
+    std::vector<unsigned char> stage_img;          // the weights as the device holds them, before the pin
+    unsigned char* pinned = nullptr;               // that image in page-locked RAM (cudaHostAlloc); null: stage_img is copied as it is
+    size_t stage_bytes = 0;
+    std::vector<std::pair<size_t, size_t>> hf_fix;   // (offset, elements): K_HF matrices, BF16 -> F16 on the device after each upload
+    char* arena = nullptr;
+    size_t arena_cap = 0, arena_used = 0, weights_end = 0;
+    bool bound = false;
+    static size_t align256(size_t n) { return (n + 255) / 256 * 256; }
+    template <class F> void each_weight(F f) {
+        f(patch_w); f(patch_b); f(pos); f(post_w); f(post_b); f(mm0_b); f(mm2_b); f(mm0.p); f(mm2.p);
+        for (DevLayer& L : layers) {
+            f(L.ln1_w); f(L.ln1_b); f(L.ln2_w); f(L.ln2_b); f(L.qkv_b); f(L.o_b); f(L.up_b); f(L.down_b);
+            f(L.qkv.p); f(L.o.p); f(L.up.p); f(L.down.p);
+        }
+    }
+    void rebase(intptr_t delta) {
+        each_weight([delta](auto*& p) { if (p) p = (std::remove_reference_t<decltype(p)>) ((char*) p + delta); });
+    }
+    bool h2d(void* dst, const void* src, size_t n) {
+        if (mode == M_STAGE) { std::memcpy(stage_img.data() + ((uintptr_t) dst - kFake), src, n); return true; }
+        return cudaMemcpy(dst, src, n, cudaMemcpyHostToDevice) == cudaSuccess;
+    }
 
     float *patch_w = nullptr, *patch_b = nullptr, *pos = nullptr, *post_w = nullptr, *post_b = nullptr, *mm0_b = nullptr, *mm2_b = nullptr;
     DevW mm0, mm2;
@@ -672,8 +700,29 @@ struct VitGpuImpl {
 #endif
         for (void* p : allocs) (void) cudaFree(p);
         if (blas) cublasDestroy(blas);
+#if !defined(STRATA_VIT_HIP)
+        if (pinned) (void) cudaFreeHost(pinned);
+#endif
     }
     template <class T> bool alloc(T*& p, size_t n, std::string& err, bool weight) {
+        if (mode == M_STAGE) {
+            if (!weight) { err = "a work buffer while the weights are staged"; return false; }
+            const size_t off = align256(stage_bytes);
+            stage_bytes = off + n * sizeof(T);
+            stage_img.resize(stage_bytes);
+            p = (T*) (kFake + off);
+            bytes += n * sizeof(T);
+            return true;
+        }
+        if (mode == M_ARENA) {
+            const size_t off = align256(arena_used);
+            if (off + n * sizeof(T) > arena_cap) { err = "GPU memory: the borrowed room is too small"; return false; }
+            p = (T*) (arena + off);
+            arena_used = off + n * sizeof(T);
+            bytes += n * sizeof(T);
+            if (!weight) work_bytes += n * sizeof(T);
+            return true;
+        }
         void* q = nullptr;
         const cudaError_t e = cudaMalloc(&q, n * sizeof(T));
         if (e != cudaSuccess) { err = std::string("GPU memory: ") + cudaGetErrorString(e); (void) cudaGetLastError(); return false; }
@@ -689,7 +738,7 @@ struct VitGpuImpl {
         std::vector<float> h((size_t) t->nelem());
         if (!gg.read_f32(*t, h.data(), err)) return false;
         if (!alloc(dst, h.size(), err, true)) return false;
-        return cudaMemcpy(dst, h.data(), h.size() * 4, cudaMemcpyHostToDevice) == cudaSuccess || (err = "GPU copy failed", false);
+        return h2d(dst, h.data(), h.size() * 4) || (err = "GPU copy failed", false);
     }
     bool upload_matrix(DevW& w, const Gguf& gg, const std::string& name, std::string& err) {
         const GgufTensorInfo* t = gg.tensor(name);
@@ -735,8 +784,10 @@ struct VitGpuImpl {
         uint16_t* dev = nullptr;
         if (!alloc(dev, n, err, true)) return false;
         w.p = dev;
-        if (cudaMemcpy(w.p, raw.data(), n * 2, cudaMemcpyHostToDevice) != cudaSuccess) { err = "GPU copy failed"; return false; }
-        if (w.kind == K_HF) {
+        if (!h2d(w.p, raw.data(), n * 2)) { err = "GPU copy failed"; return false; }
+        if (w.kind == K_HF && mode == M_STAGE) {   // converted on the device after each upload (VitGpu::bind)
+            hf_fix.emplace_back((uintptr_t) dev - kFake, n);
+        } else if (w.kind == K_HF) {
             k_bf16_to_f16<<<blocks_for(n), 256>>>(dev, n);
             if (cudaGetLastError() != cudaSuccess) { err = "the BF16 to F16 conversion failed on the GPU"; return false; }
         }
@@ -782,6 +833,7 @@ struct VitGpuImpl {
         (void) cudaSetDevice(device);
         // free the old work buffers and take new ones sized for this many patches
         for (size_t i = allocs.size(); i > n_weight_allocs; --i) { (void) cudaFree(allocs[i - 1]); }
+        if (mode == M_ARENA) arena_used = weights_end;   // the borrowed room: the work buffers start again after the weights
         bytes -= work_bytes;
         work_bytes = 0;
         allocs.resize(n_weight_allocs);
@@ -932,7 +984,7 @@ bool VitGpu::load(const Gguf& gg, const VitGeometry& g, int device, int max_patc
         const cudaError_t se = set_device_retrying(device);
         if (se != cudaSuccess) { err = std::string("cannot use GPU ") + std::to_string(device) + ": " + cudaGetErrorString(se); return false; }
     }
-    if (cublasCreate(&m.blas) != CUBLAS_STATUS_SUCCESS) { err = "cannot create the BLAS handle"; return false; }
+    if (m.mode != VitGpuImpl::M_STAGE && cublasCreate(&m.blas) != CUBLAS_STATUS_SUCCESS) { err = "cannot create the BLAS handle"; return false; }
 #if defined(STRATA_VIT_HIPBLASLT)
     m.lt_setup();
 #endif
@@ -966,7 +1018,7 @@ bool VitGpu::load(const Gguf& gg, const VitGeometry& g, int device, int max_patc
             for (size_t i = 0; i < w0.size(); ++i) w0[i] += w1[i];
         }
         if (!m.alloc(m.patch_w, w0.size(), err, true)) return false;
-        if (cudaMemcpy(m.patch_w, w0.data(), w0.size() * 4, cudaMemcpyHostToDevice) != cudaSuccess) { err = "GPU copy failed"; return false; }
+        if (!m.h2d(m.patch_w, w0.data(), w0.size() * 4)) { err = "GPU copy failed"; return false; }
     }
     if (!m.upload_f32(m.patch_b, gg, "v.patch_embd.bias", err) || !m.upload_f32(m.pos, gg, "v.position_embd.weight", err) ||
         !m.upload_f32(m.post_w, gg, "v.post_ln.weight", err) || !m.upload_f32(m.post_b, gg, "v.post_ln.bias", err) ||
@@ -1005,6 +1057,7 @@ bool VitGpu::load(const Gguf& gg, const VitGeometry& g, int device, int max_patc
     if (const char* e = std::getenv("STRATA_VIT_SCORES_LARGE")) { const long v = std::atol(e); if (v >= 1) m.kScoreElemsLarge = (size_t) v << 20; }
     if (const char* e = std::getenv("STRATA_VIT_NPAD")) { const int v = std::atoi(e); if (v >= 8 && v % 8 == 0) m.n_pad = v; }
     if (const char* e = std::getenv("STRATA_VIT_QALIGN")) { const int v = std::atoi(e); if (v >= 1) m.q_align = v; }
+    if (m.mode == VitGpuImpl::M_STAGE) return true;    // VitGpu::stage pins the image
     return m.size_buffers(std::max(max_patches, 16), err);
 }
 
@@ -1160,5 +1213,102 @@ bool VitGpu::encode(const PreparedImage& img, std::vector<float>& rows, int& nx,
 #endif
     return true;
 }
+
+#if !defined(STRATA_VIT_HIP)
+// ---- the engine's in-process reader (strata --vision-gpu): the weights in pinned RAM, the GPU memory lent per picture ----
+
+bool VitGpu::stage(const Gguf& gg, const VitGeometry& g, int device, std::string& err) {
+    VitGpuImpl& m = *impl_;
+    m.mode = VitGpuImpl::M_STAGE;
+    if (!load(gg, g, device, 0, err)) return false;
+    m.n_weight_allocs = 0;
+    m.weights_end = VitGpuImpl::align256(m.stage_bytes);
+    void* h = nullptr;
+    if (cudaHostAlloc(&h, m.stage_bytes, cudaHostAllocDefault) == cudaSuccess) {
+        std::memcpy(h, m.stage_img.data(), m.stage_bytes);
+        m.pinned = (unsigned char*) h;
+        std::vector<unsigned char>().swap(m.stage_img);
+    } else {
+        (void) cudaGetLastError();   // pageable: slower uploads, the same result
+    }
+    m.bytes = 0;
+    return true;
+}
+
+size_t VitGpu::staged_bytes() const { return impl_->stage_bytes; }
+bool VitGpu::staged_pinned() const { return impl_->pinned != nullptr; }
+
+size_t VitGpu::arena_need(int max_patches) {
+    VitGpuImpl& m = *impl_;
+    if (m.mode != VitGpuImpl::M_STAGE || m.bound) return 0;
+    // a dry run of size_buffers on an address range nothing reads: the work buffers' sizes for this many patches
+    m.mode = VitGpuImpl::M_ARENA;
+    m.arena = (char*) (VitGpuImpl::kFake << 1);
+    m.arena_cap = SIZE_MAX / 4;
+    m.arena_used = m.weights_end;
+    m.cap_patches = 0;
+    m.work_bytes = 0;
+    std::string e;
+    const bool ok = m.size_buffers(std::max(max_patches, 16), e);
+    const size_t need = ok ? VitGpuImpl::align256(m.arena_used) + kVitBlasWorkspace : 0;
+    m.mode = VitGpuImpl::M_STAGE;
+    m.arena = nullptr;
+    m.arena_cap = m.arena_used = 0;
+    m.cap_patches = 0;
+    m.bytes = m.work_bytes = 0;
+    m.d_x = m.d_y = m.d_ctx = m.d_out = nullptr;
+    m.d_a = m.d_f16 = m.d_q16 = m.d_k16 = m.d_v16 = nullptr;
+    m.d_S = nullptr;
+    return need;
+}
+
+bool VitGpu::bind(void* base, size_t bytes, std::string& err) {
+    VitGpuImpl& m = *impl_;
+    if (m.mode != VitGpuImpl::M_STAGE || m.bound) { err = "the tower is not staged"; return false; }
+    if (bytes < m.weights_end + kVitBlasWorkspace + 4096) { err = "GPU memory: the borrowed room is too small"; return false; }
+    if (!m.blas && cublasCreate(&m.blas) != CUBLAS_STATUS_SUCCESS) { err = "cannot create the BLAS handle"; return false; }
+    const unsigned char* src = m.pinned ? m.pinned : m.stage_img.data();
+    if (cudaMemcpy(base, src, m.stage_bytes, cudaMemcpyHostToDevice) != cudaSuccess) {
+        err = std::string("uploading the vision weights: ") + cudaGetErrorString(cudaGetLastError());
+        return false;
+    }
+    char* b = (char*) base;
+    for (const auto& [off, n] : m.hf_fix) k_bf16_to_f16<<<VitGpuImpl::blocks_for(n), 256>>>((uint16_t*) (b + off), n);
+    if (cudaGetLastError() != cudaSuccess) { err = "the BF16 to F16 conversion failed on the GPU"; return false; }
+    // cuBLAS's workspace in the tail of the room: it allocates none of its own
+    if (cublasSetWorkspace(m.blas, b + bytes - kVitBlasWorkspace, kVitBlasWorkspace) != CUBLAS_STATUS_SUCCESS) { err = "cannot set the BLAS workspace"; return false; }
+    m.rebase((intptr_t) b - (intptr_t) VitGpuImpl::kFake);
+    m.mode = VitGpuImpl::M_ARENA;
+    m.arena = b;
+    m.arena_cap = bytes - kVitBlasWorkspace;
+    m.arena_used = m.weights_end;
+    m.cap_patches = 0;
+    m.bytes = m.weights_end;
+    m.work_bytes = 0;
+    m.bound = true;
+    return true;
+}
+
+void VitGpu::unbind() {
+    VitGpuImpl& m = *impl_;
+    if (!m.bound) return;
+    (void) cudaDeviceSynchronize();
+    if (m.blas) (void) cublasSetWorkspace(m.blas, nullptr, 0);
+    // the cuBLAS handle goes with the room and is made again at the next picture: 138 -> 74 MiB of VRAM left outside the slots after the first
+    // picture, no time measured (STRATA_VISION_GPU_BLAS_KEEP=1 keeps it)
+    static const bool keep = [] { const char* v = std::getenv("STRATA_VISION_GPU_BLAS_KEEP"); return v != nullptr && v[0] == '1'; }();
+    if (!keep && m.blas) { (void) cublasDestroy(m.blas); m.blas = nullptr; }
+    m.rebase((intptr_t) VitGpuImpl::kFake - (intptr_t) m.arena);
+    m.mode = VitGpuImpl::M_STAGE;
+    m.arena = nullptr;
+    m.arena_cap = m.arena_used = 0;
+    m.cap_patches = 0;
+    m.bytes = m.work_bytes = 0;
+    m.d_x = m.d_y = m.d_ctx = m.d_out = nullptr;
+    m.d_a = m.d_f16 = m.d_q16 = m.d_k16 = m.d_v16 = nullptr;
+    m.d_S = nullptr;
+    m.bound = false;
+}
+#endif  // !STRATA_VIT_HIP
 
 }  // namespace strata_vit

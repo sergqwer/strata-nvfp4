@@ -6291,6 +6291,25 @@ def engine_defs(archs, toolkit=13) -> list:
     return ["-DSTRATA_EXPERIMENTAL_SM60=ON"] if min(int(x) for x in archs) < 75 or int(toolkit) == 12 else []
 
 
+def engine_reads_pictures(eng) -> bool:
+    """The engine in `eng` reads pictures itself (strata --vision-gpu, the CUDA build after 0.2.15-nvfp4.4): its BUILD.json says "vision_gpu", or a
+    locally built engine carries the option."""
+    try:
+        meta = json.loads((Path(eng) / "BUILD.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        meta = {}
+    if meta.get("vision_gpu") is True:
+        return True
+    if meta.get("source") != "local":
+        return False
+    try:
+        import mmap
+        with open(Path(eng) / EXE, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
+            return m.find(b"--vision-gpu MMPROJ") >= 0
+    except (OSError, ValueError):
+        return False
+
+
 def prebuilt_vision(meta: dict, gpu: dict, vision: str) -> str:
     """The image encoder to use with a ready-made engine (`meta`: its BUILD.json).  The encoder can cover fewer cards
     than the engine (0.1.30/0.1.31: no RTX 20 code, #331): such a card gets the CPU encoder - the same program - instead
@@ -6970,7 +6989,7 @@ SETUP_ENV = frozenset({"STRATA_HIPBLASLT_TUNING", "STRATA_ROCBLAS_TUNING", "STRA
 # (0.1.44 dropped them with the rest of SETUP_ENV).  This fork's NVFP4 / Q8_0 / mix packs and Qwen3.6 never get them
 # from setup either, so there too they are the user's own.
 SETUP_ENV_UNSLOTH = frozenset({"STRATA_MMQ_KQ", "STRATA_HC_Q8", "STRATA_ROUTE_TAIL_SKIP"})
-SETUP_VISION = frozenset({"exe", "cpu_exe", "mmproj", "model", "gpu", "max_tokens", "threads"})
+SETUP_VISION = frozenset({"exe", "cpu_exe", "mmproj", "model", "gpu", "max_tokens", "threads", "in_engine", "preload"})
 
 
 def carry_over(old: dict, cfg: dict, explicit: list[str] | None = None) -> list[str]:
@@ -9475,6 +9494,14 @@ def nvfp4_install(a, family: str, gpu: dict, multi: list, cuda_tk: int, ram: flo
                          "gpu": vision == "gpu", "max_tokens": int(vt)}
         if vision == "cpu":
             cfg["vision"]["threads"] = max(1, (os.cpu_count() or 8) // 2)
+            # the engine reads the pictures on the GPU in borrowed expert slots (strata --vision-gpu), the CPU reader above is its fallback;
+            # --vision cpu keeps the CPU reader alone
+            from strata_control import vision_reader as VR
+            if VR.in_engine_wanted(a.vision, vision, engine_reads_pictures(eng)):
+                cfg["vision"]["in_engine"] = True
+                cfg["vision"]["preload"] = True     # pinned and warmed up at the start (+1.2 s), so the first picture is as fast as the rest
+                ok("images: read on the GPU by the engine, in expert slots it borrows for each picture and refills right after "
+                   "(the CPU reader when there is no room; --vision cpu keeps the CPU reader)")
     cal = setup_calibration(cfg, False)                # tuned earlier (START-HERE --calibrate): kept by a re-run
     if cal is not None:
         sys.path.insert(0, str(ROOT / "tools"))

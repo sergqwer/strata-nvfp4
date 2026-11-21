@@ -104,7 +104,15 @@ __device__ __forceinline__ float sig_(float x) { return __fdiv_rn(1.0f, __fadd_r
 // hang).  The last block to pass zeroes the gate and the pass count for the next use.  Activations the combine (or a kernel
 // before it on another stream) wrote are then read through L2 (ld.cg), never a possibly stale L1 line.
 __device__ unsigned g_er_abort;
-__device__ __forceinline__ void er_gate(const GrMulti& m) {
+__device__ __forceinline__ void er_pass(const GrMulti& m) {
+    if (atomicAdd(m.gate_pass, 1u) == gridDim.x * gridDim.y - 1u) {
+        atomicExch(const_cast<unsigned*>(m.gate), 0u);
+        atomicExch(m.gate_pass, 0u);
+    }
+}
+// late (dec-round3 D3 STRATA_ER_LATE_PASS, default 1): the block counts its pass with er_pass after its dots, so thread 0
+// does not hold the block for that atomic's round trip right after the gate opens
+__device__ __forceinline__ void er_gate(const GrMulti& m, bool late = false) {
     const unsigned* c = m.gate;
     auto ldacq = [](const unsigned* p) {
         unsigned v;
@@ -126,11 +134,10 @@ __device__ __forceinline__ void er_gate(const GrMulti& m) {
             }
         }
     }
-    if (atomicAdd(m.gate_pass, 1u) == gridDim.x * gridDim.y - 1u) {
-        atomicExch(const_cast<unsigned*>(c), 0u);
-        atomicExch(m.gate_pass, 0u);
-    }
+    if (!late) er_pass(m);
 }
+__device__ __forceinline__ bool er_late_pass_on(const GrMulti& m) { return (m.hc_flag & 2) != 0; }
+__device__ __forceinline__ bool hc8_lostage_on(const GrMulti& m) { return (m.hc_flag & 4) != 0; }
 
 // R rows a warp.  INJF = false: 10 row groups of 32 rows (R = 4) and an inject group (220 blocks, 2 a multiprocessor);
 // INJF = true (STRATA_HC8_DOWN=1): R = 5, 8 row groups of 40 rows (160 blocks, one wave), inject row g in row group g's
@@ -197,7 +204,7 @@ __global__ void __launch_bounds__(THREADS, INJF ? 1 : 2) hc8_down_kernel(GrMulti
                 gw[p] = __ldcg(a.apply ? a.inj_prev + c : a.R);
             }
         }
-        if (t == 0) er_gate(m);
+        if (t == 0) er_gate(m, er_late_pass_on(m));
         __syncthreads();
         gr_pdl_launch_dependents();
 #pragma unroll
@@ -336,6 +343,8 @@ __global__ void __launch_bounds__(THREADS, INJF ? 1 : 2) hc8_down_kernel(GrMulti
             if ((lane & ((1 << SH) - 1)) == 0 && k < T) part[((size_t) k * NS + s) * PRS + LR + (inj ? warp : rg)] = tot;
         }
     }
+    if constexpr (PDL == 2)
+        if (t == 0 && er_late_pass_on(m)) er_pass(m);   // D3: the gate's pass count, after the dots
     // the last block of the row group adds the slices
     __threadfence();
     __syncthreads();
@@ -559,9 +568,30 @@ __global__ void __launch_bounds__(THREADS) hc8_upq_kernel(GrMulti m, const int8_
             }
         }
     }
-    for (int i = t; i < T * LR; i += THREADS) {
-        const int k = i / LR, r = i - k * LR, qq = r / UQ;
-        lo[k][qq * UQP + (r - qq * UQ)] = __ldg(m.a[k].lo + r);
+    if (hc8_lostage_on(m)) {   // D3 STRATA_HC8_LOSTAGE (default 1): every lo load in flight before the first store
+        constexpr int NLO = (T * LR + THREADS - 1) / THREADS;   // (the loop below waits a round trip per pass)
+        float lv[NLO];
+#pragma unroll
+        for (int j = 0; j < NLO; ++j) {
+            const int i = t + j * THREADS;
+            if (i < T * LR) {
+                const int k = i / LR;
+                lv[j] = __ldg(m.a[k].lo + (i - k * LR));
+            }
+        }
+#pragma unroll
+        for (int j = 0; j < NLO; ++j) {
+            const int i = t + j * THREADS;
+            if (i < T * LR) {
+                const int k = i / LR, r = i - k * LR, qq = r / UQ;
+                lo[k][qq * UQP + (r - qq * UQ)] = lv[j];
+            }
+        }
+    } else {
+        for (int i = t; i < T * LR; i += THREADS) {
+            const int k = i / LR, r = i - k * LR, qq = r / UQ;
+            lo[k][qq * UQP + (r - qq * UQ)] = __ldg(m.a[k].lo + r);
+        }
     }
     if (t < T * HC) {
         const int k = t / HC, cc = t - k * HC;
@@ -620,9 +650,20 @@ inline int hc8_up_variant() {
     return v;
 }
 
+// dec-round3 D3 switches (default 1, =0 the old path; the fused_gr_set_* test hooks override them): STRATA_HC8_LOSTAGE
+// upq stages lo with all its loads in flight; STRATA_ER_LATE_PASS the early read counts its gate pass after the dots.
+inline int& hc8_lostage_ref() { static int v = -2; return v; }
+inline int& er_late_pass_ref() { static int v = -2; return v; }
+inline bool hc8_switch(int& v, const char* name) {
+    if (v == -2) { const char* e = std::getenv(name); v = e != nullptr ? (std::atoi(e) != 0) : 1; }
+    return v != 0;
+}
 template <int T>
-cudaError_t launch_t(const GrMulti& m, const int8_t* qd, const int8_t* qu, float* scratch, unsigned* cnt, cudaStream_t st,
+cudaError_t launch_t(const GrMulti& m0, const int8_t* qd, const int8_t* qu, float* scratch, unsigned* cnt, cudaStream_t st,
                      bool pdl, unsigned long long* stamp_buf, int stamp_i0, bool gated = false) {
+    GrMulti m = m0;
+    m.hc_flag = (unsigned char) ((gated && hc8_switch(er_late_pass_ref(), "STRATA_ER_LATE_PASS") ? 2 : 0) |
+                                 (hc8_switch(hc8_lostage_ref(), "STRATA_HC8_LOSTAGE") ? 4 : 0));
     const unsigned short* sd = reinterpret_cast<const unsigned short*>(qd + (size_t) LR * D);
     const unsigned short* su = reinterpret_cast<const unsigned short*>(qu + (size_t) LR * D);
     float* part = scratch;

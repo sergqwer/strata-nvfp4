@@ -241,6 +241,27 @@ class Vision(unittest.TestCase):
         self.assertEqual((saved["vision"]["gpu"], saved["vision"]["max_tokens"]), (False, 600))
 
 
+class EngineReadsPictures(unittest.TestCase):
+    """setup.engine_reads_pictures: the release engine says so in BUILD.json ("vision_gpu"), a local build carries --vision-gpu in its help."""
+
+    def folder(self, meta, exe=b""):
+        d = Path(tempfile.mkdtemp(prefix="erp-"))
+        (d / "BUILD.json").write_text(json.dumps(meta), encoding="utf-8")
+        (d / setup.EXE).write_bytes(exe or b"MZ\0")
+        return d
+
+    def test_the_release_says_it(self):
+        self.assertTrue(setup.engine_reads_pictures(self.folder({**FORK, "vision_gpu": True})))
+        self.assertFalse(setup.engine_reads_pictures(self.folder(FORK)))          # an older release: the CPU reader alone
+
+    def test_a_local_build_is_read(self):
+        self.assertTrue(setup.engine_reads_pictures(self.folder({"source": "local"}, b"MZ..  --vision-gpu MMPROJ  --serve ..")))
+        self.assertFalse(setup.engine_reads_pictures(self.folder({"source": "local"}, b"MZ.. no such option ..")))
+
+    def test_no_engine(self):
+        self.assertFalse(setup.engine_reads_pictures(Path(tempfile.mkdtemp(prefix="erp-"))))
+
+
 class Texts(unittest.TestCase):
     def test_the_fork_s_version_is_written_as_its_tag(self):
         self.assertEqual(setup.version_text(setup.version_tuple("0.1.40.3-nvfp4.1")), "0.1.40.3-nvfp4.1")

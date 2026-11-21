@@ -8,6 +8,8 @@ namespace strata::kernels {
 // native QSA norm/gate switch; existing captures retain their selected kernels.
 void native_qsa_indexer_set_enabled(bool enabled);
 bool native_qsa_indexer_enabled();
+// Test hook (dec3 D5): 1 / 0 forces the parallel window append on / off, -1 = STRATA_IDX_APPEND_PAR (default on).
+void native_qsa_indexer_set_append_par(int on);
 
 // Pinned F16 raw-key cache / F32 pooling / weighted RMSNorm / text IMRoPE.
 // Fixed single-sequence geometry: idx_dim=128, idx_block=4, n_rot=64.

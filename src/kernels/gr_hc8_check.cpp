@@ -7,8 +7,13 @@
 //     against the fp64 reference on its bf16 weights); the q8_1 image of mixed (STRATA_QFUSE) against the host's.
 // --bench: the time per read (down + up) of hc8 and the bf16 v4 read (the default), the weights from DRAM (24 sets in
 // rotation), medians of 15 replays.
+// dec-round3 D3: the solo reads run on the old path (STRATA_HC8_LOSTAGE=0) and the windows on the default, so every window
+// case is also old-vs-new bitwise.  --bench adds the LOSTAGE arm; --bench-gated times the early read
+// (fused_gr_read_multi_gated) released by a real combine_sig, as the verifier chains it (old / LOSTAGE / + ER_LATE_PASS),
+// and checks its outputs bitwise against the ungated read on the old path.
 #include "strata/kernels/fused_gr.hpp"
 #include "strata/kernels/native_mmvq.hpp"
+#include "strata/kernels/native_moe.hpp"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -208,11 +213,146 @@ double err(const std::vector<float>& g, const std::vector<double>& r) {
 
 }  // namespace
 
+// D3: the early read as the verifier chains it: per layer the read forked onto a branch (its weights loaded, its down
+// blocks waiting on the gate), a few small nodes standing in for the CPU-row wait, then the combine that writes bo_prev
+// and counts its blocks into the gate; the branch joins back.  Per layer = the fork + delay + combine + the read's tail
+// after the combine.  Arms: old, STRATA_HC8_LOSTAGE, + STRATA_ER_LATE_PASS.  The read's outputs against an ungated read
+// (old path) of the combine's bo_prev: bitwise.
+int bench_gated_read(std::vector<Tok>& tok, float* xn, unsigned* qcnt, cudaStream_t st, const WSet& w0) {
+    constexpr int K = 10, NL = NSETS;
+    std::vector<WSet> sets;
+    sets.push_back(w0);
+    for (int i = 1; i < NL; ++i) sets.push_back(make_set(false));
+    float* parts = dalloc<float>((size_t) MAXT * K * N);
+    float* wts = dalloc<float>((size_t) MAXT * K);
+    float* shared = dalloc<float>((size_t) MAXT * N);
+    float* bo = dalloc<float>((size_t) MAXT * N);   // the combine's output = every token's bo_prev
+    float* xn2 = dalloc<float>((size_t) MAXT * D);
+    float* dummy = dalloc<float>((size_t) MAXT * N);
+    unsigned* gate = dalloc<unsigned>((size_t) 2 * NL);
+    unsigned* small = dalloc<unsigned>(64);
+    up(parts, gauss((size_t) MAXT * K * N, 0.3f));
+    up(wts, gauss((size_t) MAXT * K, 0.2f, 0.1f));
+    up(shared, gauss((size_t) MAXT * N, 0.3f));
+    ck(cudaMemset(gate, 0, sizeof(unsigned) * 2 * NL), "gate");
+    cudaStream_t st2 = nullptr;
+    ck(cudaStreamCreateWithFlags(&st2, cudaStreamNonBlocking), "stream2");
+    cudaEvent_t evf[NL], evj[NL];
+    for (int i = 0; i < NL; ++i) {
+        cudaEventCreateWithFlags(&evf[i], cudaEventDisableTiming);
+        cudaEventCreateWithFlags(&evj[i], cudaEventDisableTiming);
+    }
+    const int delay = std::getenv("GR_HC8_DELAY") != nullptr ? std::atoi(std::getenv("GR_HC8_DELAY")) : 4;
+    // every kernel once before a gated read spins (lazy module loading would wait for the spinning grid: the gate times out)
+    for (int T = 1; T <= MAXT; ++T) {
+        native_moe_combine_multi_sig(parts, wts, shared, bo, N, K, T, small + 63, st);
+        native_moe_combine_multi(parts, wts, shared, bo, N, K, T, st);
+    }
+    ck(cudaMemsetAsync(small, 0, 64 * 4, st), "warm");
+    ck(cudaStreamSynchronize(st), "warm combine");
+    int bad = 0;
+    const int reps = std::getenv("GR_HC8_REPS") != nullptr ? std::atoi(std::getenv("GR_HC8_REPS")) : 31;
+    std::printf("  early read (gated on the combine), %d layers a graph, %d small kernels before each combine, us a layer (medians of %d):\n", NL, delay, reps);
+    std::printf("    T   old       lostage   +late     l - old  l+l - old  bitwise\n");
+    for (int T = 2; T <= MAXT; ++T) {
+        std::vector<Tok*> tp;
+        for (int k = 0; k < T; ++k) tp.push_back(&tok[(size_t) k]);
+        const unsigned nb = native_moe_combine_multi_sig_blocks(parts, shared, bo, N, K, T);
+        constexpr int NV = 3;
+        cudaGraphExec_t gx[NV] = {};
+        for (int v = 0; v < NV; ++v) {
+            fused_gr_set_hc8_lostage(v >= 1 ? 1 : 0);   // arms: old, LOSTAGE, LOSTAGE + ER_LATE_PASS
+            fused_gr_set_er_late_pass(v == 2 ? 1 : 0);
+            cudaGraph_t g = nullptr;
+            ck(cudaStreamBeginCapture(st, cudaStreamCaptureModeThreadLocal), "gated capture");
+            for (int s = 0; s < NL; ++s) {
+                auto a = args_for(sets[(size_t) s], tp, true, true, true, qcnt);
+                for (int k = 0; k < T; ++k) a[(size_t) k].bo_prev = bo + (size_t) k * N;
+                cudaEventRecord(evf[s], st);
+                cudaStreamWaitEvent(st2, evf[s], 0);
+                if (!fused_gr_read_gated_ok(a.data(), T)) { std::printf("  gated read not available here\n"); std::exit(1); }
+                fused_gr_read_multi_gated(a.data(), T, xn2, gate + 2 * s, nb, gate + 2 * s + 1, st2);
+                cudaEventRecord(evj[s], st2);
+                for (int d = 0; d < delay; ++d) native_moe_combine_multi(parts, wts, shared, dummy, N, K, T, st);   // the CPU-row wait
+                native_moe_combine_multi_sig(parts, wts, shared, bo, N, K, T, gate + 2 * s, st);
+                cudaStreamWaitEvent(st, evj[s], 0);
+            }
+            ck(cudaStreamEndCapture(st, &g), "gated capture end");
+            ck(cudaGraphInstantiate(&gx[v], g, nullptr, nullptr, 0), "gated instantiate");
+            cudaGraphDestroy(g);
+        }
+        // a graph's first launch may run its branches in order (the gated read before the combine it waits for: the gate
+        // would time out, and its abort is sticky): each graph runs once with every gate already open, then the gates are
+        // zeroed
+        {
+            std::vector<unsigned> open((size_t) 2 * NL, 0u);
+            for (int s = 0; s < NL; ++s) open[(size_t) 2 * s] = nb;
+            for (int v = 0; v < NV; ++v) {
+                ck(cudaMemcpy(gate, open.data(), open.size() * 4, cudaMemcpyHostToDevice), "gates open");
+                ck(cudaGraphLaunch(gx[v], st), "gated warm");
+                ck(cudaStreamSynchronize(st), "gated warm sync");
+            }
+            ck(cudaMemset(gate, 0, sizeof(unsigned) * 2 * NL), "gates shut");
+        }
+        // bitwise: each arm's outputs (the last layer's set) against the ungated read with the old hand-off
+        std::vector<Out> ref((size_t) T);
+        {
+            fused_gr_set_er_late_pass(0);
+            fused_gr_set_hc8_lostage(0);
+            auto a = args_for(sets[(size_t) NL - 1], tp, true, true, true, qcnt);
+            for (int k = 0; k < T; ++k) a[(size_t) k].bo_prev = bo + (size_t) k * N;
+            native_moe_combine_multi(parts, wts, shared, bo, N, K, T, st);
+            for (auto* x : tp) clear(*x, st);
+            fused_gr_read_multi(a.data(), T, xn, st);
+            ck(cudaStreamSynchronize(st), "gated ref");
+            for (int k = 0; k < T; ++k) ref[(size_t) k] = snap(*tp[(size_t) k], true);
+        }
+        bool okv[NV];
+        for (int v = 0; v < NV; ++v) {
+            for (auto* x : tp) clear(*x, st);
+            if (std::getenv("GR_HC8_TRACE")) { std::printf("  [T=%d flag %d first run]\n", T, v); std::fflush(stdout); }
+            ck(cudaGraphLaunch(gx[v], st), "gated run");
+            ck(cudaStreamSynchronize(st), "gated sync");
+            okv[v] = true;
+            for (int k = 0; k < T; ++k) okv[v] = okv[v] && same(snap(*tp[(size_t) k], true), ref[(size_t) k], true, true);
+            if (!okv[v]) { ++bad; std::printf("  FAIL gated T=%d arm %d differs from the ungated read\n", T, v); }
+        }
+        cudaEvent_t e0, e1;
+        cudaEventCreate(&e0);
+        cudaEventCreate(&e1);
+        std::vector<float> ms[NV];
+        for (int r = 0; r < reps; ++r)
+            for (int j = 0; j < NV; ++j) {
+                const int v = (r + j) % NV;
+                cudaEventRecord(e0, st);
+                cudaGraphLaunch(gx[v], st);
+                cudaEventRecord(e1, st);
+                cudaEventSynchronize(e1);
+                float x = 0;
+                cudaEventElapsedTime(&x, e0, e1);
+                ms[v].push_back(x);
+            }
+        double us[NV];
+        for (int v = 0; v < NV; ++v) {
+            std::sort(ms[v].begin(), ms[v].end());
+            us[v] = 1000.0 * ms[v][ms[v].size() / 2] / NL;
+            cudaGraphExecDestroy(gx[v]);
+        }
+        std::printf("    %d   %7.2f   %7.2f   %7.2f   %+6.2f   %+6.2f    %s\n", T, us[0], us[1], us[2], us[1] - us[0], us[2] - us[0],
+                    okv[0] && okv[1] && okv[2] ? "yes" : "NO");
+        cudaEventDestroy(e0);
+        cudaEventDestroy(e1);
+    }
+    ck(cudaDeviceSynchronize(), "gated end");
+    return bad;
+}
+
 int main(int argc, char** argv) {
-    bool bench = false;
+    bool bench = false, bench_gated = false;
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--bench") bench = true;
-        else if (std::string(argv[i]) != "--selftest") { std::fprintf(stderr, "usage: gr_hc8_check [--selftest] [--bench]\n"); return 2; }
+        else if (std::string(argv[i]) == "--bench-gated") bench_gated = true;
+        else if (std::string(argv[i]) != "--selftest") { std::fprintf(stderr, "usage: gr_hc8_check [--selftest] [--bench] [--bench-gated]\n"); return 2; }
     }
     cudaDeviceProp p{};
     ck(cudaGetDeviceProperties(&p, 0), "device");
@@ -240,6 +380,7 @@ int main(int argc, char** argv) {
         for (int inject = 0; inject < 2; ++inject)
             for (int qf = 0; qf < 2; ++qf) {
                 std::vector<Out> solo((size_t) MAXT);
+                fused_gr_set_hc8_lostage(0);   // D3: the solo reads on the old path (strided lo staging)
                 for (int t = 0; t < MAXT; ++t) {
                     const auto a = args_for(w0, {&tok[(size_t) t]}, apply, inject, true, qf ? qcnt : nullptr);
                     clear(tok[(size_t) t], st);
@@ -247,6 +388,7 @@ int main(int argc, char** argv) {
                     ck(cudaStreamSynchronize(st), "solo");
                     solo[(size_t) t] = snap(tok[(size_t) t], qf != 0);
                 }
+                fused_gr_set_hc8_lostage(-1);
                 for (int T = 1; T <= MAXT; ++T)
                     for (int rot = 0; rot < (T < MAXT ? 2 : 1); ++rot) {   // rot 1: the tokens from column 8 - T on
                         std::vector<Tok*> tp;
@@ -360,16 +502,18 @@ int main(int argc, char** argv) {
         sets.push_back(w0);
         for (int i = 1; i < NSETS; ++i) sets.push_back(make_set(false));
         std::printf("  time per read (down + up), %d weight sets in rotation, medians of 15 replays of %d reads:\n", NSETS, NSETS);
-        std::printf("    T   v4 bf16 us   hc8 us   speedup\n");
+        std::printf("    T   v4 bf16 us   hc8 old   lostage   lost - old\n");
         for (int T = 1; T <= MAXT; ++T) {
-            cudaGraphExec_t gx[2] = {};
-            for (int v = 0; v < 2; ++v) {
+            constexpr int NV = 3;   // v4, hc8 old, hc8 + STRATA_HC8_LOSTAGE
+            cudaGraphExec_t gx[NV] = {};
+            for (int v = 0; v < NV; ++v) {
                 cudaGraph_t g = nullptr;
+                fused_gr_set_hc8_lostage(v == 2 ? 1 : 0);
                 ck(cudaStreamBeginCapture(st, cudaStreamCaptureModeThreadLocal), "bench capture");
                 for (int s = 0; s < NSETS; ++s) {
                     std::vector<Tok*> tp;
                     for (int k = 0; k < T; ++k) tp.push_back(&tok[(size_t) k]);
-                    const auto a = args_for(sets[(size_t) s], tp, true, true, v == 1, nullptr);
+                    const auto a = args_for(sets[(size_t) s], tp, true, true, v >= 1, v >= 1 ? qcnt : nullptr);
                     fused_gr_read_multi(a.data(), T, xn, st);
                 }
                 ck(cudaStreamEndCapture(st, &g), "bench capture end");
@@ -381,10 +525,10 @@ int main(int argc, char** argv) {
             cudaEvent_t e0, e1;
             cudaEventCreate(&e0);
             cudaEventCreate(&e1);
-            std::vector<float> ms[2];
+            std::vector<float> ms[NV];
             for (int r = 0; r < 15; ++r)
-                for (int j = 0; j < 2; ++j) {
-                    const int v = (r + j) % 2;
+                for (int j = 0; j < NV; ++j) {
+                    const int v = (r + j) % NV;
                     cudaEventRecord(e0, st);
                     cudaGraphLaunch(gx[v], st);
                     cudaEventRecord(e1, st);
@@ -393,17 +537,20 @@ int main(int argc, char** argv) {
                     cudaEventElapsedTime(&x, e0, e1);
                     ms[v].push_back(x);
                 }
-            double us[2];
-            for (int v = 0; v < 2; ++v) {
+            double us[NV];
+            for (int v = 0; v < NV; ++v) {
                 std::sort(ms[v].begin(), ms[v].end());
                 us[v] = 1000.0 * ms[v][ms[v].size() / 2] / NSETS;
                 cudaGraphExecDestroy(gx[v]);
             }
-            std::printf("    %d   %8.2f   %8.2f   %5.2fx\n", T, us[0], us[1], us[0] / us[1]);
+            std::printf("    %d   %8.2f   %8.2f   %8.2f   %+8.2f\n", T, us[0], us[1], us[2], us[2] - us[1]);
             cudaEventDestroy(e0);
             cudaEventDestroy(e1);
         }
     }
+    if (bench_gated) bad += bench_gated_read(tok, xn, qcnt, st, w0);
+    fused_gr_set_er_late_pass(-1);
+    fused_gr_set_hc8_lostage(-1);
     std::printf("gr_hc8_check: %d failures\n", bad);
     return bad ? 1 : 0;
 }
