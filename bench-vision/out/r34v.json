@@ -1,0 +1,101 @@
+{
+ "tag": "r34v",
+ "tree": "D:/Projects/strata-r34",
+ "exe": "D:/Projects/strata-r34/build-dev/strata.exe",
+ "vision": {
+  "exe": "C:/LLM_models/strata-nvfp4/engine/strata-vision.exe",
+  "mmproj": "C:/LLM_models/Strata-data/models/mmproj-qwen/mmproj-Qwen3.8-Flash-Next-BF16.gguf",
+  "model": "C:/LLM_models/Strata-data/hf/qwen-nvfp4-gptq/qwen-nvfp4-gptq-dense.gguf",
+  "gpu": false,
+  "threads": 16,
+  "max_tokens": 1024,
+  "in_engine": true,
+  "preload": true
+ },
+ "events": [
+  {
+   "t": 17.187,
+   "wall": 1795237761.2628577,
+   "ev": "http_up"
+  },
+  {
+   "t": 18.911,
+   "wall": 1795237762.9865174,
+   "ev": "warm",
+   "ttft_ms": 1704.1,
+   "wall_ms": 1723.2,
+   "tok_s": 155.0,
+   "prompt_ms": 238.2,
+   "prompt_n": 55,
+   "gen": 4,
+   "md5": "00ba934040",
+   "text": "We need to respond"
+  },
+  {
+   "t": 20.876,
+   "wall": 1795237764.9520402,
+   "ev": "text",
+   "ttft_ms": 235.8,
+   "wall_ms": 1965.2,
+   "tok_s": 230.6,
+   "prompt_ms": 215.6,
+   "prompt_n": 76,
+   "gen": 400,
+   "md5": "4ecdc5f398",
+   "text": "rray, usually doubling its size, then rehashes all existing entries into the new array. Because the bucket count changes, the modulo mapping changes, so entries"
+  },
+  {
+   "t": 21.8,
+   "wall": 1795237765.8761866,
+   "ev": "image_s",
+   "ttft_ms": 636.6,
+   "wall_ms": 919.4,
+   "tok_s": 220.8,
+   "prompt_ms": 558.4,
+   "prompt_n": 329,
+   "gen": 64,
+   "md5": "42bd0f30f5",
+   "text": "tioning the shapes, their colors, and their locations. 2.  **Analyze the Image:**     *   There are three distinct geometric shapes arranged horizontally.     *"
+  },
+  {
+   "t": 23.343,
+   "wall": 1795237767.4188166,
+   "ev": "text",
+   "ttft_ms": 65.5,
+   "wall_ms": 1542.1,
+   "tok_s": 270.2,
+   "prompt_ms": 54.5,
+   "prompt_n": 5,
+   "gen": 400,
+   "md5": "ea67722869",
+   "text": "eeds the threshold, the table resizes. It allocates a larger array, usually doubling the number of buckets, and rehashes all existing entries into the new table"
+  },
+  {
+   "t": 24.705,
+   "wall": 1795237768.780829,
+   "ev": "image_b",
+   "ttft_ms": 987.8,
+   "wall_ms": 1357.5,
+   "tok_s": 170.1,
+   "prompt_ms": 809.8,
+   "prompt_n": 1085,
+   "gen": 64,
+   "md5": "ae6746065b",
+   "text": "the image. I need to look carefully at all elements: the title \"INVOICE 20261014\", the blue \"Total due: 1337 EUR\" line, three line items (widgets x12, gears x7,"
+  },
+  {
+   "t": 26.358,
+   "wall": 1795237770.4337015,
+   "ev": "text",
+   "ttft_ms": 100.1,
+   "wall_ms": 1653.0,
+   "tok_s": 256.3,
+   "prompt_ms": 65.3,
+   "prompt_n": 5,
+   "gen": 400,
+   "md5": "b211b7bbbf",
+   "text": "s, degrading performance. Most implementations choose a threshold, such as 0.7 or 0.75, to balance speed and memory.  When the load factor exceeds the threshold"
+  }
+ ],
+ "pid": 187120
+}

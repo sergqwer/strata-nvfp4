@@ -1593,6 +1593,29 @@ class StrataEngine:
         with self._exclusive_control():
             return self._vram(reserve_mib, timeout)
 
+    def vision_encode(self, image: str, out: str, timeout: float | None = None) -> int:
+        """--vision-gpu: `VENC <image> <out>` between requests (the caller holds the service's FIFO): the engine reads the picture on the GPU in
+        borrowed expert slots and writes its embeddings to `out` -> the number of image tokens.  ValueError with the engine's reason (no room, an
+        engine without --vision-gpu, ...), EngineDied when it ended."""
+        with self._exclusive_control():
+            if not self.alive():
+                raise EngineDied("the engine is not running")
+            self.proc.stdin.write(f"VENC {image} {out}\n")
+            self.proc.stdin.flush()
+            deadline = time.time() + (VISION_ENCODE_S if timeout is None else timeout)
+            while True:
+                try:
+                    line = self.lines.get(timeout=max(0.1, deadline - time.time()))
+                except queue.Empty:
+                    raise EngineDied("the engine did not answer the VENC command") from None
+                if line is None:
+                    raise EngineDied("the engine ended")
+                line = line.strip()
+                if line.startswith("ERR"):
+                    raise ValueError(line[4:].strip() or "the engine refused the picture")
+                if line.startswith("VOK "):
+                    return int(line.split()[1])
+
     def _vram(self, reserve_mib: int | None, timeout: float = 120.0) -> dict:
         """#533: `VRAM <reserve_mib>` between requests (the caller holds the service's FIFO): the engine shrinks its
         expert cache until that much VRAM is free, or grows it back when more is free; None: back to the reserve it
@@ -3819,6 +3842,76 @@ class Vision:
         shutil.rmtree(self.dir, ignore_errors=True)
 
 
+def vision_in_engine(cfg: dict) -> bool:
+    """The engine reads the pictures itself (strata --vision-gpu): the vision section says "in_engine": true, the engine is Strata's CUDA build on one
+    GPU, and STRATA_VISION_IN_ENGINE is not 0 (the switch back to the CPU reader).  The CPU reader of the section stays as the fallback."""
+    vis = cfg.get("vision")
+    if not isinstance(vis, dict) or vis.get("in_engine") is not True or not vis.get("mmproj"):
+        return False
+    if os.environ.get("STRATA_VISION_IN_ENGINE", "").strip() == "0":
+        return False
+    if cfg.get("backend") not in (None, "cuda") or sys.platform == "darwin" or len(gpu_list(cfg)) > 1 or parallel_slots(cfg):
+        return False
+    return True
+
+
+class EngineVision(Vision):
+    """The picture reader inside the engine (`VENC <image> <out>`, strata --vision-gpu): the engine lends the reader the last slots of its expert cache
+    for one picture and refills them from RAM right after, so no VRAM is held between pictures and no reader process runs on the card.  A picture the
+    engine cannot read (no room, an engine without --vision-gpu, any failure) is read by the section's CPU reader, started the first time it is needed;
+    the next picture tries the engine again.  The cache of encoded pictures and the files are Vision's."""
+
+    def __init__(self, cfg: dict, log=None, env: dict | None = None, lazy: bool = False):
+        super().__init__({**cfg, "gpu": False, "elastic": False}, log=log, env=env, lazy=True)   # the CPU reader: not started until needed
+        self.engine_of = None                           # set by main: a callable that gives the service's engine
+        self.engine_off = None                          # why the engine does not read pictures (an older engine): the CPU reader for good
+        self.reader = "engine"
+
+    def alive(self) -> bool:
+        return True                                     # the engine is the reader; the CPU one starts when a picture needs it
+
+    def cpu_alive(self) -> bool:
+        return Vision.alive(self)
+
+    def encode(self, source, keep=()):
+        data = self.normalize(source if isinstance(source, bytes) else self.load(source))
+        key = hashlib.sha256(data).hexdigest()[:32]
+        engine = self.engine_of() if self.engine_of is not None else None
+        why = self.engine_off or (None if engine is not None and hasattr(engine, "vision_encode") and engine.alive()
+                                  else "the engine is not running")
+        if why is None:
+            with self.lock:
+                self._ensure_dir()
+                if key in self.cache:
+                    self.cache[key] = self.cache.pop(key)
+                    return self.cache[key]
+                img, out = self.dir / f"{key}.img", self.dir / f"{key}.sve"
+                img.write_bytes(data)
+                try:
+                    n = engine.vision_encode(str(img.resolve()), str(out.resolve()))
+                except ValueError as e:
+                    why = str(e)
+                    if "--vision-gpu" in why or why.startswith("expected"):
+                        self.engine_off = why                # an engine without the reader: not asked again
+                finally:
+                    img.unlink(missing_ok=True)
+                if why is None:
+                    self.cache[key] = (out, n)
+                    self.warn_if_over_limit(n)
+                    held = {str(p) for p in keep} | {str(out)}
+                    for old in list(self.cache):
+                        if len(self.cache) <= 64:
+                            break
+                        if str(self.cache[old][0]) not in held:
+                            self.cache.pop(old)[0].unlink(missing_ok=True)
+                    return self.cache[key]
+        print(f"[strata] images: the engine did not read this picture on the GPU ({' '.join(str(why).split())[:200]}); the CPU reader reads it",
+              flush=True)
+        if not self.cpu_alive():
+            Vision.restart(self)
+        return Vision.encode(self, data, keep)
+
+
 def gpu_list(cfg: dict) -> list[int]:
     """The config's "gpu": one card (2), or several for a layer split ([0, 2] or "0,2"), numbered as nvidia-smi
     numbers them; [] when it names none."""
@@ -4114,6 +4207,15 @@ def engine_args(cfg: dict, exe: str | None = None, *, announce: bool = True) -> 
             note += " and --vram-reserve-mib 700"
         print(f'[strata] the config has a "vision" section but no --vision in its args: {note} (run setup again with '
               "--vision to write them)", flush=True)
+    # the engine reads pictures itself (vision.in_engine, vision_in_engine): its GPU reader, in borrowed expert slots
+    if vision_in_engine(cfg) and "--vision-gpu" not in args:
+        vis = cfg["vision"]
+        args += ["--vision-gpu", os.path.abspath(os.path.join(cfg.get("cwd") or ".", vis["mmproj"])),
+                 "--vision-max-tokens", str(Vision.token_limit({**vis, "gpu": True}))]
+        if vis.get("min_tokens"):
+            args += ["--vision-min-tokens", str(vis["min_tokens"])]
+        if vis.get("preload") is True:                 # the weights pinned and the path warmed up at the start, not at the first picture
+            args.append("--vision-gpu-preload")
     if layer_split_of(cfg) and "--layer-split" not in args:
         args += ["--layer-split", layer_split_value(cfg)]
     # opt-in: an auto split runs on the first card alone when it holds every profiled expert and the KV
@@ -10666,8 +10768,11 @@ def _main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> i
                 print('[strata] images: on a layer split the expert cache cannot make room for the image encoder (the '
                       'engine turns --vram-elastic off); keep its VRAM free with "--vram-reserve-mib" on the '
                       "encoder's GPU, or the first picture may not get it", flush=True)
-            vision = Vision(vcfg, log=open(cfg["log"], "a", encoding="utf-8") if cfg.get("log") else None,
-                            env=vision_env(cfg, env), lazy=lazy)
+            vision = (EngineVision if vision_in_engine(cfg) else Vision)(vcfg, log=open(cfg["log"], "a", encoding="utf-8") if cfg.get("log") else None,
+                                                                         env=vision_env(cfg, env), lazy=lazy)
+            if isinstance(vision, EngineVision):
+                print("[strata] images: the engine reads pictures on the GPU in borrowed expert slots (vision.in_engine; "
+                      "STRATA_VISION_IN_ENGINE=0 or \"in_engine\": false reads them on the CPU)", flush=True)
         print("model unloaded; the first request loads it ..." if lazy else
               "loading the model (the first start takes a minute or two) ...", flush=True)
         warn_budget_over_ram(engine_args(cfg, announce=False) if "args" in cfg else [])      # #1080
@@ -10741,6 +10846,8 @@ def _main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> i
                   sampling_defaults=sampling_defaults,
                   fit_max_tokens=a.fit_max_tokens or (not a.no_fit_max_tokens and cfg.get("fit_max_tokens") is not False))
     svc.launch_attestation = launch_attestation
+    if isinstance(vision, EngineVision):
+        vision.engine_of = lambda: svc.engine
     svc.offline = a.offline
     svc.max_queue = max_queue
     svc.queue_timeout_s = float(queue_timeout) if queue_timeout is not None else None

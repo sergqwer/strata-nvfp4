@@ -1,0 +1,101 @@
+{
+ "tag": "fin_base",
+ "tree": "C:/LLM_models/strata-nvfp4/.bak-0.2.15-nvfp4.4",
+ "exe": "C:/LLM_models/strata-nvfp4/.bak-0.2.15-nvfp4.4/engine/strata.exe",
+ "vision": {
+  "exe": "C:/LLM_models/strata-nvfp4/engine/strata-vision.exe",
+  "mmproj": "C:/LLM_models/Strata-data/models/mmproj-qwen/mmproj-Qwen3.8-Flash-Next-BF16.gguf",
+  "model": "C:/LLM_models/Strata-data/hf/qwen-nvfp4-gptq/qwen-nvfp4-gptq-dense.gguf",
+  "gpu": false,
+  "threads": 16,
+  "max_tokens": 1024,
+  "in_engine": false,
+  "preload": false
+ },
+ "events": [
+  {
+   "t": 16.172,
+   "wall": 1795242097.3436725,
+   "ev": "http_up"
+  },
+  {
+   "t": 16.438,
+   "wall": 1795242097.6099548,
+   "ev": "warm",
+   "ttft_ms": 248.5,
+   "wall_ms": 266.0,
+   "tok_s": 164.6,
+   "prompt_ms": 223.3,
+   "prompt_n": 55,
+   "gen": 4,
+   "md5": "00ba934040",
+   "text": "We need to respond"
+  },
+  {
+   "t": 18.467,
+   "wall": 1795242099.6382284,
+   "ev": "text",
+   "ttft_ms": 252.3,
+   "wall_ms": 2027.5,
+   "tok_s": 224.6,
+   "prompt_ms": 229.5,
+   "prompt_n": 76,
+   "gen": 400,
+   "md5": "82725b83e7",
+   "text": "oad factor crosses a threshold, such as 0.75.  Resizing, or rehashing, creates a larger bucket array, often double the previous size, and reinserts all existing"
+  },
+  {
+   "t": 20.115,
+   "wall": 1795242101.2865124,
+   "ev": "image_s",
+   "ttft_ms": 1351.8,
+   "wall_ms": 1648.6,
+   "tok_s": 210.7,
+   "prompt_ms": 552.7,
+   "prompt_n": 329,
+   "gen": 64,
+   "md5": "cd6f2921dc",
+   "text": "tioning the shapes, their colors, and their positions. 2.  **Analyze the Image:**     *   There are three distinct geometric shapes arranged horizontally.     *"
+  },
+  {
+   "t": 21.73,
+   "wall": 1795242102.901982,
+   "ev": "text",
+   "ttft_ms": 85.2,
+   "wall_ms": 1610.8,
+   "tok_s": 261.2,
+   "prompt_ms": 55.1,
+   "prompt_n": 5,
+   "gen": 400,
+   "md5": "9edb42486f",
+   "text": "r exceeds the threshold, the table resizes. Resizing usually means allocating a larger array, often double the previous size, and rehashing all existing entries"
+  },
+  {
+   "t": 26.835,
+   "wall": 1795242108.0070336,
+   "ev": "image_b",
+   "ttft_ms": 4777.0,
+   "wall_ms": 5103.8,
+   "tok_s": 191.8,
+   "prompt_ms": 798.2,
+   "prompt_n": 1085,
+   "gen": 64,
+   "md5": "7f7b4a3cc6",
+   "text": "nts: the title \"INVOICE 20261014\", the total due line in blue, the three line items with quantities, and the two shapes (red square, green circle) at the bottom"
+  },
+  {
+   "t": 28.532,
+   "wall": 1795242109.7032924,
+   "ev": "text",
+   "ttft_ms": 97.8,
+   "wall_ms": 1697.3,
+   "tok_s": 248.9,
+   "prompt_ms": 63.6,
+   "prompt_n": 5,
+   "gen": 400,
+   "md5": "30aa2a6ea0",
+   "text": "y but increases collisions and probe lengths, slowing operations. Many implementations aim for a load factor around 0.7 to 0.75.  When the load factor exceeds a"
+  }
+ ],
+ "pid": 227128
+}

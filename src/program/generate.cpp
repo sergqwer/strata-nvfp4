@@ -164,6 +164,9 @@
 #include "strata/core/family_layout.hpp"
 #if defined(STRATA_HAVE_QWEN35)
 #include "strata/qwen35/engine.hpp"
+#if defined(STRATA_HAVE_VISION_GPU)
+#include "engine_reader.h"   // tools/vision/own: --vision-gpu
+#endif
 #endif
 #if defined(_WIN32)
 #include <windows.h>
@@ -1101,6 +1104,12 @@ struct Options {
     bool serve = false;
     /// The vision path: keep a per-cell (t, h, w) rotary position table so --serve can take GENI requests.
     bool vision = false;
+    /// --vision-gpu <mmproj> (CUDA, --serve): the picture reader inside the engine (VENC <image> <out>), on this GPU in borrowed expert slots, its
+    /// weights in pinned RAM between pictures; --vision-max-tokens / --vision-min-tokens as the reader program's --max-tokens / --min-tokens;
+    /// --vision-gpu-preload pins the weights at the start instead of at the first picture.
+    std::string vision_gpu;
+    int vision_max_tokens = 1024, vision_min_tokens = 0;
+    bool vision_gpu_preload = false;
     int adapt_swaps = 192;
     /// --serve: how many conversation checkpoints to keep between requests (0 = every request reads its whole
     /// prompt again, the v0.1.2 behaviour).  One is the GDN recurrence of the 36 layers, the QSA indexer tails and
@@ -1322,6 +1331,9 @@ void usage() {
                  "  --shared-late        A/B: shared expert after the CPU pool (default: overlapped with it)\n"
                  "  --keep-canonical     A/B: also load canonical copies of natively served tensors (more VRAM)\n"
                  "  --vision             --serve takes images too (GENI requests; embeddings from strata-vision)\n"
+                 "  --vision-gpu MMPROJ  --serve (NVIDIA): read pictures in the engine (VENC <image> <out>), on the GPU in borrowed\n"
+                 "                       expert slots, refilled right after; the weights stay in pinned RAM (--vision-max-tokens N,\n"
+                 "                       default 1024, --vision-min-tokens N, --vision-gpu-preload: pin them at the start)\n"
                  "  --prompt-cache N     --serve: keep N conversation checkpoints between requests (default 6, ~118 MB\n"
                  "                       of RAM each; 0 = read every prompt from the start)\n"
                  "  --conversation-cache-mib N  --serve: RAM budget for parked conversations (default: sized from the free RAM, up to 8192; 0 = off)\n"
@@ -4067,6 +4079,10 @@ int main(int argc, char** argv) {
         else if (a == "--pcie-mode") o.pcie_mode = next("--pcie-mode");
         else if (a == "--serve") o.serve = true;
         else if (a == "--vision") o.vision = true;
+        else if (a == "--vision-gpu") { o.vision_gpu = next("--vision-gpu"); o.vision = true; }
+        else if (a == "--vision-max-tokens") o.vision_max_tokens = std::max(0, std::atoi(next("--vision-max-tokens")));
+        else if (a == "--vision-min-tokens") o.vision_min_tokens = std::max(0, std::atoi(next("--vision-min-tokens")));
+        else if (a == "--vision-gpu-preload") o.vision_gpu_preload = true;
         else if (a == "--session-save-reclaim") o.session_save_reclaim = true;
         else if (a == "--prompt-cache") o.prompt_cache = std::max(0, std::atoi(next("--prompt-cache")));
         else if (a == "--conversation-cache-mib" || a == "--conversation-cache-slots" ||
@@ -17119,6 +17135,225 @@ int main(int argc, char** argv) {
                         (long long) (free_b >> 20), (long long) o.prefill_chunk);
             return true;
         };
+#if defined(STRATA_HAVE_VISION_GPU)
+        // ---- --vision-gpu: VENC <image> <out>, between requests.  The picture reader runs on this GPU in the LAST slots of the expert cache (the
+        // end the prompt path lends too), its weights uploaded from pinned RAM into them; right after the encode those slots are refilled from RAM,
+        // beside whatever runs next (STRATA_PF_REFILL_BG's stream, hottest first) or at once where that path is off.  Answers
+        // "VOK <n_tokens> <nx> <ny> <ms>" or "ERR <reason>" (the server then reads the picture with the CPU reader).  STRATA_VISION_GPU_LOG=0: no line.
+        strata_vit::EngineReader venc;
+        if (!o.vision_gpu.empty()) {
+            std::string verr;
+            const char* why = multi_gpu || !stages.empty() ? "a layer split" : peer.valid() ? "--peer-device" : o.batch > 0 ? "--batch slots" : nullptr;
+            if (why != nullptr) std::fprintf(stderr, "strata serve: --vision-gpu is off: %s (the CPU reader reads pictures)\n", why);
+            else if (!venc.open(o.vision_gpu, o.vision_max_tokens, o.vision_min_tokens, verr))
+                std::fprintf(stderr, "strata serve: --vision-gpu is off: %s\n", verr.c_str());
+            else if (o.vision_gpu_preload) {
+                const auto t0 = Clock::now();
+                if (!venc.stage(verr)) std::fprintf(stderr, "strata serve: --vision-gpu: the weights did not load (%s); tried again at the first picture\n", verr.c_str());
+                else std::fprintf(stderr, "strata serve: --vision-gpu: the picture reader's weights in %s RAM, %.0f MiB, in %.0f ms\n",
+                                  venc.staged_pinned() ? "pinned" : "pageable", (double) venc.staged_bytes() / 1048576.0,
+                                  std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
+            }
+            if (venc.opened())
+                std::fprintf(stderr, "strata serve: --vision-gpu: pictures are read on the GPU in borrowed expert slots (up to %d image tokens)\n",
+                             o.vision_max_tokens);
+        }
+        static const bool venc_log = [] { const char* v = std::getenv("STRATA_VISION_GPU_LOG"); return v == nullptr || v[0] != '0'; }();
+        // the borrowed slots back: on bgr's stream beside what follows (as refill_last's STRATA_PF_REFILL_BG path), else queued and waited for here
+        auto venc_refill = [&](std::vector<std::pair<int32_t, int32_t>>& items, bool& in_bg, std::string& e) -> bool {
+            in_bg = false;
+            if (items.empty()) return true;
+            static const bool bg_env = [] { const char* v = std::getenv("STRATA_PF_REFILL_BG"); return v == nullptr || std::atoi(v) != 0; }();
+            static const bool parts_env = [] { const char* v = std::getenv("STRATA_REFILL_PARTS"); return v != nullptr && std::atoi(v) != 0; }();
+            static const bool bg_venc = [] { const char* v = std::getenv("STRATA_VISION_GPU_REFILL_BG"); return v == nullptr || std::atoi(v) != 0; }();
+            const bool bg_ok = bg_env && bg_venc && stages.empty() && !multi_gpu && !peer.valid() && !pipe && serial_windows && res_pairs != nullptr &&
+                               (drive.d.fetch_admit > 0 || drive.d.evict_sync) && adapt_nowait() && !ajob && !parts_env && !refill_blocking() &&
+                               !o.prefill_head_alias && o.batch == 0 && !remote_opt;
+            if (bg_ok && bgr.st == nullptr && cudaStreamCreateWithFlags(&bgr.st, cudaStreamNonBlocking) != cudaSuccess) {
+                (void) cudaGetLastError();
+                bgr.st = nullptr;
+            }
+            if (!bg_ok || bgr.st == nullptr) {
+                for (const auto& [i, slot] : items) {
+                    const uint8_t* b = srcp->blob_stable(i / g.n_expert, i % g.n_expert);
+                    const int64_t nb = (int64_t) strata::kernels::cpu::expert_layout().blob_bytes(i / g.n_expert);
+                    if (b == nullptr || !xcache.fill_slot_queued(slot, b, e, nb)) { if (e.empty()) e = "no blob"; return false; }
+                    srcp->note_async_read(b, nullptr);   // #1237
+                    host_res[(size_t) i] = slot;
+                }
+                if (!xcache.sync_queued(e)) return false;
+#if defined(_WIN32)
+                for (const auto& [i, slot] : items) srcp->release(i / g.n_expert, i % g.n_expert);
+#endif
+                items.clear();
+                res_upload();
+                return true;
+            }
+            const auto t0 = Clock::now();
+            bgr.items = std::move(items);
+            items.clear();
+            bgr.hot = 0;
+            for (const auto& it : bgr.items) bgr.hot += !drive.d.usage.empty() && drive.d.usage[(size_t) it.first] > 0.0f;
+            std::sort(bgr.items.begin(), bgr.items.end(), [&](const auto& a, const auto& b) {
+                const float ua = drive.d.usage.empty() ? 0.0f : drive.d.usage[(size_t) a.first];
+                const float ub = drive.d.usage.empty() ? 0.0f : drive.d.usage[(size_t) b.first];
+                return ua != ub ? ua > ub : a.second < b.second;
+            });
+            bgr.ends.clear();
+            bgr.next = 0;
+            bgr.windows = 0;
+            std::vector<void*> b_dst;
+            std::vector<const void*> b_src;
+            std::vector<size_t> b_n;
+            for (size_t k = 0; k < bgr.items.size(); ++k) {
+                const auto [i, slot] = bgr.items[k];
+                const uint8_t* b = srcp->blob_stable(i / g.n_expert, i % g.n_expert);
+                const int64_t nb = (int64_t) strata::kernels::cpu::expert_layout().blob_bytes(i / g.n_expert);
+                if (b == nullptr) { e = "refilling a borrowed slot: no blob"; return false; }
+#if defined(CUDART_VERSION) && CUDART_VERSION >= 12080
+                if (xcache.device_slot(slot) != nullptr) {
+                    b_dst.push_back(xcache.device_slot(slot));
+                    b_src.push_back(b);
+                    b_n.push_back((size_t) nb);
+                } else
+#endif
+                if (!xcache.fill_slot_on(slot, b, bgr.st, e, nb)) return false;
+                if (b_dst.empty()) srcp->note_async_read(b, bgr.st);   // #1237
+                if (!drive.d.in_flight.empty()) drive.d.in_flight[(size_t) i] = 1;
+                if ((k + 1) % 32 == 0 || k + 1 == bgr.items.size()) {
+#if defined(CUDART_VERSION) && CUDART_VERSION >= 12080
+                    if (!b_dst.empty()) {
+                        cudaMemcpyAttributes at{};
+                        at.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
+                        at.flags = cudaMemcpyFlagPreferOverlapWithCompute;
+                        size_t at_idx = 0;
+                        if (cudaMemcpyBatchAsync(b_dst.data(), b_src.data(), b_n.data(), b_dst.size(), &at, &at_idx, 1, bgr.st) != cudaSuccess) {
+                            e = std::string("refilling the borrowed slots (cudaMemcpyBatchAsync): ") + cudaGetErrorString(cudaGetLastError());
+                            return false;
+                        }
+                        for (const void* q : b_src) srcp->note_async_read((const uint8_t*) q, bgr.st);   // #1237
+                        b_dst.clear();
+                        b_src.clear();
+                        b_n.clear();
+                    }
+#endif
+                    const size_t bi = bgr.ends.size();
+                    if (bi == bgr.evs.size()) {
+                        cudaEvent_t ev = nullptr;
+                        if (cudaEventCreateWithFlags(&ev, cudaEventDisableTiming) != cudaSuccess) {
+                            e = std::string("refilling the borrowed slots: ") + cudaGetErrorString(cudaGetLastError());
+                            return false;
+                        }
+                        bgr.evs.push_back(ev);
+                    }
+                    if (cudaEventRecord(bgr.evs[bi], bgr.st) != cudaSuccess) {
+                        e = std::string("refilling the borrowed slots: ") + cudaGetErrorString(cudaGetLastError());
+                        return false;
+                    }
+                    bgr.ends.push_back(k + 1);
+                }
+            }
+            bgr.t0 = t0;
+            bgr.issue_ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+            bgr.sync_ms = 0;
+            bgr.live = true;
+            in_bg = true;
+            return true;
+        };
+        auto venc_command = [&](const std::string& cmd, std::string& e, bool answer = true) -> bool {
+            const auto t0 = Clock::now();
+            const std::string rest = cmd.substr(5);
+            const size_t sp_at = rest.rfind(' ');
+            if (sp_at == std::string::npos || sp_at == 0 || sp_at + 1 >= rest.size()) { e = "expected: VENC <image> <output>"; return false; }
+            const std::string img = rest.substr(0, sp_at), out = rest.substr(sp_at + 1);
+            if (!venc.opened()) { e = "VENC needs an engine started with --vision-gpu <mmproj> (one NVIDIA GPU, --serve)"; return false; }
+            if (answer && std::getenv("STRATA_VISION_GPU_TEST_FAIL") != nullptr) { e = "VENC: refused for a test (STRATA_VISION_GPU_TEST_FAIL)"; return false; }
+            if (src.complement_ready()) { e = "VENC: not with the resident low-RAM mode (the cache holds experts RAM does not)"; return false; }
+            for (const PfPart& p : pf_parts)
+                if (!p.lent.empty()) { e = "VENC: a prompt's loan is still out"; return false; }
+            double stage_ms = 0.0;
+            if (!venc.staged()) {
+                const auto ts = Clock::now();
+                if (!venc.stage(e)) { e = "VENC: the picture reader's weights did not load: " + e; return false; }
+                stage_ms = std::chrono::duration<double, std::milli>(Clock::now() - ts).count();
+                std::fprintf(stderr, "strata serve: --vision-gpu: the picture reader's weights in %s RAM, %.0f MiB, in %.0f ms (first picture)\n",
+                             venc.staged_pinned() ? "pinned" : "pageable", (double) venc.staged_bytes() / 1048576.0, stage_ms);
+            }
+            strata_vit::PreparedImage prep;
+            if (!venc.prepare(img, prep, e)) return false;
+            const auto t_prep = Clock::now();
+            const size_t need = venc.need_for(prep) + 256;   // + the base's alignment
+            // nothing reads or writes the cache while it is lent: the tier's swaps and a refill still landing first
+            if (!ver.wait_commit(e)) return false;
+            adapt_quiesce();
+            bgr_poll(true);
+            if (cudaDeviceSynchronize() != cudaSuccess) { e = std::string("VENC: ") + cudaGetErrorString(cudaGetLastError()); return false; }
+            const int64_t live = xcache.slots();
+            const int64_t k = cache_slots_for(xcache, (uint64_t) need);
+            int64_t lo = g_lend_keep;
+            if (kvg.on && kvg.lo < kvg.top) lo = std::max<int64_t>(lo, kvg.top);   // never into a grown K/V
+            if (k <= 0 || live - k < lo) {
+                e = "VENC: the expert cache has no room for the picture reader (" + std::to_string(need >> 20) + " MiB)";
+                return false;
+            }
+            const int32_t first = (int32_t) (live - k);
+            uint8_t* base = xcache.device_slot(first);
+            const size_t room = xcache.slot_offsets() ? (size_t) (xcache.bytes() - (int64_t) xcache.slot_offsets()[first])
+                                                      : (size_t) k * (size_t) strata::kernels::cpu::expert_layout().max_blob;
+            uint8_t* abase = (uint8_t*) (((uintptr_t) base + 255) & ~(uintptr_t) 255);
+            std::vector<std::pair<int32_t, int32_t>> taken;
+            for (size_t i = 0; i < host_res.size(); ++i)
+                if (host_res[i] >= first) {
+                    taken.emplace_back((int32_t) i, host_res[i]);
+                    host_res[i] = strata::core::kNotResident;
+                }
+            if (!taken.empty()) res_upload();
+            if (cudaDeviceSynchronize() != cudaSuccess) { e = std::string("VENC: ") + cudaGetErrorString(cudaGetLastError()); return false; }
+            const auto t_lend = Clock::now();
+            int n = 0, nx = 0, ny = 0;
+            strata_vit::EngineReaderTimes vt;
+            std::string eerr;
+            size_t vf0 = 0, vf1 = 0, vtot = 0;
+            cudaMemGetInfo(&vf0, &vtot);
+            const bool ok = venc.encode(abase, room - (size_t) (abase - base), prep, out, n, nx, ny, vt, eerr);
+            (void) cudaGetLastError();
+            cudaMemGetInfo(&vf1, &vtot);
+            const auto t_enc = Clock::now();
+            const size_t n_taken = taken.size();
+            bool in_bg = false;
+            std::string rerr;
+            if (!venc_refill(taken, in_bg, rerr)) {
+                std::printf("ERR VENC: refilling the borrowed expert slots failed: %s\n", rerr.c_str());
+                std::fflush(stdout);
+                std::exit(1);   // the cache would serve slots that hold the reader's bytes: the server starts the engine again
+            }
+            const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+            if (venc_log)
+                std::fprintf(stderr, "strata serve: picture read on the GPU: %d tokens (%dx%d) in %.0f ms (read + prepare %.0f, lend %.0f, upload %.1f, "
+                                     "encode %.0f, write %.0f%s); %zu MiB in %lld borrowed slots, %zu experts refilled %s\n",
+                             n, nx, ny, ms, std::chrono::duration<double, std::milli>(t_prep - t0).count() - stage_ms,
+                             std::chrono::duration<double, std::milli>(t_lend - t_prep).count(), vt.upload_ms, vt.encode_ms, vt.write_ms,
+                             stage_ms > 0 ? (", first-picture load " + std::to_string((int) stage_ms) + " ms").c_str() : "", need >> 20, (long long) k,
+                             n_taken, in_bg ? "beside what follows" : "before the answer");
+            if (venc_log && vf0 != vf1)
+                std::fprintf(stderr, "strata serve: --vision-gpu: %+.0f MiB of VRAM outside the borrowed slots after this picture (%.0f MiB free)\n",
+                             ((double) vf0 - (double) vf1) / 1048576.0, (double) vf1 / 1048576.0);
+            (void) t_enc;
+            if (!ok) { e = "VENC: the vision encoder failed (" + eerr + ")"; return false; }
+            if (answer) std::printf("VOK %d %d %d %.0f\n", n, nx, ny, ms);
+            return true;
+        };
+        if (venc.opened() && venc.staged()) {
+            // --vision-gpu-preload: one small grey picture through the whole path now, so the first real one does not pay the GPU's first-use
+            // costs (the kernels' module load, cuBLAS's first batched product: ~0.5 s measured)
+            std::string werr;
+            const auto tw = Clock::now();
+            if (venc_command("VENC @warm -", werr, false))
+                std::fprintf(stderr, "strata serve: --vision-gpu: warmed up in %.0f ms\n", std::chrono::duration<double, std::milli>(Clock::now() - tw).count());
+            else
+                std::fprintf(stderr, "strata serve: --vision-gpu: the warm-up failed (%s)\n", werr.c_str());
+        }
+#endif
         // ---- --batch: the slots of the batch windows
         struct BSlot {
             bool active = false, stop = false;
@@ -18585,6 +18820,16 @@ int main(int argc, char** argv) {
                 std::fflush(stdout);
                 continue;
             }
+#if defined(STRATA_HAVE_VISION_GPU)
+            if (line.rfind("VENC ", 0) == 0) {   // --vision-gpu (above): a picture, between requests
+                std::string verr;
+                if (batch_on()) verr = "VENC: not while batch slots are decoding";
+                else venc_command(line, verr);
+                if (!verr.empty()) std::printf("ERR %s\n", verr.c_str());
+                std::fflush(stdout);
+                continue;
+            }
+#endif
             // a command may touch the expert cache (a request lends slots, a K/V growth moves them, a session restore
             // quiesces it): a round of the asynchronous tier that the batch windows left in flight lands first
             if (!adapt_tick(true)) {

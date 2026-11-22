@@ -331,6 +331,28 @@ it skips the warm-up at 1,024 tokens (that only reserves GPU buffers; on the CPU
 exactly, the left rectangle blue and the right red (the image cells' 2-D positions are right), the photo described
 correctly, in English and Ukrainian, through the OpenAI and the Anthropic API.
 
+**After 0.2.15-nvfp4.4 the engine reads the pictures itself, on the GPU, only while it reads one** (`strata --vision-gpu
+<mmproj>`, the run config's `vision.in_engine`, which setup writes). The reader is our own tower (`tools/vision/own`,
+`vit_gpu.cu` with cuBLAS, no ggml), linked into `strata.exe`. Its weights stay in pinned RAM (862 MiB). For each
+picture the engine borrows the last ~360 slots of its expert cache (0.9-1.0 GB, the same end the prompt path lends)
+and uploads the weights into them (~16 ms). It encodes the picture, then refills the slots from RAM at once, on the
+stream the prompt path uses to refill its loan (STRATA_PF_REFILL_BG): 20-35 ms, finished before the picture's prompt
+is read. Between pictures every slot is the expert cache's: 8,189 slots as before. RTX 5090, 600 W, the GPTQ tray
+profile, through serve, time to the first token of a picture turn:
+
+| picture | CPU reader (0.2.15-nvfp4.4) | in the engine | encode on the GPU |
+| --- | ---: | ---: | ---: |
+| 640x400, 260 tokens | 1,281-1,286 ms | 622-641 ms | 14-22 ms |
+| 1024x1024, 1,024 tokens | 4,592-4,719 ms | 936-951 ms | 82-83 ms |
+| 800x450, 350 tokens | 1,580-1,588 ms | 653-669 ms | 18-23 ms |
+
+Decode right after a picture is as fast as without one, and the picture-free engine is bit-identical (16K text and
+logits, decode conv). Against the CPU reader the embeddings agree to a row cosine of 0.9992 or better (mean 0.99999).
+With `"preload": true` (setup's default) the weights are pinned and the path is warmed up at the engine's start (+1.2 s).
+Without it, the first picture pays that (+0.7 s for the weights, +0.5 s for the first GPU use). The first picture leaves
+74 MiB of kernel code in the reserve, outside the slots. A picture the engine cannot read goes to the CPU reader, which
+is started then; `STRATA_VISION_IN_ENGINE=0` or `"in_engine": false` keeps the CPU reader alone.
+
 ### Upstream 0.1.28 merged (2026-09-30)
 
 Upstream's 0.1.25-0.1.28 came in with a merge: the draft layer's prompt pass in batches (E-9), the hyper-connection

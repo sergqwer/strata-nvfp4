@@ -1,0 +1,11 @@
+# 00:50:20 600.00 W, 810 MHz, 14001 MHz
+{"t": 16.153, "wall": 1795215036.7130342, "ev": "http_up"}
+{"t": 16.516, "wall": 1795215037.0763395, "ev": "warm", "ttft_ms": 341.8, "wall_ms": 363.5, "tok_s": 141.3, "prompt_ms": 317.4, "prompt_n": 55, "gen": 4, "text": ""}
+{"t": 19.331, "wall": 1795215039.8912876, "ev": "text", "ttft_ms": 271.7, "wall_ms": 2814.3, "tok_s": 157.0, "prompt_ms": 237.8, "prompt_n": 76, "gen": 400, "text": ""}
+{"t": 20.983, "wall": 1795215041.543263, "ev": "image_s", "ttft_ms": 1320.1, "wall_ms": 1651.8, "tok_s": 189.0, "prompt_ms": 557.2, "prompt_n": 329, "gen": 64, "text": ""}
+{"t": 22.708, "wall": 1795215043.268493, "ev": "text", "ttft_ms": 87.5, "wall_ms": 1725.1, "tok_s": 243.3, "prompt_ms": 59.8, "prompt_n": 5, "gen": 400, "text": ""}
+{"t": 27.956, "wall": 1795215048.5165956, "ev": "image_b", "ttft_ms": 4922.4, "wall_ms": 5247.1, "tok_s": 192.9, "prompt_ms": 1011.7, "prompt_n": 1085, "gen": 64, "text": ""}
+{"t": 29.689, "wall": 1795215050.2494466, "ev": "text", "ttft_ms": 99.2, "wall_ms": 1732.8, "tok_s": 243.8, "prompt_ms": 63.0, "prompt_n": 5, "gen": 400, "text": ""}
+{"t": 31.651, "wall": 1795215052.2114513, "ev": "image_c", "ttft_ms": 1692.2, "wall_ms": 1961.6, "tok_s": 161.2, "prompt_ms": 596.9, "prompt_n": 412, "gen": 45, "text": "CODE 4217"}
+{"t": 33.494, "wall": 1795215054.0549188, "ev": "text", "ttft_ms": 69.6, "wall_ms": 1844.0, "tok_s": 224.6, "prompt_ms": 57.0, "prompt_n": 5, "gen": 400, "text": ""}
+# 00:50:57 600.00 W, 7001 MHz, 14001 MHz

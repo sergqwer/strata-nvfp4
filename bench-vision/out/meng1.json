@@ -1,0 +1,140 @@
+{
+ "tag": "meng1",
+ "tree": "D:/Projects/strata-vision-gpu",
+ "exe": "D:/Projects/strata-vision-gpu/build-dev/strata.exe",
+ "vision": {
+  "exe": "C:/LLM_models/strata-nvfp4/engine/strata-vision.exe",
+  "mmproj": "C:/LLM_models/Strata-data/models/mmproj-qwen/mmproj-Qwen3.8-Flash-Next-BF16.gguf",
+  "model": "C:/LLM_models/Strata-data/hf/qwen-nvfp4-gptq/qwen-nvfp4-gptq-dense.gguf",
+  "gpu": false,
+  "threads": 16,
+  "max_tokens": 1024,
+  "in_engine": true,
+  "preload": true
+ },
+ "events": [
+  {
+   "t": 16.105,
+   "wall": 1795217460.5147123,
+   "ev": "http_up"
+  },
+  {
+   "t": 16.383,
+   "wall": 1795217460.7923586,
+   "ev": "warm",
+   "ttft_ms": 258.2,
+   "wall_ms": 277.0,
+   "tok_s": 158.1,
+   "prompt_ms": 233.2,
+   "prompt_n": 55,
+   "gen": 4,
+   "md5": "00ba934040",
+   "text": "We need to respond"
+  },
+  {
+   "t": 18.259,
+   "wall": 1795217462.6689413,
+   "ev": "text",
+   "ttft_ms": 237.9,
+   "wall_ms": 1876.5,
+   "tok_s": 243.3,
+   "prompt_ms": 212.0,
+   "prompt_n": 76,
+   "gen": 400,
+   "md5": "00a8487c47",
+   "text": " threshold, the table resizes.  Resizing usually means allocating a larger bucket array, often double the previous size, and rehashing all existing entries into"
+  },
+  {
+   "t": 19.736,
+   "wall": 1795217464.1459713,
+   "ev": "text",
+   "ttft_ms": 35.4,
+   "wall_ms": 1476.9,
+   "tok_s": 276.1,
+   "prompt_ms": 23.8,
+   "prompt_n": 5,
+   "gen": 400,
+   "md5": "08d0c3adf8",
+   "text": " threshold, the table resizes. Resizing usually means allocating a larger array, often double the previous size, and rehashing all existing entries into the new"
+  },
+  {
+   "t": 20.645,
+   "wall": 1795217465.0551045,
+   "ev": "image_s",
+   "ttft_ms": 622.0,
+   "wall_ms": 903.9,
+   "tok_s": 221.5,
+   "prompt_ms": 536.8,
+   "prompt_n": 329,
+   "gen": 64,
+   "md5": "702b58684e",
+   "text": "provided image, specifically mentioning the shapes, their colors, and their locations. 2.  **Analyze the Image:**     *   Shape 1: Circle. Color: Red. Location:"
+  },
+  {
+   "t": 22.192,
+   "wall": 1795217466.6012142,
+   "ev": "text",
+   "ttft_ms": 78.3,
+   "wall_ms": 1546.0,
+   "tok_s": 271.4,
+   "prompt_ms": 48.1,
+   "prompt_n": 5,
+   "gen": 400,
+   "md5": "5ef23532b8",
+   "text": "or exceeds the threshold, the table resizes. It allocates a larger array, usually about double the previous size, and rehashes all existing entries into the new"
+  },
+  {
+   "t": 23.5,
+   "wall": 1795217467.9101171,
+   "ev": "image_b",
+   "ttft_ms": 951.0,
+   "wall_ms": 1308.3,
+   "tok_s": 175.9,
+   "prompt_ms": 785.9,
+   "prompt_n": 1085,
+   "gen": 64,
+   "md5": "ae6746065b",
+   "text": "the image. I need to look carefully at all elements: the title \"INVOICE 20261014\", the blue \"Total due: 1337 EUR\" line, three line items (widgets x12, gears x7,"
+  },
+  {
+   "t": 25.182,
+   "wall": 1795217469.591323,
+   "ev": "text",
+   "ttft_ms": 86.8,
+   "wall_ms": 1681.4,
+   "tok_s": 249.7,
+   "prompt_ms": 54.8,
+   "prompt_n": 5,
+   "gen": 400,
+   "md5": "5fc1912fbb",
+   "text": " memory but increases collisions and probe lengths, slowing insertions, lookups, and deletions. Many implementations aim for a load factor around 0.7 to 0.75.  "
+  },
+  {
+   "t": 26.072,
+   "wall": 1795217470.481432,
+   "ev": "image_c",
+   "ttft_ms": 668.6,
+   "wall_ms": 890.2,
+   "tok_s": 166.1,
+   "prompt_ms": 566.7,
+   "prompt_n": 412,
+   "gen": 38,
+   "md5": "98c10a3c51",
+   "text": "The user wants the exact text extracted from the image. I see a header line and two shapes. The only text present is the header. CODE 4217"
+  },
+  {
+   "t": 27.703,
+   "wall": 1795217472.1127186,
+   "ev": "text",
+   "ttft_ms": 75.9,
+   "wall_ms": 1630.2,
+   "tok_s": 256.3,
+   "prompt_ms": 47.7,
+   "prompt_n": 5,
+   "gen": 400,
+   "md5": "aecef3b50c",
+   "text": "ns resize when the load factor crosses a threshold, such as 0.75.  Resizing, or rehashing, creates a larger bucket array, often double the previous size, and re"
+  }
+ ],
+ "pid": 4348
+}

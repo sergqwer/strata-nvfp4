@@ -1,0 +1,1193 @@
+diff --git a/cmake/strata_gpu_engine.cmake b/cmake/strata_gpu_engine.cmake
+index 99b7ee5e0..f5b2b914f 100644
+--- a/cmake/strata_gpu_engine.cmake
++++ b/cmake/strata_gpu_engine.cmake
+@@ -521,6 +521,18 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
+   strata_utf8_manifest(strata)
+   target_include_directories(strata PRIVATE ${_strata_gpu_include_directories})
+   target_link_libraries(strata PRIVATE strata_engine strata_prefill strata_spec ${_strata_gpu_runtime_target})
++  # the picture reader inside the engine (--vision-gpu <mmproj>, CUDA only): tools/vision/own's GPU tower, run in borrowed expert slots
++  if(STRATA_ENABLE_CUDA AND NOT STRATA_ENABLE_HIP)
++    set(_vit ${CMAKE_CURRENT_SOURCE_DIR}/tools/vision/own)
++    add_library(strata_vit_engine STATIC ${_vit}/gguf_lite.cpp ${_vit}/vit_geometry.cpp ${_vit}/image_prep.cpp ${_vit}/engine_reader.cpp ${_vit}/vit_gpu.cu)
++    target_include_directories(strata_vit_engine PUBLIC ${_vit} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb)
++    target_compile_definitions(strata_vit_engine PUBLIC STRATA_VIT_GPU STRATA_VIT_CUDA)
++    target_compile_features(strata_vit_engine PUBLIC cxx_std_17)
++    set_target_properties(strata_vit_engine PROPERTIES CUDA_STANDARD 17 CUDA_SEPARABLE_COMPILATION OFF)
++    target_link_libraries(strata_vit_engine PUBLIC CUDA::cublas CUDA::cudart)
++    target_link_libraries(strata PRIVATE strata_vit_engine)
++    target_compile_definitions(strata PRIVATE STRATA_HAVE_VISION_GPU=1)
++  endif()
+   if(WIN32 AND STRATA_ENABLE_HIP)
+     # 0.2.1.2: the ROCm math libraries live in <package>\rocm\bin, which is on PATH only when the launcher starts the engine; load them on first
+     # use (main() adds that folder to the DLL search first) so `strata.exe --version` works from the package folder.  amdhip64_7.dll and the
+diff --git a/docs/NVFP4.md b/docs/NVFP4.md
+index 8b2854a58..81081242d 100644
+--- a/docs/NVFP4.md
++++ b/docs/NVFP4.md
+@@ -331,6 +331,28 @@ it skips the warm-up at 1,024 tokens (that only reserves GPU buffers; on the CPU
+ exactly, the left rectangle blue and the right red (the image cells' 2-D positions are right), the photo described
+ correctly, in English and Ukrainian, through the OpenAI and the Anthropic API.
+ 
++**After 0.2.15-nvfp4.4 the engine reads the pictures itself, on the GPU, only while it reads one** (`strata --vision-gpu
++<mmproj>`, the run config's `vision.in_engine`, which setup writes). The reader is our own tower (`tools/vision/own`,
++`vit_gpu.cu` with cuBLAS, no ggml), linked into `strata.exe`. Its weights stay in pinned RAM (862 MiB). For each
++picture the engine borrows the last ~360 slots of its expert cache (0.9-1.0 GB, the same end the prompt path lends)
++and uploads the weights into them (~16 ms). It encodes the picture, then refills the slots from RAM at once, on the
++stream the prompt path uses to refill its loan (STRATA_PF_REFILL_BG): 20-35 ms, finished before the picture's prompt
++is read. Between pictures every slot is the expert cache's: 8,189 slots as before. RTX 5090, 600 W, the GPTQ tray
++profile, through serve, time to the first token of a picture turn:
++
++| picture | CPU reader (0.2.15-nvfp4.4) | in the engine | encode on the GPU |
++| --- | ---: | ---: | ---: |
++| 640x400, 260 tokens | 1,281-1,286 ms | 622-641 ms | 14-22 ms |
++| 1024x1024, 1,024 tokens | 4,592-4,719 ms | 936-951 ms | 82-83 ms |
++| 800x450, 350 tokens | 1,580-1,588 ms | 653-669 ms | 18-23 ms |
++
++Decode right after a picture is as fast as without one, and the picture-free engine is bit-identical (16K text and
++logits, decode conv). Against the CPU reader the embeddings agree to a row cosine of 0.9992 or better (mean 0.99999).
++With `"preload": true` (setup's default) the weights are pinned and the path is warmed up at the engine's start (+1.2 s).
++Without it, the first picture pays that (+0.7 s for the weights, +0.5 s for the first GPU use). The first picture leaves
++74 MiB of kernel code in the reserve, outside the slots. A picture the engine cannot read goes to the CPU reader, which
++is started then; `STRATA_VISION_IN_ENGINE=0` or `"in_engine": false` keeps the CPU reader alone.
++
+ ### Upstream 0.1.28 merged (2026-09-30)
+ 
+ Upstream's 0.1.25-0.1.28 came in with a merge: the draft layer's prompt pass in batches (E-9), the hyper-connection
+diff --git a/release/make_windows_bundle.py b/release/make_windows_bundle.py
+index 0347f3d7d..5c14f4aa9 100644
+--- a/release/make_windows_bundle.py
++++ b/release/make_windows_bundle.py
+@@ -114,7 +114,7 @@ for dll in ("cublas64_13.dll", "cublasLt64_13.dll"):
+     cp(CUDA_BIN / dll, OUT / "engine" / dll)
+ (OUT / "engine" / "BUILD.json").write_text(json.dumps({
+     "version": VERSION, "source": "release", "archs": [75, 86, 89, 120], "ptx": False, "cuda": CUDA.name.lstrip("v"),
+-    "vision": "cpu", "portable": True, "fork": "https://github.com/sergqwer/strata-nvfp4",
++    "vision": "cpu", "vision_gpu": True, "portable": True, "fork": "https://github.com/sergqwer/strata-nvfp4",
+     "commit": git("rev-parse", "--short", "HEAD"), "dirty": bool(dirty),
+     "engine_sha256": hashlib.sha256(ENGINE.read_bytes()).hexdigest(), "cuda_libs": "bundled"}, indent=1) + "\n")
+ 
+diff --git a/serve/server.py b/serve/server.py
+index c3c6dd8fd..6ad78097a 100644
+--- a/serve/server.py
++++ b/serve/server.py
+@@ -1593,6 +1593,29 @@ class StrataEngine:
+         with self._exclusive_control():
+             return self._vram(reserve_mib, timeout)
+ 
++    def vision_encode(self, image: str, out: str, timeout: float | None = None) -> int:
++        """--vision-gpu: `VENC <image> <out>` between requests (the caller holds the service's FIFO): the engine reads the picture on the GPU in
++        borrowed expert slots and writes its embeddings to `out` -> the number of image tokens.  ValueError with the engine's reason (no room, an
++        engine without --vision-gpu, ...), EngineDied when it ended."""
++        with self._exclusive_control():
++            if not self.alive():
++                raise EngineDied("the engine is not running")
++            self.proc.stdin.write(f"VENC {image} {out}\n")
++            self.proc.stdin.flush()
++            deadline = time.time() + (VISION_ENCODE_S if timeout is None else timeout)
++            while True:
++                try:
++                    line = self.lines.get(timeout=max(0.1, deadline - time.time()))
++                except queue.Empty:
++                    raise EngineDied("the engine did not answer the VENC command") from None
++                if line is None:
++                    raise EngineDied("the engine ended")
++                line = line.strip()
++                if line.startswith("ERR"):
++                    raise ValueError(line[4:].strip() or "the engine refused the picture")
++                if line.startswith("VOK "):
++                    return int(line.split()[1])
++
+     def _vram(self, reserve_mib: int | None, timeout: float = 120.0) -> dict:
+         """#533: `VRAM <reserve_mib>` between requests (the caller holds the service's FIFO): the engine shrinks its
+         expert cache until that much VRAM is free, or grows it back when more is free; None: back to the reserve it
+@@ -3819,6 +3842,76 @@ class Vision:
+         shutil.rmtree(self.dir, ignore_errors=True)
+ 
+ 
++def vision_in_engine(cfg: dict) -> bool:
++    """The engine reads the pictures itself (strata --vision-gpu): the vision section says "in_engine": true, the engine is Strata's CUDA build on one
++    GPU, and STRATA_VISION_IN_ENGINE is not 0 (the switch back to the CPU reader).  The CPU reader of the section stays as the fallback."""
++    vis = cfg.get("vision")
++    if not isinstance(vis, dict) or vis.get("in_engine") is not True or not vis.get("mmproj"):
++        return False
++    if os.environ.get("STRATA_VISION_IN_ENGINE", "").strip() == "0":
++        return False
++    if cfg.get("backend") not in (None, "cuda") or sys.platform == "darwin" or len(gpu_list(cfg)) > 1 or parallel_slots(cfg):
++        return False
++    return True
++
++
++class EngineVision(Vision):
++    """The picture reader inside the engine (`VENC <image> <out>`, strata --vision-gpu): the engine lends the reader the last slots of its expert cache
++    for one picture and refills them from RAM right after, so no VRAM is held between pictures and no reader process runs on the card.  A picture the
++    engine cannot read (no room, an engine without --vision-gpu, any failure) is read by the section's CPU reader, started the first time it is needed;
++    the next picture tries the engine again.  The cache of encoded pictures and the files are Vision's."""
++
++    def __init__(self, cfg: dict, log=None, env: dict | None = None, lazy: bool = False):
++        super().__init__({**cfg, "gpu": False, "elastic": False}, log=log, env=env, lazy=True)   # the CPU reader: not started until needed
++        self.engine_of = None                           # set by main: a callable that gives the service's engine
++        self.engine_off = None                          # why the engine does not read pictures (an older engine): the CPU reader for good
++        self.reader = "engine"
++
++    def alive(self) -> bool:
++        return True                                     # the engine is the reader; the CPU one starts when a picture needs it
++
++    def cpu_alive(self) -> bool:
++        return Vision.alive(self)
++
++    def encode(self, source, keep=()):
++        data = self.normalize(source if isinstance(source, bytes) else self.load(source))
++        key = hashlib.sha256(data).hexdigest()[:32]
++        engine = self.engine_of() if self.engine_of is not None else None
++        why = self.engine_off or (None if engine is not None and hasattr(engine, "vision_encode") and engine.alive()
++                                  else "the engine is not running")
++        if why is None:
++            with self.lock:
++                self._ensure_dir()
++                if key in self.cache:
++                    self.cache[key] = self.cache.pop(key)
++                    return self.cache[key]
++                img, out = self.dir / f"{key}.img", self.dir / f"{key}.sve"
++                img.write_bytes(data)
++                try:
++                    n = engine.vision_encode(str(img.resolve()), str(out.resolve()))
++                except ValueError as e:
++                    why = str(e)
++                    if "--vision-gpu" in why or why.startswith("expected"):
++                        self.engine_off = why                # an engine without the reader: not asked again
++                finally:
++                    img.unlink(missing_ok=True)
++                if why is None:
++                    self.cache[key] = (out, n)
++                    self.warn_if_over_limit(n)
++                    held = {str(p) for p in keep} | {str(out)}
++                    for old in list(self.cache):
++                        if len(self.cache) <= 64:
++                            break
++                        if str(self.cache[old][0]) not in held:
++                            self.cache.pop(old)[0].unlink(missing_ok=True)
++                    return self.cache[key]
++        print(f"[strata] images: the engine did not read this picture on the GPU ({' '.join(str(why).split())[:200]}); the CPU reader reads it",
++              flush=True)
++        if not self.cpu_alive():
++            Vision.restart(self)
++        return Vision.encode(self, data, keep)
++
++
+ def gpu_list(cfg: dict) -> list[int]:
+     """The config's "gpu": one card (2), or several for a layer split ([0, 2] or "0,2"), numbered as nvidia-smi
+     numbers them; [] when it names none."""
+@@ -4114,6 +4207,15 @@ def engine_args(cfg: dict, exe: str | None = None, *, announce: bool = True) ->
+             note += " and --vram-reserve-mib 700"
+         print(f'[strata] the config has a "vision" section but no --vision in its args: {note} (run setup again with '
+               "--vision to write them)", flush=True)
++    # the engine reads pictures itself (vision.in_engine, vision_in_engine): its GPU reader, in borrowed expert slots
++    if vision_in_engine(cfg) and "--vision-gpu" not in args:
++        vis = cfg["vision"]
++        args += ["--vision-gpu", os.path.abspath(os.path.join(cfg.get("cwd") or ".", vis["mmproj"])),
++                 "--vision-max-tokens", str(Vision.token_limit({**vis, "gpu": True}))]
++        if vis.get("min_tokens"):
++            args += ["--vision-min-tokens", str(vis["min_tokens"])]
++        if vis.get("preload") is True:                 # the weights pinned and the path warmed up at the start, not at the first picture
++            args.append("--vision-gpu-preload")
+     if layer_split_of(cfg) and "--layer-split" not in args:
+         args += ["--layer-split", layer_split_value(cfg)]
+     # opt-in: an auto split runs on the first card alone when it holds every profiled expert and the KV
+@@ -10666,8 +10768,11 @@ def _main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> i
+                 print('[strata] images: on a layer split the expert cache cannot make room for the image encoder (the '
+                       'engine turns --vram-elastic off); keep its VRAM free with "--vram-reserve-mib" on the '
+                       "encoder's GPU, or the first picture may not get it", flush=True)
+-            vision = Vision(vcfg, log=open(cfg["log"], "a", encoding="utf-8") if cfg.get("log") else None,
+-                            env=vision_env(cfg, env), lazy=lazy)
++            vision = (EngineVision if vision_in_engine(cfg) else Vision)(vcfg, log=open(cfg["log"], "a", encoding="utf-8") if cfg.get("log") else None,
++                                                                         env=vision_env(cfg, env), lazy=lazy)
++            if isinstance(vision, EngineVision):
++                print("[strata] images: the engine reads pictures on the GPU in borrowed expert slots (vision.in_engine; "
++                      "STRATA_VISION_IN_ENGINE=0 or \"in_engine\": false reads them on the CPU)", flush=True)
+         print("model unloaded; the first request loads it ..." if lazy else
+               "loading the model (the first start takes a minute or two) ...", flush=True)
+         warn_budget_over_ram(engine_args(cfg, announce=False) if "args" in cfg else [])      # #1080
+@@ -10741,6 +10846,8 @@ def _main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> i
+                   sampling_defaults=sampling_defaults,
+                   fit_max_tokens=a.fit_max_tokens or (not a.no_fit_max_tokens and cfg.get("fit_max_tokens") is not False))
+     svc.launch_attestation = launch_attestation
++    if isinstance(vision, EngineVision):
++        vision.engine_of = lambda: svc.engine
+     svc.offline = a.offline
+     svc.max_queue = max_queue
+     svc.queue_timeout_s = float(queue_timeout) if queue_timeout is not None else None
+diff --git a/serve/test_vision_in_engine.py b/serve/test_vision_in_engine.py
+new file mode 100644
+index 000000000..2964366f6
+--- /dev/null
++++ b/serve/test_vision_in_engine.py
+@@ -0,0 +1,134 @@
++"""The picture reader inside the engine (vision.in_engine, strata --vision-gpu): the engine reads a picture on the GPU in borrowed expert slots (VENC);
++a picture it cannot read goes to the section's CPU reader, started the first time it is needed; STRATA_VISION_IN_ENGINE=0 or "in_engine": false keep
++the CPU reader as before; the engine's arguments carry --vision-gpu only when the engine reads the pictures.
++
++    python -m serve.test_vision_in_engine
++"""
++import os
++import struct
++import tempfile
++import unittest
++from pathlib import Path
++from unittest import mock
++
++import serve.server as server
++
++PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
++
++
++def vcfg(**extra):
++    return {"exe": "/engine/strata-vision", "mmproj": "/m/mmproj.gguf", "model": "/m/model.gguf", "gpu": False, "threads": 16,
++            "max_tokens": 1024, "in_engine": True, **extra}
++
++
++class FakeEngine:
++    def __init__(self, answer=None, error=None):
++        self.answer, self.error, self.calls = answer, error, []
++
++    def alive(self):
++        return True
++
++    def vision_encode(self, image, out):
++        self.calls.append((image, out))
++        assert os.path.isfile(image), "the picture is written before the engine reads it"
++        if self.error:
++            raise ValueError(self.error)
++        Path(out).write_bytes(struct.pack("<5i", 0x31455653, self.answer, self.answer, 1, 4) + b"\x00" * (16 * self.answer))
++        return self.answer
++
++
++class Switch(unittest.TestCase):
++    def test_in_engine_needs_the_key(self):
++        self.assertTrue(server.vision_in_engine({"vision": vcfg()}))
++        self.assertFalse(server.vision_in_engine({"vision": vcfg(in_engine=False)}))
++        self.assertFalse(server.vision_in_engine({"vision": {k: v for k, v in vcfg().items() if k != "in_engine"}}))
++
++    def test_the_environment_switch_keeps_the_cpu_reader(self):
++        with mock.patch.dict(os.environ, {"STRATA_VISION_IN_ENGINE": "0"}):
++            self.assertFalse(server.vision_in_engine({"vision": vcfg()}))
++
++    def test_not_on_amd_or_several_gpus(self):
++        self.assertFalse(server.vision_in_engine({"vision": vcfg(), "backend": "hip"}))
++        with mock.patch.object(server, "gpu_list", return_value=[0, 1]):
++            self.assertFalse(server.vision_in_engine({"vision": vcfg()}))
++
++
++class EngineArgs(unittest.TestCase):
++    def args(self, cfg):
++        with mock.patch.object(server.vram_fit, "fit_start", side_effect=lambda c, a, *_: (a, None, "")):
++            return server.engine_args(cfg, announce=False)
++
++    def test_the_engine_gets_the_reader(self):
++        a = self.args({"args": ["--serve", "--vision"], "vision": vcfg(min_tokens=64)})
++        i = a.index("--vision-gpu")
++        self.assertTrue(a[i + 1].endswith("mmproj.gguf"))
++        self.assertEqual(a[a.index("--vision-max-tokens") + 1], "1024")
++        self.assertEqual(a[a.index("--vision-min-tokens") + 1], "64")
++        self.assertNotIn("--vision-gpu-preload", a)
++        self.assertIn("--vision-gpu-preload", self.args({"args": ["--serve", "--vision"], "vision": vcfg(preload=True)}))
++
++    def test_the_cpu_reader_config_is_unchanged(self):
++        a = self.args({"args": ["--serve", "--vision"], "vision": vcfg(in_engine=False)})
++        self.assertNotIn("--vision-gpu", a)
++
++
++class Reading(unittest.TestCase):
++    def setUp(self):
++        self.tmp = tempfile.TemporaryDirectory()
++        d = Path(self.tmp.name) / "work"
++        d.mkdir()
++        with mock.patch.object(server.Vision, "work_dir", return_value=d):
++            self.v = server.EngineVision(vcfg())
++        self.started = []
++        self.v.restart = lambda: self.started.append(1)
++
++    def tearDown(self):
++        self.tmp.cleanup()
++
++    def test_no_reader_process_at_the_start(self):
++        self.assertIsNone(self.v.proc)
++        self.assertTrue(self.v.alive())                 # the service never starts the CPU reader with the engine
++        self.assertNotIn("--gpu", self.v.spawn[0])       # its fallback is the CPU reader
++
++    def test_the_engine_reads_and_the_result_is_cached(self):
++        eng = FakeEngine(answer=260)
++        self.v.engine_of = lambda: eng
++        path, n = self.v.encode(PNG)
++        self.assertEqual(n, 260)
++        self.assertTrue(path.is_file())
++        self.assertEqual(self.v.encode(PNG), (path, n))
++        self.assertEqual(len(eng.calls), 1)
++        self.assertNotIn(" ", eng.calls[0][1])           # the output path is the last word of the line
++        self.assertFalse(Path(eng.calls[0][0]).exists())  # the picture file is gone after the read
++
++    def test_a_refusal_goes_to_the_cpu_reader(self):
++        eng = FakeEngine(error="VENC: the expert cache has no room for the picture reader (1100 MiB)")
++        self.v.engine_of = lambda: eng
++        with mock.patch.object(server.Vision, "alive", return_value=False), \
++                mock.patch.object(server.Vision, "restart") as rs, \
++                mock.patch.object(server.Vision, "encode", return_value=(Path("x.sve"), 7)) as enc:
++            self.assertEqual(self.v.encode(PNG), (Path("x.sve"), 7))
++        rs.assert_called_once()
++        enc.assert_called_once()
++        self.assertIsNone(self.v.engine_off)             # the next picture asks the engine again
++
++    def test_an_engine_without_the_reader_is_not_asked_again(self):
++        eng = FakeEngine(error="VENC needs an engine started with --vision-gpu <mmproj> (one NVIDIA GPU, --serve)")
++        self.v.engine_of = lambda: eng
++        with mock.patch.object(server.Vision, "alive", return_value=True), \
++                mock.patch.object(server.Vision, "encode", return_value=(Path("x.sve"), 7)):
++            self.v.encode(PNG)
++            self.v.encode(PNG + b"1")
++        self.assertEqual(len(eng.calls), 1)
++        self.assertIn("--vision-gpu", self.v.engine_off)
++
++    def test_no_engine_reads_on_the_cpu(self):
++        self.v.engine_of = lambda: None
++        with mock.patch.object(server.Vision, "alive", return_value=True), \
++                mock.patch.object(server.Vision, "encode", return_value=(Path("x.sve"), 7)) as enc:
++            self.v.encode(PNG)
++        enc.assert_called_once()
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/setup.py b/setup.py
+index 6544fcc87..4cd3d4a26 100644
+--- a/setup.py
++++ b/setup.py
+@@ -6291,6 +6291,25 @@ def engine_defs(archs, toolkit=13) -> list:
+     return ["-DSTRATA_EXPERIMENTAL_SM60=ON"] if min(int(x) for x in archs) < 75 or int(toolkit) == 12 else []
+ 
+ 
++def engine_reads_pictures(eng) -> bool:
++    """The engine in `eng` reads pictures itself (strata --vision-gpu, the CUDA build after 0.2.15-nvfp4.4): its BUILD.json says "vision_gpu", or a
++    locally built engine carries the option."""
++    try:
++        meta = json.loads((Path(eng) / "BUILD.json").read_text(encoding="utf-8"))
++    except (OSError, ValueError):
++        meta = {}
++    if meta.get("vision_gpu") is True:
++        return True
++    if meta.get("source") != "local":
++        return False
++    try:
++        import mmap
++        with open(Path(eng) / EXE, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
++            return m.find(b"--vision-gpu MMPROJ") >= 0
++    except (OSError, ValueError):
++        return False
++
++
+ def prebuilt_vision(meta: dict, gpu: dict, vision: str) -> str:
+     """The image encoder to use with a ready-made engine (`meta`: its BUILD.json).  The encoder can cover fewer cards
+     than the engine (0.1.30/0.1.31: no RTX 20 code, #331): such a card gets the CPU encoder - the same program - instead
+@@ -6970,7 +6989,7 @@ SETUP_ENV = frozenset({"STRATA_HIPBLASLT_TUNING", "STRATA_ROCBLAS_TUNING", "STRA
+ # (0.1.44 dropped them with the rest of SETUP_ENV).  This fork's NVFP4 / Q8_0 / mix packs and Qwen3.6 never get them
+ # from setup either, so there too they are the user's own.
+ SETUP_ENV_UNSLOTH = frozenset({"STRATA_MMQ_KQ", "STRATA_HC_Q8", "STRATA_ROUTE_TAIL_SKIP"})
+-SETUP_VISION = frozenset({"exe", "cpu_exe", "mmproj", "model", "gpu", "max_tokens", "threads"})
++SETUP_VISION = frozenset({"exe", "cpu_exe", "mmproj", "model", "gpu", "max_tokens", "threads", "in_engine", "preload"})
+ 
+ 
+ def carry_over(old: dict, cfg: dict, explicit: list[str] | None = None) -> list[str]:
+@@ -9475,6 +9494,14 @@ def nvfp4_install(a, family: str, gpu: dict, multi: list, cuda_tk: int, ram: flo
+                          "gpu": vision == "gpu", "max_tokens": int(vt)}
+         if vision == "cpu":
+             cfg["vision"]["threads"] = max(1, (os.cpu_count() or 8) // 2)
++            # the engine reads the pictures on the GPU in borrowed expert slots (strata --vision-gpu), the CPU reader above is its fallback;
++            # --vision cpu keeps the CPU reader alone
++            from strata_control import vision_reader as VR
++            if VR.in_engine_wanted(a.vision, vision, engine_reads_pictures(eng)):
++                cfg["vision"]["in_engine"] = True
++                cfg["vision"]["preload"] = True     # pinned and warmed up at the start (+1.2 s), so the first picture is as fast as the rest
++                ok("images: read on the GPU by the engine, in expert slots it borrows for each picture and refills right after "
++                   "(the CPU reader when there is no room; --vision cpu keeps the CPU reader)")
+     cal = setup_calibration(cfg, False)                # tuned earlier (START-HERE --calibrate): kept by a re-run
+     if cal is not None:
+         sys.path.insert(0, str(ROOT / "tools"))
+diff --git a/src/program/generate.cpp b/src/program/generate.cpp
+index 4493465a6..cfa42eb14 100644
+--- a/src/program/generate.cpp
++++ b/src/program/generate.cpp
+@@ -164,6 +164,9 @@
+ #include "strata/core/family_layout.hpp"
+ #if defined(STRATA_HAVE_QWEN35)
+ #include "strata/qwen35/engine.hpp"
++#if defined(STRATA_HAVE_VISION_GPU)
++#include "engine_reader.h"   // tools/vision/own: --vision-gpu
++#endif
+ #endif
+ #if defined(_WIN32)
+ #include <windows.h>
+@@ -1101,6 +1104,12 @@ struct Options {
+     bool serve = false;
+     /// The vision path: keep a per-cell (t, h, w) rotary position table so --serve can take GENI requests.
+     bool vision = false;
++    /// --vision-gpu <mmproj> (CUDA, --serve): the picture reader inside the engine (VENC <image> <out>), on this GPU in borrowed expert slots, its
++    /// weights in pinned RAM between pictures; --vision-max-tokens / --vision-min-tokens as the reader program's --max-tokens / --min-tokens;
++    /// --vision-gpu-preload pins the weights at the start instead of at the first picture.
++    std::string vision_gpu;
++    int vision_max_tokens = 1024, vision_min_tokens = 0;
++    bool vision_gpu_preload = false;
+     int adapt_swaps = 192;
+     /// --serve: how many conversation checkpoints to keep between requests (0 = every request reads its whole
+     /// prompt again, the v0.1.2 behaviour).  One is the GDN recurrence of the 36 layers, the QSA indexer tails and
+@@ -1322,6 +1331,9 @@ void usage() {
+                  "  --shared-late        A/B: shared expert after the CPU pool (default: overlapped with it)\n"
+                  "  --keep-canonical     A/B: also load canonical copies of natively served tensors (more VRAM)\n"
+                  "  --vision             --serve takes images too (GENI requests; embeddings from strata-vision)\n"
++                 "  --vision-gpu MMPROJ  --serve (NVIDIA): read pictures in the engine (VENC <image> <out>), on the GPU in borrowed\n"
++                 "                       expert slots, refilled right after; the weights stay in pinned RAM (--vision-max-tokens N,\n"
++                 "                       default 1024, --vision-min-tokens N, --vision-gpu-preload: pin them at the start)\n"
+                  "  --prompt-cache N     --serve: keep N conversation checkpoints between requests (default 6, ~118 MB\n"
+                  "                       of RAM each; 0 = read every prompt from the start)\n"
+                  "  --conversation-cache-mib N  --serve: RAM budget for parked conversations (default: sized from the free RAM, up to 8192; 0 = off)\n"
+@@ -4067,6 +4079,10 @@ int main(int argc, char** argv) {
+         else if (a == "--pcie-mode") o.pcie_mode = next("--pcie-mode");
+         else if (a == "--serve") o.serve = true;
+         else if (a == "--vision") o.vision = true;
++        else if (a == "--vision-gpu") { o.vision_gpu = next("--vision-gpu"); o.vision = true; }
++        else if (a == "--vision-max-tokens") o.vision_max_tokens = std::max(0, std::atoi(next("--vision-max-tokens")));
++        else if (a == "--vision-min-tokens") o.vision_min_tokens = std::max(0, std::atoi(next("--vision-min-tokens")));
++        else if (a == "--vision-gpu-preload") o.vision_gpu_preload = true;
+         else if (a == "--session-save-reclaim") o.session_save_reclaim = true;
+         else if (a == "--prompt-cache") o.prompt_cache = std::max(0, std::atoi(next("--prompt-cache")));
+         else if (a == "--conversation-cache-mib" || a == "--conversation-cache-slots" ||
+@@ -17119,6 +17135,225 @@ int main(int argc, char** argv) {
+                         (long long) (free_b >> 20), (long long) o.prefill_chunk);
+             return true;
+         };
++#if defined(STRATA_HAVE_VISION_GPU)
++        // ---- --vision-gpu: VENC <image> <out>, between requests.  The picture reader runs on this GPU in the LAST slots of the expert cache (the
++        // end the prompt path lends too), its weights uploaded from pinned RAM into them; right after the encode those slots are refilled from RAM,
++        // beside whatever runs next (STRATA_PF_REFILL_BG's stream, hottest first) or at once where that path is off.  Answers
++        // "VOK <n_tokens> <nx> <ny> <ms>" or "ERR <reason>" (the server then reads the picture with the CPU reader).  STRATA_VISION_GPU_LOG=0: no line.
++        strata_vit::EngineReader venc;
++        if (!o.vision_gpu.empty()) {
++            std::string verr;
++            const char* why = multi_gpu || !stages.empty() ? "a layer split" : peer.valid() ? "--peer-device" : o.batch > 0 ? "--batch slots" : nullptr;
++            if (why != nullptr) std::fprintf(stderr, "strata serve: --vision-gpu is off: %s (the CPU reader reads pictures)\n", why);
++            else if (!venc.open(o.vision_gpu, o.vision_max_tokens, o.vision_min_tokens, verr))
++                std::fprintf(stderr, "strata serve: --vision-gpu is off: %s\n", verr.c_str());
++            else if (o.vision_gpu_preload) {
++                const auto t0 = Clock::now();
++                if (!venc.stage(verr)) std::fprintf(stderr, "strata serve: --vision-gpu: the weights did not load (%s); tried again at the first picture\n", verr.c_str());
++                else std::fprintf(stderr, "strata serve: --vision-gpu: the picture reader's weights in %s RAM, %.0f MiB, in %.0f ms\n",
++                                  venc.staged_pinned() ? "pinned" : "pageable", (double) venc.staged_bytes() / 1048576.0,
++                                  std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
++            }
++            if (venc.opened())
++                std::fprintf(stderr, "strata serve: --vision-gpu: pictures are read on the GPU in borrowed expert slots (up to %d image tokens)\n",
++                             o.vision_max_tokens);
++        }
++        static const bool venc_log = [] { const char* v = std::getenv("STRATA_VISION_GPU_LOG"); return v == nullptr || v[0] != '0'; }();
++        // the borrowed slots back: on bgr's stream beside what follows (as refill_last's STRATA_PF_REFILL_BG path), else queued and waited for here
++        auto venc_refill = [&](std::vector<std::pair<int32_t, int32_t>>& items, bool& in_bg, std::string& e) -> bool {
++            in_bg = false;
++            if (items.empty()) return true;
++            static const bool bg_env = [] { const char* v = std::getenv("STRATA_PF_REFILL_BG"); return v == nullptr || std::atoi(v) != 0; }();
++            static const bool parts_env = [] { const char* v = std::getenv("STRATA_REFILL_PARTS"); return v != nullptr && std::atoi(v) != 0; }();
++            static const bool bg_venc = [] { const char* v = std::getenv("STRATA_VISION_GPU_REFILL_BG"); return v == nullptr || std::atoi(v) != 0; }();
++            const bool bg_ok = bg_env && bg_venc && stages.empty() && !multi_gpu && !peer.valid() && !pipe && serial_windows && res_pairs != nullptr &&
++                               (drive.d.fetch_admit > 0 || drive.d.evict_sync) && adapt_nowait() && !ajob && !parts_env && !refill_blocking() &&
++                               !o.prefill_head_alias && o.batch == 0 && !remote_opt;
++            if (bg_ok && bgr.st == nullptr && cudaStreamCreateWithFlags(&bgr.st, cudaStreamNonBlocking) != cudaSuccess) {
++                (void) cudaGetLastError();
++                bgr.st = nullptr;
++            }
++            if (!bg_ok || bgr.st == nullptr) {
++                for (const auto& [i, slot] : items) {
++                    const uint8_t* b = srcp->blob_stable(i / g.n_expert, i % g.n_expert);
++                    const int64_t nb = (int64_t) strata::kernels::cpu::expert_layout().blob_bytes(i / g.n_expert);
++                    if (b == nullptr || !xcache.fill_slot_queued(slot, b, e, nb)) { if (e.empty()) e = "no blob"; return false; }
++                    srcp->note_async_read(b, nullptr);   // #1237
++                    host_res[(size_t) i] = slot;
++                }
++                if (!xcache.sync_queued(e)) return false;
++#if defined(_WIN32)
++                for (const auto& [i, slot] : items) srcp->release(i / g.n_expert, i % g.n_expert);
++#endif
++                items.clear();
++                res_upload();
++                return true;
++            }
++            const auto t0 = Clock::now();
++            bgr.items = std::move(items);
++            items.clear();
++            bgr.hot = 0;
++            for (const auto& it : bgr.items) bgr.hot += !drive.d.usage.empty() && drive.d.usage[(size_t) it.first] > 0.0f;
++            std::sort(bgr.items.begin(), bgr.items.end(), [&](const auto& a, const auto& b) {
++                const float ua = drive.d.usage.empty() ? 0.0f : drive.d.usage[(size_t) a.first];
++                const float ub = drive.d.usage.empty() ? 0.0f : drive.d.usage[(size_t) b.first];
++                return ua != ub ? ua > ub : a.second < b.second;
++            });
++            bgr.ends.clear();
++            bgr.next = 0;
++            bgr.windows = 0;
++            std::vector<void*> b_dst;
++            std::vector<const void*> b_src;
++            std::vector<size_t> b_n;
++            for (size_t k = 0; k < bgr.items.size(); ++k) {
++                const auto [i, slot] = bgr.items[k];
++                const uint8_t* b = srcp->blob_stable(i / g.n_expert, i % g.n_expert);
++                const int64_t nb = (int64_t) strata::kernels::cpu::expert_layout().blob_bytes(i / g.n_expert);
++                if (b == nullptr) { e = "refilling a borrowed slot: no blob"; return false; }
++#if defined(CUDART_VERSION) && CUDART_VERSION >= 12080
++                if (xcache.device_slot(slot) != nullptr) {
++                    b_dst.push_back(xcache.device_slot(slot));
++                    b_src.push_back(b);
++                    b_n.push_back((size_t) nb);
++                } else
++#endif
++                if (!xcache.fill_slot_on(slot, b, bgr.st, e, nb)) return false;
++                if (b_dst.empty()) srcp->note_async_read(b, bgr.st);   // #1237
++                if (!drive.d.in_flight.empty()) drive.d.in_flight[(size_t) i] = 1;
++                if ((k + 1) % 32 == 0 || k + 1 == bgr.items.size()) {
++#if defined(CUDART_VERSION) && CUDART_VERSION >= 12080
++                    if (!b_dst.empty()) {
++                        cudaMemcpyAttributes at{};
++                        at.srcAccessOrder = cudaMemcpySrcAccessOrderStream;
++                        at.flags = cudaMemcpyFlagPreferOverlapWithCompute;
++                        size_t at_idx = 0;
++                        if (cudaMemcpyBatchAsync(b_dst.data(), b_src.data(), b_n.data(), b_dst.size(), &at, &at_idx, 1, bgr.st) != cudaSuccess) {
++                            e = std::string("refilling the borrowed slots (cudaMemcpyBatchAsync): ") + cudaGetErrorString(cudaGetLastError());
++                            return false;
++                        }
++                        for (const void* q : b_src) srcp->note_async_read((const uint8_t*) q, bgr.st);   // #1237
++                        b_dst.clear();
++                        b_src.clear();
++                        b_n.clear();
++                    }
++#endif
++                    const size_t bi = bgr.ends.size();
++                    if (bi == bgr.evs.size()) {
++                        cudaEvent_t ev = nullptr;
++                        if (cudaEventCreateWithFlags(&ev, cudaEventDisableTiming) != cudaSuccess) {
++                            e = std::string("refilling the borrowed slots: ") + cudaGetErrorString(cudaGetLastError());
++                            return false;
++                        }
++                        bgr.evs.push_back(ev);
++                    }
++                    if (cudaEventRecord(bgr.evs[bi], bgr.st) != cudaSuccess) {
++                        e = std::string("refilling the borrowed slots: ") + cudaGetErrorString(cudaGetLastError());
++                        return false;
++                    }
++                    bgr.ends.push_back(k + 1);
++                }
++            }
++            bgr.t0 = t0;
++            bgr.issue_ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
++            bgr.sync_ms = 0;
++            bgr.live = true;
++            in_bg = true;
++            return true;
++        };
++        auto venc_command = [&](const std::string& cmd, std::string& e, bool answer = true) -> bool {
++            const auto t0 = Clock::now();
++            const std::string rest = cmd.substr(5);
++            const size_t sp_at = rest.rfind(' ');
++            if (sp_at == std::string::npos || sp_at == 0 || sp_at + 1 >= rest.size()) { e = "expected: VENC <image> <output>"; return false; }
++            const std::string img = rest.substr(0, sp_at), out = rest.substr(sp_at + 1);
++            if (!venc.opened()) { e = "VENC needs an engine started with --vision-gpu <mmproj> (one NVIDIA GPU, --serve)"; return false; }
++            if (answer && std::getenv("STRATA_VISION_GPU_TEST_FAIL") != nullptr) { e = "VENC: refused for a test (STRATA_VISION_GPU_TEST_FAIL)"; return false; }
++            if (src.complement_ready()) { e = "VENC: not with the resident low-RAM mode (the cache holds experts RAM does not)"; return false; }
++            for (const PfPart& p : pf_parts)
++                if (!p.lent.empty()) { e = "VENC: a prompt's loan is still out"; return false; }
++            double stage_ms = 0.0;
++            if (!venc.staged()) {
++                const auto ts = Clock::now();
++                if (!venc.stage(e)) { e = "VENC: the picture reader's weights did not load: " + e; return false; }
++                stage_ms = std::chrono::duration<double, std::milli>(Clock::now() - ts).count();
++                std::fprintf(stderr, "strata serve: --vision-gpu: the picture reader's weights in %s RAM, %.0f MiB, in %.0f ms (first picture)\n",
++                             venc.staged_pinned() ? "pinned" : "pageable", (double) venc.staged_bytes() / 1048576.0, stage_ms);
++            }
++            strata_vit::PreparedImage prep;
++            if (!venc.prepare(img, prep, e)) return false;
++            const auto t_prep = Clock::now();
++            const size_t need = venc.need_for(prep) + 256;   // + the base's alignment
++            // nothing reads or writes the cache while it is lent: the tier's swaps and a refill still landing first
++            if (!ver.wait_commit(e)) return false;
++            adapt_quiesce();
++            bgr_poll(true);
++            if (cudaDeviceSynchronize() != cudaSuccess) { e = std::string("VENC: ") + cudaGetErrorString(cudaGetLastError()); return false; }
++            const int64_t live = xcache.slots();
++            const int64_t k = cache_slots_for(xcache, (uint64_t) need);
++            int64_t lo = g_lend_keep;
++            if (kvg.on && kvg.lo < kvg.top) lo = std::max<int64_t>(lo, kvg.top);   // never into a grown K/V
++            if (k <= 0 || live - k < lo) {
++                e = "VENC: the expert cache has no room for the picture reader (" + std::to_string(need >> 20) + " MiB)";
++                return false;
++            }
++            const int32_t first = (int32_t) (live - k);
++            uint8_t* base = xcache.device_slot(first);
++            const size_t room = xcache.slot_offsets() ? (size_t) (xcache.bytes() - (int64_t) xcache.slot_offsets()[first])
++                                                      : (size_t) k * (size_t) strata::kernels::cpu::expert_layout().max_blob;
++            uint8_t* abase = (uint8_t*) (((uintptr_t) base + 255) & ~(uintptr_t) 255);
++            std::vector<std::pair<int32_t, int32_t>> taken;
++            for (size_t i = 0; i < host_res.size(); ++i)
++                if (host_res[i] >= first) {
++                    taken.emplace_back((int32_t) i, host_res[i]);
++                    host_res[i] = strata::core::kNotResident;
++                }
++            if (!taken.empty()) res_upload();
++            if (cudaDeviceSynchronize() != cudaSuccess) { e = std::string("VENC: ") + cudaGetErrorString(cudaGetLastError()); return false; }
++            const auto t_lend = Clock::now();
++            int n = 0, nx = 0, ny = 0;
++            strata_vit::EngineReaderTimes vt;
++            std::string eerr;
++            size_t vf0 = 0, vf1 = 0, vtot = 0;
++            cudaMemGetInfo(&vf0, &vtot);
++            const bool ok = venc.encode(abase, room - (size_t) (abase - base), prep, out, n, nx, ny, vt, eerr);
++            (void) cudaGetLastError();
++            cudaMemGetInfo(&vf1, &vtot);
++            const auto t_enc = Clock::now();
++            const size_t n_taken = taken.size();
++            bool in_bg = false;
++            std::string rerr;
++            if (!venc_refill(taken, in_bg, rerr)) {
++                std::printf("ERR VENC: refilling the borrowed expert slots failed: %s\n", rerr.c_str());
++                std::fflush(stdout);
++                std::exit(1);   // the cache would serve slots that hold the reader's bytes: the server starts the engine again
++            }
++            const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
++            if (venc_log)
++                std::fprintf(stderr, "strata serve: picture read on the GPU: %d tokens (%dx%d) in %.0f ms (read + prepare %.0f, lend %.0f, upload %.1f, "
++                                     "encode %.0f, write %.0f%s); %zu MiB in %lld borrowed slots, %zu experts refilled %s\n",
++                             n, nx, ny, ms, std::chrono::duration<double, std::milli>(t_prep - t0).count() - stage_ms,
++                             std::chrono::duration<double, std::milli>(t_lend - t_prep).count(), vt.upload_ms, vt.encode_ms, vt.write_ms,
++                             stage_ms > 0 ? (", first-picture load " + std::to_string((int) stage_ms) + " ms").c_str() : "", need >> 20, (long long) k,
++                             n_taken, in_bg ? "beside what follows" : "before the answer");
++            if (venc_log && vf0 != vf1)
++                std::fprintf(stderr, "strata serve: --vision-gpu: %+.0f MiB of VRAM outside the borrowed slots after this picture (%.0f MiB free)\n",
++                             ((double) vf0 - (double) vf1) / 1048576.0, (double) vf1 / 1048576.0);
++            (void) t_enc;
++            if (!ok) { e = "VENC: the vision encoder failed (" + eerr + ")"; return false; }
++            if (answer) std::printf("VOK %d %d %d %.0f\n", n, nx, ny, ms);
++            return true;
++        };
++        if (venc.opened() && venc.staged()) {
++            // --vision-gpu-preload: one small grey picture through the whole path now, so the first real one does not pay the GPU's first-use
++            // costs (the kernels' module load, cuBLAS's first batched product: ~0.5 s measured)
++            std::string werr;
++            const auto tw = Clock::now();
++            if (venc_command("VENC @warm -", werr, false))
++                std::fprintf(stderr, "strata serve: --vision-gpu: warmed up in %.0f ms\n", std::chrono::duration<double, std::milli>(Clock::now() - tw).count());
++            else
++                std::fprintf(stderr, "strata serve: --vision-gpu: the warm-up failed (%s)\n", werr.c_str());
++        }
++#endif
+         // ---- --batch: the slots of the batch windows
+         struct BSlot {
+             bool active = false, stop = false;
+@@ -18585,6 +18820,16 @@ int main(int argc, char** argv) {
+                 std::fflush(stdout);
+                 continue;
+             }
++#if defined(STRATA_HAVE_VISION_GPU)
++            if (line.rfind("VENC ", 0) == 0) {   // --vision-gpu (above): a picture, between requests
++                std::string verr;
++                if (batch_on()) verr = "VENC: not while batch slots are decoding";
++                else venc_command(line, verr);
++                if (!verr.empty()) std::printf("ERR %s\n", verr.c_str());
++                std::fflush(stdout);
++                continue;
++            }
++#endif
+             // a command may touch the expert cache (a request lends slots, a K/V growth moves them, a session restore
+             // quiesces it): a round of the asynchronous tier that the batch windows left in flight lands first
+             if (!adapt_tick(true)) {
+diff --git a/strata_control/vision_reader.py b/strata_control/vision_reader.py
+index bb0d6c08d..e181980a7 100644
+--- a/strata_control/vision_reader.py
++++ b/strata_control/vision_reader.py
+@@ -190,6 +190,14 @@ def retry_gpu_start(*, linux: bool, arm: bool, hip: bool, text: str, retries_don
+     return "ggml_cuda_init" in t or "cudasetdevice" in t or "cannot use gpu" in t
+ 
+ 
++def in_engine_wanted(asked: str | None, mode: str, engine_reads: bool) -> bool:
++    """The NVIDIA engine of this fork reads pictures itself (strata --vision-gpu: our own tower on the card, in expert slots it borrows for one picture and
++    refills right after, so no VRAM is held between pictures; serve/server.py EngineVision).  Setup writes "in_engine": true beside the CPU reader (its
++    fallback) when pictures are on (`mode` "cpu": the reader the folder has), the engine carries the option, and the person did not ask for the CPU reader
++    (`asked` "cpu" keeps the CPU reader alone, as before)."""
++    return mode == "cpu" and engine_reads and (asked or "").lower() != "cpu"
++
++
+ def cpu_fallback(vision_cfg: dict, same_program: bool = False) -> dict | None:
+     """The same section for the CPU reader, when the GPU reader has one to fall back on; None otherwise.  AMD and Intel name it (`cpu_exe`);
+     the NVIDIA reader (`strata-vision`) is the CPU reader too, without --gpu - `same_program` takes that one (the on-demand reader's
+diff --git a/tools/test_setup_fork_engine.py b/tools/test_setup_fork_engine.py
+index 88e1a4375..6e2e4ab6e 100644
+--- a/tools/test_setup_fork_engine.py
++++ b/tools/test_setup_fork_engine.py
+@@ -241,6 +241,27 @@ class Vision(unittest.TestCase):
+         self.assertEqual((saved["vision"]["gpu"], saved["vision"]["max_tokens"]), (False, 600))
+ 
+ 
++class EngineReadsPictures(unittest.TestCase):
++    """setup.engine_reads_pictures: the release engine says so in BUILD.json ("vision_gpu"), a local build carries --vision-gpu in its help."""
++
++    def folder(self, meta, exe=b""):
++        d = Path(tempfile.mkdtemp(prefix="erp-"))
++        (d / "BUILD.json").write_text(json.dumps(meta), encoding="utf-8")
++        (d / setup.EXE).write_bytes(exe or b"MZ\0")
++        return d
++
++    def test_the_release_says_it(self):
++        self.assertTrue(setup.engine_reads_pictures(self.folder({**FORK, "vision_gpu": True})))
++        self.assertFalse(setup.engine_reads_pictures(self.folder(FORK)))          # an older release: the CPU reader alone
++
++    def test_a_local_build_is_read(self):
++        self.assertTrue(setup.engine_reads_pictures(self.folder({"source": "local"}, b"MZ..  --vision-gpu MMPROJ  --serve ..")))
++        self.assertFalse(setup.engine_reads_pictures(self.folder({"source": "local"}, b"MZ.. no such option ..")))
++
++    def test_no_engine(self):
++        self.assertFalse(setup.engine_reads_pictures(Path(tempfile.mkdtemp(prefix="erp-"))))
++
++
+ class Texts(unittest.TestCase):
+     def test_the_fork_s_version_is_written_as_its_tag(self):
+         self.assertEqual(setup.version_text(setup.version_tuple("0.1.40.3-nvfp4.1")), "0.1.40.3-nvfp4.1")
+diff --git a/tools/test_vision_reader.py b/tools/test_vision_reader.py
+index 7c31c6fdd..2ecced592 100644
+--- a/tools/test_vision_reader.py
++++ b/tools/test_vision_reader.py
+@@ -132,6 +132,22 @@ class Choose(unittest.TestCase):
+         self.assertIsNone(VR.cpu_fallback({"exe": "/e/strata-vision", "gpu": False}, same_program=True))
+ 
+ 
++class InEngine(unittest.TestCase):
++    def test_pictures_on_with_an_engine_that_reads_them(self):
++        for asked in (None, "yes", "gpu"):
++            with self.subTest(asked=asked):
++                self.assertTrue(VR.in_engine_wanted(asked, "cpu", True))
++
++    def test_the_cpu_reader_asked_for_is_kept(self):
++        self.assertFalse(VR.in_engine_wanted("cpu", "cpu", True))
++        self.assertFalse(VR.in_engine_wanted("CPU", "cpu", True))
++
++    def test_an_older_engine_or_pictures_off(self):
++        self.assertFalse(VR.in_engine_wanted("yes", "cpu", False))
++        self.assertFalse(VR.in_engine_wanted("no", "none", True))
++        self.assertFalse(VR.in_engine_wanted("gpu", "gpu", True))      # a GPU reader program of its own (a build with one) stays as it is
++
++
+ class MacReader(unittest.TestCase):
+     """A Mac has one picture program, strata-vision with Metal built in: --gpu reads on the GPU, without it on the CPU."""
+ 
+diff --git a/tools/vision/own/engine_reader.cpp b/tools/vision/own/engine_reader.cpp
+new file mode 100644
+index 000000000..a4871c175
+--- /dev/null
++++ b/tools/vision/own/engine_reader.cpp
+@@ -0,0 +1,87 @@
++// tools/vision/own/engine_reader.cpp - see engine_reader.h
++#include "engine_reader.h"
++
++#include <algorithm>
++#include <chrono>
++#include <cstdint>
++#include <cstdio>
++#include <vector>
++
++namespace strata_vit {
++
++bool EngineReader::open(const std::string& mmproj, int max_tokens, int min_tokens, std::string& err) {
++    Gguf gg;
++    if (!gg.open(mmproj, err) || !vit_geometry_from_gguf(gg, geo_, err) || !vit_geometry_supported(geo_, err)) return false;
++    if (geo_.head_dim > 96) { err = "a head size above 96 is not handled by the GPU attention"; return false; }
++    if (max_tokens > 0 && min_tokens > max_tokens) { err = "--vision-min-tokens is above --vision-max-tokens"; return false; }
++    mmproj_ = mmproj;
++    max_tokens_ = max_tokens;
++    min_tokens_ = min_tokens;
++    opened_ = true;
++    return true;
++}
++
++bool EngineReader::stage(std::string& err) {
++    if (staged_) return true;
++    if (!opened_) { err = "no vision encoder file"; return false; }
++    Gguf gg;
++    if (!gg.open(mmproj_, err)) return false;
++    std::unique_ptr<VitGpu> g(new VitGpu());
++    if (!g->stage(gg, geo_, 0, err)) return false;
++    gpu_ = std::move(g);
++    staged_ = true;
++    return true;
++}
++
++bool EngineReader::prepare(const std::string& image, PreparedImage& prep, std::string& err) const {
++    ImageU8 src;
++    if (image == "@warm") {   // the engine's warm-up picture (--vision-gpu-preload): grey, 256 x 256
++        src.w = src.h = 256;
++        src.rgb.assign((size_t) 256 * 256 * 3, 128);
++    } else if (!image_load_file(image, src, err)) {
++        err = "cannot read the image " + image;
++        return false;
++    }
++    if (!prepare_image(src, geo_, min_tokens_, max_tokens_, prep, err)) { err = "the image could not be preprocessed (" + err + ")"; return false; }
++    const int n_expect = (prep.w / geo_.align()) * (prep.h / geo_.align());
++    if (max_tokens_ > 0 && n_expect > max_tokens_ + max_tokens_ / 8) {
++        err = "the picture became " + std::to_string(n_expect) + " image tokens, over the limit of " + std::to_string(max_tokens_) +
++              " (vision.max_tokens); send a smaller picture or raise the limit";
++        return false;
++    }
++    return true;
++}
++
++size_t EngineReader::need_for(const PreparedImage& prep) {
++    if (!gpu_) return 0;
++    return gpu_->arena_need((prep.w / geo_.patch) * (prep.h / geo_.patch));
++}
++
++bool EngineReader::encode(void* base, size_t bytes, const PreparedImage& prep, const std::string& out, int& n, int& nx, int& ny,
++                          EngineReaderTimes& t, std::string& err) {
++    using clock = std::chrono::steady_clock;
++    if (!gpu_) { err = "the vision weights are not loaded"; return false; }
++    const auto t0 = clock::now();
++    if (!gpu_->bind(base, bytes, err)) return false;
++    const auto t1 = clock::now();
++    std::vector<float> rows;
++    const bool ok = gpu_->encode(prep, rows, nx, ny, err);
++    gpu_->unbind();
++    const auto t2 = clock::now();
++    t.upload_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
++    t.encode_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
++    if (!ok) return false;
++    n = nx * ny;
++    if (out == "-") return true;   // the warm-up: nothing to write
++    FILE* f = std::fopen(out.c_str(), "wb");
++    if (!f) { err = "cannot write " + out; return false; }
++    const int32_t hdr[5] = {0x31455653, n, nx, ny, geo_.out_dim};
++    const bool wr = std::fwrite(hdr, sizeof hdr, 1, f) == 1 &&
++                    std::fwrite(rows.data(), sizeof(float) * (size_t) geo_.out_dim, (size_t) n, f) == (size_t) n;
++    std::fclose(f);
++    if (!wr) { err = "short write to " + out; return false; }
++    t.write_ms = std::chrono::duration<double, std::milli>(clock::now() - t2).count();
++    return true;
++}
++
++}  // namespace strata_vit
+diff --git a/tools/vision/own/engine_reader.h b/tools/vision/own/engine_reader.h
+new file mode 100644
+index 000000000..8bfabc10d
+--- /dev/null
++++ b/tools/vision/own/engine_reader.h
+@@ -0,0 +1,48 @@
++// tools/vision/own/engine_reader.h - the picture reader inside the engine (strata --vision-gpu <mmproj>): our own tower on the engine's GPU, in
++// device memory the engine lends it for one picture (its borrowed expert slots), with the weights kept in page-locked RAM between pictures.
++//
++//   EngineReader r;  r.open(mmproj, max_tokens, min_tokens, err);   // the file's header and geometry (cheap)
++//   r.stage(err);                                                   // the weights into pinned RAM (once: at the start or the first picture)
++//   r.prepare(image, prep, err);  need = r.need_for(prep);          // the picture, and the room it needs
++//   r.encode(base, bytes, prep, out, n, nx, ny, t, err);            // upload, encode, write the SVE1 file; the room is the caller's again after
++// The output is the reader program's: int32 {'SVE1', n_tokens, nx, ny, n_embd} then float32 [n_tokens][n_embd].
++#pragma once
++
++#include "gguf_lite.h"
++#include "image_prep.h"
++#include "vit_geometry.h"
++#include "vit_gpu.h"
++
++#include <memory>
++#include <string>
++
++namespace strata_vit {
++
++struct EngineReaderTimes {
++    double upload_ms = 0, encode_ms = 0, write_ms = 0;
++};
++
++class EngineReader {
++public:
++    bool open(const std::string& mmproj, int max_tokens, int min_tokens, std::string& err);
++    bool opened() const { return opened_; }
++    bool staged() const { return staged_; }
++    bool stage(std::string& err);
++    size_t staged_bytes() const { return gpu_ ? gpu_->staged_bytes() : 0; }
++    bool staged_pinned() const { return gpu_ && gpu_->staged_pinned(); }
++    int out_dim() const { return geo_.out_dim; }
++    // read and prepare a picture; refuses one over the limit (by more than an eighth, as the reader program)
++    bool prepare(const std::string& image, PreparedImage& prep, std::string& err) const;
++    size_t need_for(const PreparedImage& prep);
++    bool encode(void* base, size_t bytes, const PreparedImage& prep, const std::string& out, int& n, int& nx, int& ny, EngineReaderTimes& t,
++                std::string& err);
++
++private:
++    std::string mmproj_;
++    int max_tokens_ = 0, min_tokens_ = 0;
++    bool opened_ = false, staged_ = false;
++    VitGeometry geo_;
++    std::unique_ptr<VitGpu> gpu_;
++};
++
++}  // namespace strata_vit
+diff --git a/tools/vision/own/vit_gpu.cu b/tools/vision/own/vit_gpu.cu
+index 65171e2a7..90d7f4509 100644
+--- a/tools/vision/own/vit_gpu.cu
++++ b/tools/vision/own/vit_gpu.cu
+@@ -11,6 +11,7 @@
+ #include <cstdlib>
+ #include <cstring>
+ #include <thread>
++#include <type_traits>
+ 
+ #if defined(STRATA_VIT_HIP)
+ #include <hip/hip_fp16.h>
+@@ -444,6 +445,33 @@ struct VitGpuImpl {
+     size_t bytes = 0, work_bytes = 0;
+     std::vector<void*> work;        // the work buffers (a prefix of allocs is weights, the rest are these)
+     size_t n_weight_allocs = 0;
++    // The engine's in-process reader (VitGpu::stage / bind): M_STAGE lays the weights out in a host image (pinned once) at offsets from kFake, M_ARENA
++    // carves weights and work buffers from device memory the caller lends (the engine's borrowed expert slots).  M_DIRECT is the reader program's cudaMalloc.
++    enum Mode { M_DIRECT, M_STAGE, M_ARENA };
++    Mode mode = M_DIRECT;
++    static constexpr uintptr_t kFake = (uintptr_t) 1 << 44;
++    std::vector<unsigned char> stage_img;          // the weights as the device holds them, before the pin
++    unsigned char* pinned = nullptr;               // that image in page-locked RAM (cudaHostAlloc); null: stage_img is copied as it is
++    size_t stage_bytes = 0;
++    std::vector<std::pair<size_t, size_t>> hf_fix;   // (offset, elements): K_HF matrices, BF16 -> F16 on the device after each upload
++    char* arena = nullptr;
++    size_t arena_cap = 0, arena_used = 0, weights_end = 0;
++    bool bound = false;
++    static size_t align256(size_t n) { return (n + 255) / 256 * 256; }
++    template <class F> void each_weight(F f) {
++        f(patch_w); f(patch_b); f(pos); f(post_w); f(post_b); f(mm0_b); f(mm2_b); f(mm0.p); f(mm2.p);
++        for (DevLayer& L : layers) {
++            f(L.ln1_w); f(L.ln1_b); f(L.ln2_w); f(L.ln2_b); f(L.qkv_b); f(L.o_b); f(L.up_b); f(L.down_b);
++            f(L.qkv.p); f(L.o.p); f(L.up.p); f(L.down.p);
++        }
++    }
++    void rebase(intptr_t delta) {
++        each_weight([delta](auto*& p) { if (p) p = (std::remove_reference_t<decltype(p)>) ((char*) p + delta); });
++    }
++    bool h2d(void* dst, const void* src, size_t n) {
++        if (mode == M_STAGE) { std::memcpy(stage_img.data() + ((uintptr_t) dst - kFake), src, n); return true; }
++        return cudaMemcpy(dst, src, n, cudaMemcpyHostToDevice) == cudaSuccess;
++    }
+ 
+     float *patch_w = nullptr, *patch_b = nullptr, *pos = nullptr, *post_w = nullptr, *post_b = nullptr, *mm0_b = nullptr, *mm2_b = nullptr;
+     DevW mm0, mm2;
+@@ -672,8 +700,29 @@ struct VitGpuImpl {
+ #endif
+         for (void* p : allocs) (void) cudaFree(p);
+         if (blas) cublasDestroy(blas);
++#if !defined(STRATA_VIT_HIP)
++        if (pinned) (void) cudaFreeHost(pinned);
++#endif
+     }
+     template <class T> bool alloc(T*& p, size_t n, std::string& err, bool weight) {
++        if (mode == M_STAGE) {
++            if (!weight) { err = "a work buffer while the weights are staged"; return false; }
++            const size_t off = align256(stage_bytes);
++            stage_bytes = off + n * sizeof(T);
++            stage_img.resize(stage_bytes);
++            p = (T*) (kFake + off);
++            bytes += n * sizeof(T);
++            return true;
++        }
++        if (mode == M_ARENA) {
++            const size_t off = align256(arena_used);
++            if (off + n * sizeof(T) > arena_cap) { err = "GPU memory: the borrowed room is too small"; return false; }
++            p = (T*) (arena + off);
++            arena_used = off + n * sizeof(T);
++            bytes += n * sizeof(T);
++            if (!weight) work_bytes += n * sizeof(T);
++            return true;
++        }
+         void* q = nullptr;
+         const cudaError_t e = cudaMalloc(&q, n * sizeof(T));
+         if (e != cudaSuccess) { err = std::string("GPU memory: ") + cudaGetErrorString(e); (void) cudaGetLastError(); return false; }
+@@ -689,7 +738,7 @@ struct VitGpuImpl {
+         std::vector<float> h((size_t) t->nelem());
+         if (!gg.read_f32(*t, h.data(), err)) return false;
+         if (!alloc(dst, h.size(), err, true)) return false;
+-        return cudaMemcpy(dst, h.data(), h.size() * 4, cudaMemcpyHostToDevice) == cudaSuccess || (err = "GPU copy failed", false);
++        return h2d(dst, h.data(), h.size() * 4) || (err = "GPU copy failed", false);
+     }
+     bool upload_matrix(DevW& w, const Gguf& gg, const std::string& name, std::string& err) {
+         const GgufTensorInfo* t = gg.tensor(name);
+@@ -735,8 +784,10 @@ struct VitGpuImpl {
+         uint16_t* dev = nullptr;
+         if (!alloc(dev, n, err, true)) return false;
+         w.p = dev;
+-        if (cudaMemcpy(w.p, raw.data(), n * 2, cudaMemcpyHostToDevice) != cudaSuccess) { err = "GPU copy failed"; return false; }
+-        if (w.kind == K_HF) {
++        if (!h2d(w.p, raw.data(), n * 2)) { err = "GPU copy failed"; return false; }
++        if (w.kind == K_HF && mode == M_STAGE) {   // converted on the device after each upload (VitGpu::bind)
++            hf_fix.emplace_back((uintptr_t) dev - kFake, n);
++        } else if (w.kind == K_HF) {
+             k_bf16_to_f16<<<blocks_for(n), 256>>>(dev, n);
+             if (cudaGetLastError() != cudaSuccess) { err = "the BF16 to F16 conversion failed on the GPU"; return false; }
+         }
+@@ -782,6 +833,7 @@ struct VitGpuImpl {
+         (void) cudaSetDevice(device);
+         // free the old work buffers and take new ones sized for this many patches
+         for (size_t i = allocs.size(); i > n_weight_allocs; --i) { (void) cudaFree(allocs[i - 1]); }
++        if (mode == M_ARENA) arena_used = weights_end;   // the borrowed room: the work buffers start again after the weights
+         bytes -= work_bytes;
+         work_bytes = 0;
+         allocs.resize(n_weight_allocs);
+@@ -932,7 +984,7 @@ bool VitGpu::load(const Gguf& gg, const VitGeometry& g, int device, int max_patc
+         const cudaError_t se = set_device_retrying(device);
+         if (se != cudaSuccess) { err = std::string("cannot use GPU ") + std::to_string(device) + ": " + cudaGetErrorString(se); return false; }
+     }
+-    if (cublasCreate(&m.blas) != CUBLAS_STATUS_SUCCESS) { err = "cannot create the BLAS handle"; return false; }
++    if (m.mode != VitGpuImpl::M_STAGE && cublasCreate(&m.blas) != CUBLAS_STATUS_SUCCESS) { err = "cannot create the BLAS handle"; return false; }
+ #if defined(STRATA_VIT_HIPBLASLT)
+     m.lt_setup();
+ #endif
+@@ -966,7 +1018,7 @@ bool VitGpu::load(const Gguf& gg, const VitGeometry& g, int device, int max_patc
+             for (size_t i = 0; i < w0.size(); ++i) w0[i] += w1[i];
+         }
+         if (!m.alloc(m.patch_w, w0.size(), err, true)) return false;
+-        if (cudaMemcpy(m.patch_w, w0.data(), w0.size() * 4, cudaMemcpyHostToDevice) != cudaSuccess) { err = "GPU copy failed"; return false; }
++        if (!m.h2d(m.patch_w, w0.data(), w0.size() * 4)) { err = "GPU copy failed"; return false; }
+     }
+     if (!m.upload_f32(m.patch_b, gg, "v.patch_embd.bias", err) || !m.upload_f32(m.pos, gg, "v.position_embd.weight", err) ||
+         !m.upload_f32(m.post_w, gg, "v.post_ln.weight", err) || !m.upload_f32(m.post_b, gg, "v.post_ln.bias", err) ||
+@@ -1005,6 +1057,7 @@ bool VitGpu::load(const Gguf& gg, const VitGeometry& g, int device, int max_patc
+     if (const char* e = std::getenv("STRATA_VIT_SCORES_LARGE")) { const long v = std::atol(e); if (v >= 1) m.kScoreElemsLarge = (size_t) v << 20; }
+     if (const char* e = std::getenv("STRATA_VIT_NPAD")) { const int v = std::atoi(e); if (v >= 8 && v % 8 == 0) m.n_pad = v; }
+     if (const char* e = std::getenv("STRATA_VIT_QALIGN")) { const int v = std::atoi(e); if (v >= 1) m.q_align = v; }
++    if (m.mode == VitGpuImpl::M_STAGE) return true;    // VitGpu::stage pins the image
+     return m.size_buffers(std::max(max_patches, 16), err);
+ }
+ 
+@@ -1161,4 +1214,101 @@ bool VitGpu::encode(const PreparedImage& img, std::vector<float>& rows, int& nx,
+     return true;
+ }
+ 
++#if !defined(STRATA_VIT_HIP)
++// ---- the engine's in-process reader (strata --vision-gpu): the weights in pinned RAM, the GPU memory lent per picture ----
++
++bool VitGpu::stage(const Gguf& gg, const VitGeometry& g, int device, std::string& err) {
++    VitGpuImpl& m = *impl_;
++    m.mode = VitGpuImpl::M_STAGE;
++    if (!load(gg, g, device, 0, err)) return false;
++    m.n_weight_allocs = 0;
++    m.weights_end = VitGpuImpl::align256(m.stage_bytes);
++    void* h = nullptr;
++    if (cudaHostAlloc(&h, m.stage_bytes, cudaHostAllocDefault) == cudaSuccess) {
++        std::memcpy(h, m.stage_img.data(), m.stage_bytes);
++        m.pinned = (unsigned char*) h;
++        std::vector<unsigned char>().swap(m.stage_img);
++    } else {
++        (void) cudaGetLastError();   // pageable: slower uploads, the same result
++    }
++    m.bytes = 0;
++    return true;
++}
++
++size_t VitGpu::staged_bytes() const { return impl_->stage_bytes; }
++bool VitGpu::staged_pinned() const { return impl_->pinned != nullptr; }
++
++size_t VitGpu::arena_need(int max_patches) {
++    VitGpuImpl& m = *impl_;
++    if (m.mode != VitGpuImpl::M_STAGE || m.bound) return 0;
++    // a dry run of size_buffers on an address range nothing reads: the work buffers' sizes for this many patches
++    m.mode = VitGpuImpl::M_ARENA;
++    m.arena = (char*) (VitGpuImpl::kFake << 1);
++    m.arena_cap = SIZE_MAX / 4;
++    m.arena_used = m.weights_end;
++    m.cap_patches = 0;
++    m.work_bytes = 0;
++    std::string e;
++    const bool ok = m.size_buffers(std::max(max_patches, 16), e);
++    const size_t need = ok ? VitGpuImpl::align256(m.arena_used) + kVitBlasWorkspace : 0;
++    m.mode = VitGpuImpl::M_STAGE;
++    m.arena = nullptr;
++    m.arena_cap = m.arena_used = 0;
++    m.cap_patches = 0;
++    m.bytes = m.work_bytes = 0;
++    m.d_x = m.d_y = m.d_ctx = m.d_out = nullptr;
++    m.d_a = m.d_f16 = m.d_q16 = m.d_k16 = m.d_v16 = nullptr;
++    m.d_S = nullptr;
++    return need;
++}
++
++bool VitGpu::bind(void* base, size_t bytes, std::string& err) {
++    VitGpuImpl& m = *impl_;
++    if (m.mode != VitGpuImpl::M_STAGE || m.bound) { err = "the tower is not staged"; return false; }
++    if (bytes < m.weights_end + kVitBlasWorkspace + 4096) { err = "GPU memory: the borrowed room is too small"; return false; }
++    if (!m.blas && cublasCreate(&m.blas) != CUBLAS_STATUS_SUCCESS) { err = "cannot create the BLAS handle"; return false; }
++    const unsigned char* src = m.pinned ? m.pinned : m.stage_img.data();
++    if (cudaMemcpy(base, src, m.stage_bytes, cudaMemcpyHostToDevice) != cudaSuccess) {
++        err = std::string("uploading the vision weights: ") + cudaGetErrorString(cudaGetLastError());
++        return false;
++    }
++    char* b = (char*) base;
++    for (const auto& [off, n] : m.hf_fix) k_bf16_to_f16<<<VitGpuImpl::blocks_for(n), 256>>>((uint16_t*) (b + off), n);
++    if (cudaGetLastError() != cudaSuccess) { err = "the BF16 to F16 conversion failed on the GPU"; return false; }
++    // cuBLAS's workspace in the tail of the room: it allocates none of its own
++    if (cublasSetWorkspace(m.blas, b + bytes - kVitBlasWorkspace, kVitBlasWorkspace) != CUBLAS_STATUS_SUCCESS) { err = "cannot set the BLAS workspace"; return false; }
++    m.rebase((intptr_t) b - (intptr_t) VitGpuImpl::kFake);
++    m.mode = VitGpuImpl::M_ARENA;
++    m.arena = b;
++    m.arena_cap = bytes - kVitBlasWorkspace;
++    m.arena_used = m.weights_end;
++    m.cap_patches = 0;
++    m.bytes = m.weights_end;
++    m.work_bytes = 0;
++    m.bound = true;
++    return true;
++}
++
++void VitGpu::unbind() {
++    VitGpuImpl& m = *impl_;
++    if (!m.bound) return;
++    (void) cudaDeviceSynchronize();
++    if (m.blas) (void) cublasSetWorkspace(m.blas, nullptr, 0);
++    // the cuBLAS handle goes with the room and is made again at the next picture: 138 -> 74 MiB of VRAM left outside the slots after the first
++    // picture, no time measured (STRATA_VISION_GPU_BLAS_KEEP=1 keeps it)
++    static const bool keep = [] { const char* v = std::getenv("STRATA_VISION_GPU_BLAS_KEEP"); return v != nullptr && v[0] == '1'; }();
++    if (!keep && m.blas) { (void) cublasDestroy(m.blas); m.blas = nullptr; }
++    m.rebase((intptr_t) VitGpuImpl::kFake - (intptr_t) m.arena);
++    m.mode = VitGpuImpl::M_STAGE;
++    m.arena = nullptr;
++    m.arena_cap = m.arena_used = 0;
++    m.cap_patches = 0;
++    m.bytes = m.work_bytes = 0;
++    m.d_x = m.d_y = m.d_ctx = m.d_out = nullptr;
++    m.d_a = m.d_f16 = m.d_q16 = m.d_k16 = m.d_v16 = nullptr;
++    m.d_S = nullptr;
++    m.bound = false;
++}
++#endif  // !STRATA_VIT_HIP
++
+ }  // namespace strata_vit
+diff --git a/tools/vision/own/vit_gpu.h b/tools/vision/own/vit_gpu.h
+index be09fb715..15f0e6b10 100644
+--- a/tools/vision/own/vit_gpu.h
++++ b/tools/vision/own/vit_gpu.h
+@@ -52,6 +52,7 @@ inline bool vit_gpu_hip_windows_not_measured(bool windows, const std::string& gf
+ // HIP and a Mac report "integrated" too; they are not this case).  After the last retry it fails as before and the reader falls back as before.  Pure function so the test needs no GPU.
+ // 12 (gate 11-11: 4 counted starts needed 5, 5, 5 and 6 retries = 5.4 to 6.8 s, about 1.1 to 1.2 s per retry, the 1 s pause plus the failed attempt; 8 left 2 retries of margin).  Worst case, when the
+ // context never comes: 12 retries, about 13 to 14.5 s of waiting, then the reader fails as before.
++constexpr size_t kVitBlasWorkspace = (size_t) 32 << 20;   // cuBLAS's workspace in a lent room (VitGpu::bind)
+ constexpr int kVitCtxRetries = 12;
+ constexpr int kVitCtxWaitMs = 1000;
+ inline bool vit_gpu_retry_context(bool linux_cuda_build, bool integrated_gpu, bool out_of_memory, int retries_done) {
+@@ -82,6 +83,17 @@ public:
+     // Bytes of device memory held now (weights + work buffers).
+     size_t device_bytes() const;
+ 
++    // The engine's in-process reader (strata --vision-gpu): `stage` reads the weights into page-locked RAM in the form the device holds them (no
++    // device memory); `arena_need` is the room a picture of up to `max_patches` patches needs (weights, work buffers, cuBLAS's workspace); `bind`
++    // uploads the weights into `bytes` of device memory the caller lends (its expert slots), after which `encode` runs as usual; `unbind` leaves that
++    // memory to its owner again (nothing is freed: the room was never this tower's).
++    bool stage(const Gguf& gg, const VitGeometry& g, int device, std::string& err);
++    size_t staged_bytes() const;
++    bool staged_pinned() const;
++    size_t arena_need(int max_patches);
++    bool bind(void* base, size_t bytes, std::string& err);
++    void unbind();
++
+ private:
+     std::unique_ptr<VitGpuImpl> impl_;
+ };

@@ -1,0 +1,10 @@
+# 01:34:53 600.00 W, 7001 MHz, 14001 MHz
+pid 24668
+ready in 12.5 s
+shapes a: VOK 260 20 13 1193 | wall 1202 ms
+shapes b: VOK 260 20 13 52 | wall 52 ms
+big1024 a: VOK 1024 32 32 122 | wall 122 ms
+big1024 b: VOK 1024 32 32 122 | wall 122 ms
+code4217 a: VOK 350 25 14 66 | wall 67 ms
+code4217 b: VOK 350 25 14 56 | wall 56 ms
+# 01:35:10 600.00 W, 7001 MHz, 14001 MHz

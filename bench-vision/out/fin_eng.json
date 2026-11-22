@@ -1,0 +1,101 @@
+{
+ "tag": "fin_eng",
+ "tree": "C:/LLM_models/strata-nvfp4",
+ "exe": "C:/LLM_models/strata-nvfp4/engine/strata.exe",
+ "vision": {
+  "exe": "C:/LLM_models/strata-nvfp4/engine/strata-vision.exe",
+  "mmproj": "C:/LLM_models/Strata-data/models/mmproj-qwen/mmproj-Qwen3.8-Flash-Next-BF16.gguf",
+  "model": "C:/LLM_models/Strata-data/hf/qwen-nvfp4-gptq/qwen-nvfp4-gptq-dense.gguf",
+  "gpu": false,
+  "threads": 16,
+  "max_tokens": 1024,
+  "in_engine": true,
+  "preload": true
+ },
+ "events": [
+  {
+   "t": 16.13,
+   "wall": 1795242130.7934058,
+   "ev": "http_up"
+  },
+  {
+   "t": 16.886,
+   "wall": 1795242131.5496576,
+   "ev": "warm",
+   "ttft_ms": 736.8,
+   "wall_ms": 756.1,
+   "tok_s": 153.8,
+   "prompt_ms": 240.1,
+   "prompt_n": 55,
+   "gen": 4,
+   "md5": "00ba934040",
+   "text": "We need to respond"
+  },
+  {
+   "t": 18.899,
+   "wall": 1795242133.5621023,
+   "ev": "text",
+   "ttft_ms": 246.3,
+   "wall_ms": 2012.1,
+   "tok_s": 225.8,
+   "prompt_ms": 213.9,
+   "prompt_n": 76,
+   "gen": 400,
+   "md5": "e2ff097209",
+   "text": "ry. A high load factor saves memory but increases collisions and probe lengths. Many implementations resize when the load factor crosses a threshold, such as 0."
+  },
+  {
+   "t": 19.824,
+   "wall": 1795242134.4878,
+   "ev": "image_s",
+   "ttft_ms": 631.4,
+   "wall_ms": 926.0,
+   "tok_s": 212.3,
+   "prompt_ms": 531.7,
+   "prompt_n": 329,
+   "gen": 64,
+   "md5": "8e3373ec67",
+   "text": "ight, I see three shapes arranged horizontally in the upper portion of the image. On the left is a red circle. In the middle is a blue square. On the right is a"
+  },
+  {
+   "t": 21.459,
+   "wall": 1795242136.1220925,
+   "ev": "text",
+   "ttft_ms": 82.5,
+   "wall_ms": 1633.5,
+   "tok_s": 256.8,
+   "prompt_ms": 54.9,
+   "prompt_n": 5,
+   "gen": 400,
+   "md5": "493d184106",
+   "text": "time. For separate chaining, a load factor near 1 is often acceptable. For open addressing, tables usually resize earlier, such as when the load factor exceeds "
+  },
+  {
+   "t": 22.681,
+   "wall": 1795242137.3440907,
+   "ev": "image_b",
+   "ttft_ms": 923.8,
+   "wall_ms": 1220.7,
+   "tok_s": 210.7,
+   "prompt_ms": 761.0,
+   "prompt_n": 1085,
+   "gen": 64,
+   "md5": "1b9a643571",
+   "text": "equest:** The user wants a one-sentence description of the provided image. 2.  **Analyze the Image:**     *   Text: \"INVOICE 20261014\" (large, bold, black).    "
+  },
+  {
+   "t": 24.318,
+   "wall": 1795242138.9812353,
+   "ev": "text",
+   "ttft_ms": 86.8,
+   "wall_ms": 1637.6,
+   "tok_s": 256.9,
+   "prompt_ms": 55.8,
+   "prompt_n": 5,
+   "gen": 400,
+   "md5": "66f20cd960",
+   "text": "aves memory but increases collisions and probe lengths. Many implementations resize when the load factor crosses a threshold, such as 0.75.  Resizing, or rehash"
+  }
+ ],
+ "pid": 224556
+}

@@ -1,0 +1,130 @@
+{
+ "tag": "eng1",
+ "tree": "D:/Projects/strata-vision-gpu",
+ "exe": "D:/Projects/strata-vision-gpu/build-dev/strata.exe",
+ "vision": {
+  "exe": "C:/LLM_models/strata-nvfp4/engine/strata-vision.exe",
+  "mmproj": "C:/LLM_models/Strata-data/models/mmproj-qwen/mmproj-Qwen3.8-Flash-Next-BF16.gguf",
+  "model": "C:/LLM_models/Strata-data/hf/qwen-nvfp4-gptq/qwen-nvfp4-gptq-dense.gguf",
+  "gpu": false,
+  "threads": 16,
+  "max_tokens": 1024,
+  "in_engine": true
+ },
+ "events": [
+  {
+   "t": 16.16,
+   "wall": 1795217078.4316845,
+   "ev": "http_up"
+  },
+  {
+   "t": 16.452,
+   "wall": 1795217078.7229578,
+   "ev": "warm",
+   "ttft_ms": 273.4,
+   "wall_ms": 291.1,
+   "tok_s": 164.6,
+   "prompt_ms": 247.3,
+   "prompt_n": 55,
+   "gen": 4,
+   "text": ""
+  },
+  {
+   "t": 18.414,
+   "wall": 1795217080.6856813,
+   "ev": "text",
+   "ttft_ms": 250.8,
+   "wall_ms": 1962.0,
+   "tok_s": 233.0,
+   "prompt_ms": 219.3,
+   "prompt_n": 76,
+   "gen": 400,
+   "text": ""
+  },
+  {
+   "t": 20.014,
+   "wall": 1795217082.285105,
+   "ev": "text",
+   "ttft_ms": 58.8,
+   "wall_ms": 1599.5,
+   "tok_s": 258.3,
+   "prompt_ms": 23.6,
+   "prompt_n": 5,
+   "gen": 400,
+   "text": ""
+  },
+  {
+   "t": 22.249,
+   "wall": 1795217084.5197623,
+   "ev": "image_s",
+   "ttft_ms": 1922.7,
+   "wall_ms": 2234.4,
+   "tok_s": 200.5,
+   "prompt_ms": 542.7,
+   "prompt_n": 329,
+   "gen": 64,
+   "text": ""
+  },
+  {
+   "t": 23.838,
+   "wall": 1795217086.1092153,
+   "ev": "text",
+   "ttft_ms": 79.4,
+   "wall_ms": 1589.3,
+   "tok_s": 263.9,
+   "prompt_ms": 48.2,
+   "prompt_n": 5,
+   "gen": 400,
+   "text": ""
+  },
+  {
+   "t": 25.161,
+   "wall": 1795217087.4318914,
+   "ev": "image_b",
+   "ttft_ms": 942.7,
+   "wall_ms": 1322.9,
+   "tok_s": 165.6,
+   "prompt_ms": 780.3,
+   "prompt_n": 1085,
+   "gen": 64,
+   "text": ""
+  },
+  {
+   "t": 26.833,
+   "wall": 1795217089.1041143,
+   "ev": "text",
+   "ttft_ms": 89.3,
+   "wall_ms": 1672.1,
+   "tok_s": 251.5,
+   "prompt_ms": 57.3,
+   "prompt_n": 5,
+   "gen": 400,
+   "text": ""
+  },
+  {
+   "t": 27.736,
+   "wall": 1795217090.0072823,
+   "ev": "image_c",
+   "ttft_ms": 667.9,
+   "wall_ms": 902.4,
+   "tok_s": 186.3,
+   "prompt_ms": 574.4,
+   "prompt_n": 412,
+   "gen": 45,
+   "text": "CODE 4217"
+  },
+  {
+   "t": 29.466,
+   "wall": 1795217091.7373395,
+   "ev": "text",
+   "ttft_ms": 82.5,
+   "wall_ms": 1730.1,
+   "tok_s": 241.9,
+   "prompt_ms": 49.2,
+   "prompt_n": 5,
+   "gen": 400,
+   "text": ""
+  }
+ ],
+ "pid": 2948
+}

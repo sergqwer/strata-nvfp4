@@ -114,7 +114,7 @@ for dll in ("cublas64_13.dll", "cublasLt64_13.dll"):
     cp(CUDA_BIN / dll, OUT / "engine" / dll)
 (OUT / "engine" / "BUILD.json").write_text(json.dumps({
     "version": VERSION, "source": "release", "archs": [75, 86, 89, 120], "ptx": False, "cuda": CUDA.name.lstrip("v"),
-    "vision": "cpu", "portable": True, "fork": "https://github.com/sergqwer/strata-nvfp4",
+    "vision": "cpu", "vision_gpu": True, "portable": True, "fork": "https://github.com/sergqwer/strata-nvfp4",
     "commit": git("rev-parse", "--short", "HEAD"), "dirty": bool(dirty),
     "engine_sha256": hashlib.sha256(ENGINE.read_bytes()).hexdigest(), "cuda_libs": "bundled"}, indent=1) + "\n")
 

@@ -1,0 +1,140 @@
+{
+ "tag": "meng2",
+ "tree": "D:/Projects/strata-vision-gpu",
+ "exe": "D:/Projects/strata-vision-gpu/build-dev/strata.exe",
+ "vision": {
+  "exe": "C:/LLM_models/strata-nvfp4/engine/strata-vision.exe",
+  "mmproj": "C:/LLM_models/Strata-data/models/mmproj-qwen/mmproj-Qwen3.8-Flash-Next-BF16.gguf",
+  "model": "C:/LLM_models/Strata-data/hf/qwen-nvfp4-gptq/qwen-nvfp4-gptq-dense.gguf",
+  "gpu": false,
+  "threads": 16,
+  "max_tokens": 1024,
+  "in_engine": true,
+  "preload": true
+ },
+ "events": [
+  {
+   "t": 14.143,
+   "wall": 1795217527.1980083,
+   "ev": "http_up"
+  },
+  {
+   "t": 15.601,
+   "wall": 1795217528.6558568,
+   "ev": "warm",
+   "ttft_ms": 1438.1,
+   "wall_ms": 1457.2,
+   "tok_s": 155.6,
+   "prompt_ms": 240.4,
+   "prompt_n": 55,
+   "gen": 4,
+   "md5": "00ba934040",
+   "text": "We need to respond"
+  },
+  {
+   "t": 17.594,
+   "wall": 1795217530.6490119,
+   "ev": "text",
+   "ttft_ms": 240.3,
+   "wall_ms": 1993.2,
+   "tok_s": 227.5,
+   "prompt_ms": 211.2,
+   "prompt_n": 76,
+   "gen": 400,
+   "md5": "7250fc36c2",
+   "text": "aves memory but increases collisions and probe lengths, slowing insertions and lookups. Many implementations aim for a load factor around 0.7 to 0.75.  When the"
+  },
+  {
+   "t": 19.109,
+   "wall": 1795217532.1641102,
+   "ev": "text",
+   "ttft_ms": 56.3,
+   "wall_ms": 1514.4,
+   "tok_s": 272.9,
+   "prompt_ms": 25.2,
+   "prompt_n": 5,
+   "gen": 400,
+   "md5": "b2c8136f23",
+   "text": "  When the load factor exceeds the threshold, the table resizes. Resizing usually means allocating a larger array, often double the previous size, and rehashing"
+  },
+  {
+   "t": 20.066,
+   "wall": 1795217533.1207228,
+   "ev": "image_s",
+   "ttft_ms": 641.2,
+   "wall_ms": 952.5,
+   "tok_s": 200.9,
+   "prompt_ms": 553.6,
+   "prompt_n": 329,
+   "gen": 64,
+   "md5": "42bd0f30f5",
+   "text": "tioning the shapes, their colors, and their locations. 2.  **Analyze the Image:**     *   There are three distinct geometric shapes arranged horizontally.     *"
+  },
+  {
+   "t": 21.657,
+   "wall": 1795217534.712092,
+   "ev": "text",
+   "ttft_ms": 82.1,
+   "wall_ms": 1590.8,
+   "tok_s": 264.1,
+   "prompt_ms": 49.1,
+   "prompt_n": 5,
+   "gen": 400,
+   "md5": "955f8c98c0",
+   "text": "eds the threshold, the table resizes. It allocates a larger array, usually about double the previous size, and rehashes all existing entries into the new bucket"
+  },
+  {
+   "t": 22.953,
+   "wall": 1795217536.0072875,
+   "ev": "image_b",
+   "ttft_ms": 937.6,
+   "wall_ms": 1295.0,
+   "tok_s": 175.9,
+   "prompt_ms": 775.9,
+   "prompt_n": 1085,
+   "gen": 64,
+   "md5": "ae6746065b",
+   "text": "the image. I need to look carefully at all elements: the title \"INVOICE 20261014\", the blue \"Total due: 1337 EUR\" line, three line items (widgets x12, gears x7,"
+  },
+  {
+   "t": 24.565,
+   "wall": 1795217537.6200676,
+   "ev": "text",
+   "ttft_ms": 82.9,
+   "wall_ms": 1612.9,
+   "tok_s": 260.2,
+   "prompt_ms": 56.3,
+   "prompt_n": 5,
+   "gen": 400,
+   "md5": "49bb85b1b2",
+   "text": "ns and probe lengths, slowing operations. Many implementations resize when the load factor crosses a threshold, such as 0.75.  Resizing, or rehashing, creates a"
+  },
+  {
+   "t": 25.451,
+   "wall": 1795217538.5053244,
+   "ev": "image_c",
+   "ttft_ms": 653.3,
+   "wall_ms": 884.2,
+   "tok_s": 189.2,
+   "prompt_ms": 565.7,
+   "prompt_n": 412,
+   "gen": 45,
+   "md5": "d8c2e3fa18",
+   "text": "ants the exact text extracted from the image. The image contains a single line of text at the top. I will transcribe it verbatim, ignoring the shapes. CODE 4217"
+  },
+  {
+   "t": 27.053,
+   "wall": 1795217540.1074264,
+   "ev": "text",
+   "ttft_ms": 77.5,
+   "wall_ms": 1601.8,
+   "tok_s": 261.4,
+   "prompt_ms": 48.0,
+   "prompt_n": 5,
+   "gen": 400,
+   "md5": "dbea9a7765",
+   "text": "eeds the threshold, the table resizes. It allocates a larger bucket array, often double the previous size, then rehashes every existing entry into the new array"
+  }
+ ],
+ "pid": 27332
+}

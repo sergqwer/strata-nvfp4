@@ -1,0 +1,159 @@
+{
+ "tag": "fin1",
+ "tree": "D:/Projects/strata-vision-gpu",
+ "exe": "D:/Projects/strata-vision-gpu/build-dev/strata.exe",
+ "vision": {
+  "exe": "C:/LLM_models/strata-nvfp4/engine/strata-vision.exe",
+  "mmproj": "C:/LLM_models/Strata-data/models/mmproj-qwen/mmproj-Qwen3.8-Flash-Next-BF16.gguf",
+  "model": "C:/LLM_models/Strata-data/hf/qwen-nvfp4-gptq/qwen-nvfp4-gptq-dense.gguf",
+  "gpu": false,
+  "threads": 16,
+  "max_tokens": 1024,
+  "in_engine": true,
+  "preload": true
+ },
+ "events": [
+  {
+   "t": 16.151,
+   "wall": 1795217808.3031209,
+   "ev": "http_up"
+  },
+  {
+   "t": 16.432,
+   "wall": 1795217808.5840116,
+   "ev": "warm",
+   "ttft_ms": 260.2,
+   "wall_ms": 279.9,
+   "tok_s": 152.1,
+   "prompt_ms": 235.4,
+   "prompt_n": 55,
+   "gen": 4,
+   "md5": "00ba934040",
+   "text": "We need to respond"
+  },
+  {
+   "t": 18.43,
+   "wall": 1795217810.581658,
+   "ev": "text",
+   "ttft_ms": 237.7,
+   "wall_ms": 1998.2,
+   "tok_s": 226.5,
+   "prompt_ms": 211.2,
+   "prompt_n": 76,
+   "gen": 400,
+   "md5": "74bc5342b3",
+   "text": "ngths. Many implementations choose a threshold such as 0.7 or 0.75.  When the load factor exceeds the threshold, the table resizes. It allocates a larger array,"
+  },
+  {
+   "t": 19.938,
+   "wall": 1795217812.0899024,
+   "ev": "text",
+   "ttft_ms": 54.7,
+   "wall_ms": 1507.5,
+   "tok_s": 273.9,
+   "prompt_ms": 24.5,
+   "prompt_n": 5,
+   "gen": 400,
+   "md5": "3e62ba93c6",
+   "text": "he size, and rehashes all existing entries into the new array. Because the number of buckets changes, the index for each key changes too. Resizing is expensive,"
+  },
+  {
+   "t": 20.858,
+   "wall": 1795217813.009623,
+   "ev": "image_s",
+   "ttft_ms": 629.6,
+   "wall_ms": 919.0,
+   "tok_s": 216.0,
+   "prompt_ms": 532.8,
+   "prompt_n": 329,
+   "gen": 64,
+   "md5": "702b58684e",
+   "text": "provided image, specifically mentioning the shapes, their colors, and their locations. 2.  **Analyze the Image:**     *   Shape 1: Circle. Color: Red. Location:"
+  },
+  {
+   "t": 22.477,
+   "wall": 1795217814.6287565,
+   "ev": "text",
+   "ttft_ms": 69.9,
+   "wall_ms": 1618.6,
+   "tok_s": 257.3,
+   "prompt_ms": 49.1,
+   "prompt_n": 5,
+   "gen": 400,
+   "md5": "2ff490207a",
+   "text": "  When the load factor exceeds the threshold, the table resizes. Resizing usually means allocating a larger array, often double the previous size, and rehashing"
+  },
+  {
+   "t": 23.756,
+   "wall": 1795217815.9082172,
+   "ev": "image_b",
+   "ttft_ms": 935.7,
+   "wall_ms": 1278.7,
+   "tok_s": 183.2,
+   "prompt_ms": 772.1,
+   "prompt_n": 1085,
+   "gen": 64,
+   "md5": "7f7b4a3cc6",
+   "text": "nts: the title \"INVOICE 20261014\", the total due line in blue, the three line items with quantities, and the two shapes (red square, green circle) at the bottom"
+  },
+  {
+   "t": 25.428,
+   "wall": 1795217817.5802186,
+   "ev": "text",
+   "ttft_ms": 82.5,
+   "wall_ms": 1672.7,
+   "tok_s": 250.4,
+   "prompt_ms": 57.2,
+   "prompt_n": 5,
+   "gen": 400,
+   "md5": "d4cf4e0b75",
+   "text": "a threshold, such as 0.75.  Resizing, or rehashing, creates a larger bucket array, often double the previous size, then reinserts all existing entries using the"
+  },
+  {
+   "t": 26.303,
+   "wall": 1795217818.4552119,
+   "ev": "image_c",
+   "ttft_ms": 665.0,
+   "wall_ms": 874.4,
+   "tok_s": 188.9,
+   "prompt_ms": 574.0,
+   "prompt_n": 412,
+   "gen": 41,
+   "md5": "68bc8298df",
+   "text": "The user wants the exact text extracted from the image. The image contains a single line of text at the top. I will transcribe it verbatim. CODE 4217"
+  },
+  {
+   "t": 27.971,
+   "wall": 1795217820.123046,
+   "ev": "text",
+   "ttft_ms": 79.7,
+   "wall_ms": 1667.6,
+   "tok_s": 251.0,
+   "prompt_ms": 47.6,
+   "prompt_n": 5,
+   "gen": 400,
+   "md5": "9c347b1d06",
+   "text": " lengths. Many implementations resize when the load factor crosses a threshold, such as 0.75. Resizing allocates a larger bucket array, usually double the size,"
+  },
+  {
+   "t": 29.972,
+   "wall": 1795217822.1237898,
+   "ev": "slept",
+   "s": 2.0
+  },
+  {
+   "t": 31.591,
+   "wall": 1795217823.7430024,
+   "ev": "text",
+   "ttft_ms": 48.6,
+   "wall_ms": 1619.5,
+   "tok_s": 253.2,
+   "prompt_ms": 26.2,
+   "prompt_n": 5,
+   "gen": 400,
+   "md5": "247912b6b7",
+   "text": "ations. Many implementations resize when the load factor crosses a threshold, such as 0.75.  Resizing, or rehashing, creates a larger bucket array, often double"
+  }
+ ],
+ "pid": 28584
+}

@@ -52,6 +52,7 @@ inline bool vit_gpu_hip_windows_not_measured(bool windows, const std::string& gf
 // HIP and a Mac report "integrated" too; they are not this case).  After the last retry it fails as before and the reader falls back as before.  Pure function so the test needs no GPU.
 // 12 (gate 11-11: 4 counted starts needed 5, 5, 5 and 6 retries = 5.4 to 6.8 s, about 1.1 to 1.2 s per retry, the 1 s pause plus the failed attempt; 8 left 2 retries of margin).  Worst case, when the
 // context never comes: 12 retries, about 13 to 14.5 s of waiting, then the reader fails as before.
+constexpr size_t kVitBlasWorkspace = (size_t) 32 << 20;   // cuBLAS's workspace in a lent room (VitGpu::bind)
 constexpr int kVitCtxRetries = 12;
 constexpr int kVitCtxWaitMs = 1000;
 inline bool vit_gpu_retry_context(bool linux_cuda_build, bool integrated_gpu, bool out_of_memory, int retries_done) {
@@ -81,6 +82,17 @@ public:
 
     // Bytes of device memory held now (weights + work buffers).
     size_t device_bytes() const;
+
+    // The engine's in-process reader (strata --vision-gpu): `stage` reads the weights into page-locked RAM in the form the device holds them (no
+    // device memory); `arena_need` is the room a picture of up to `max_patches` patches needs (weights, work buffers, cuBLAS's workspace); `bind`
+    // uploads the weights into `bytes` of device memory the caller lends (its expert slots), after which `encode` runs as usual; `unbind` leaves that
+    // memory to its owner again (nothing is freed: the room was never this tower's).
+    bool stage(const Gguf& gg, const VitGeometry& g, int device, std::string& err);
+    size_t staged_bytes() const;
+    bool staged_pinned() const;
+    size_t arena_need(int max_patches);
+    bool bind(void* base, size_t bytes, std::string& err);
+    void unbind();
 
 private:
     std::unique_ptr<VitGpuImpl> impl_;

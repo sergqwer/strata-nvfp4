@@ -1,0 +1,5 @@
+# 01:35:41 600.00 W, 405 MHz, 14001 MHz
+vg2_def16 |  out 93c4688100 | logits e9d907e164
+vg2_c_D_conv | speculation              166 rounds of 6, drafts accepted 236 of 337 (0.700), 2.42 tokens per round | 166 windows screened (166 screens ran, 12.3 exact rows a screen), 0 windows every row exac | 400 tokens in 3082.6 ms  ->  129.76 tok/s | out 26c5e96e8e
+vg2_c_P8_conv | speculation              175 rounds of 8, drafts accepted 225 of 312 (0.721), 2.29 tokens per round | 175 windows screened (175 screens ran, 11.1 exact rows a screen), 0 windows every row exac | 400 tokens in 3043.9 ms  ->  131.41 tok/s | out 26c5e96e8e
+# 01:36:31 600.00 W, 7001 MHz, 14001 MHz

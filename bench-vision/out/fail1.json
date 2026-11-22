@@ -1,0 +1,62 @@
+{
+ "tag": "fail1",
+ "tree": "D:/Projects/strata-vision-gpu",
+ "exe": "D:/Projects/strata-vision-gpu/build-dev/strata.exe",
+ "vision": {
+  "exe": "C:/LLM_models/strata-nvfp4/engine/strata-vision.exe",
+  "mmproj": "C:/LLM_models/Strata-data/models/mmproj-qwen/mmproj-Qwen3.8-Flash-Next-BF16.gguf",
+  "model": "C:/LLM_models/Strata-data/hf/qwen-nvfp4-gptq/qwen-nvfp4-gptq-dense.gguf",
+  "gpu": false,
+  "threads": 16,
+  "max_tokens": 1024,
+  "in_engine": true,
+  "preload": true
+ },
+ "events": [
+  {
+   "t": 16.109,
+   "wall": 1795217374.9660513,
+   "ev": "http_up"
+  },
+  {
+   "t": 16.382,
+   "wall": 1795217375.2394252,
+   "ev": "warm",
+   "ttft_ms": 253.6,
+   "wall_ms": 273.0,
+   "tok_s": 153.8,
+   "prompt_ms": 228.5,
+   "prompt_n": 55,
+   "gen": 4,
+   "md5": "00ba934040",
+   "text": "We need to respond"
+  },
+  {
+   "t": 18.75,
+   "wall": 1795217377.6071475,
+   "ev": "image_c",
+   "ttft_ms": 2071.9,
+   "wall_ms": 2366.8,
+   "tok_s": 173.4,
+   "prompt_ms": 550.6,
+   "prompt_n": 412,
+   "gen": 52,
+   "md5": "2e5322bd0a",
+   "text": "tracted from the image. I see a header at the top. The shapes (red square, blue circle) are graphical elements, not text. The only text is the header. CODE 4217"
+  },
+  {
+   "t": 20.741,
+   "wall": 1795217379.5980124,
+   "ev": "text",
+   "ttft_ms": 244.9,
+   "wall_ms": 1991.1,
+   "tok_s": 228.4,
+   "prompt_ms": 216.9,
+   "prompt_n": 76,
+   "gen": 400,
+   "md5": "f9dc3cad94",
+   "text": "reates a larger bucket array, usually about double the previous size, then reinserts all existing entries using the new table size. Because the index depends on"
+  }
+ ],
+ "pid": 2512
+}

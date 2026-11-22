@@ -1,0 +1,35 @@
+[strata] sampling defaults from the config: temperature=1.0, top_p=0.95, top_k=20, experimental_speed_projection=False
+[strata] image tokens per picture: at most 1024, at least the model default (8)
+loading the vision encoder ...
+loading the model (the first start takes a minute or two) ...
+[strata] starting the engine: reading the model's weights ...
+[strata] loading the experts into RAM (about 6 GB) and locking part of them for the GPU.
+         YOUR PC CAN BE SLOW OR STOP RESPONDING FOR 1-3 MINUTES NOW - this is normal.
+         Please wait and don't close this window; the server says when it is ready.
+[strata] experts loaded: 63.28 GiB at 11.45 GiB/s (9 s so far)
+[strata] filling the GPU's expert cache (8313 experts, 21.41 GiB of VRAM) ...
+ready: http://127.0.0.1:8795/v1  (OpenAI: /v1/chat/completions, Anthropic: /v1/messages, context 524288 tokens, images on)
+       open http://127.0.0.1:8795/ in a browser to chat; close this window to stop the model
+[strata] done: 4 tokens in 0 s (152.1 tok/s) (length, cancel=False), expert cache 92.8% hit (+4.6% of the routed experts over PCIe)
+[strata] the reply reached max tokens while still thinking, so it has no answer: a thinking budget (reasoning_budget_tokens, in the request or in strata-<model>.json for every request) leaves room to answer
+[strata] thinking: 167 of max 400 tokens, 214.3 tok/s, 1 s
+[strata] done: 400 tokens in 2 s (236.5 tok/s) (length, cancel=False), expert cache 93.0% hit (+3.6% of the routed experts over PCIe)
+[strata] the reply reached max tokens while still thinking, so it has no answer: a thinking budget (reasoning_budget_tokens, in the request or in strata-<model>.json for every request) leaves room to answer
+[strata] thinking: 244 of max 400 tokens, 250.6 tok/s, 1 s
+[strata] done: 400 tokens in 2 s (261.3 tok/s) (length, cancel=False), expert cache 94.7% hit (+2.2% of the routed experts over PCIe)
+[strata] the reply reached max tokens while still thinking, so it has no answer: a thinking budget (reasoning_budget_tokens, in the request or in strata-<model>.json for every request) leaves room to answer
+[strata] done: 64 tokens in 1 s (208.7 tok/s) (length, cancel=False), expert cache 88.8% hit (+8.9% of the routed experts over PCIe)
+[strata] the reply reached max tokens while still thinking, so it has no answer: a thinking budget (reasoning_budget_tokens, in the request or in strata-<model>.json for every request) leaves room to answer
+[strata] thinking: 234 of max 400 tokens, 248.1 tok/s, 1 s
+[strata] done: 400 tokens in 2 s (262.4 tok/s) (length, cancel=False), expert cache 93.9% hit (+2.7% of the routed experts over PCIe)
+[strata] the reply reached max tokens while still thinking, so it has no answer: a thinking budget (reasoning_budget_tokens, in the request or in strata-<model>.json for every request) leaves room to answer
+[strata] thinking: 39 of max 64 tokens, 156.0 tok/s, 1 s
+[strata] done: 64 tokens in 1 s (168.6 tok/s) (length, cancel=False), expert cache 86.1% hit (+13.4% of the routed experts over PCIe)
+[strata] the reply reached max tokens while still thinking, so it has no answer: a thinking budget (reasoning_budget_tokens, in the request or in strata-<model>.json for every request) leaves room to answer
+[strata] thinking: 232 of max 400 tokens, 247.8 tok/s, 1 s
+[strata] done: 400 tokens in 2 s (260.6 tok/s) (length, cancel=False), expert cache 93.8% hit (+2.8% of the routed experts over PCIe)
+[strata] the reply reached max tokens while still thinking, so it has no answer: a thinking budget (reasoning_budget_tokens, in the request or in strata-<model>.json for every request) leaves room to answer
+[strata] done: 45 tokens in 1 s (191.8 tok/s) (stop, cancel=False), expert cache 87.8% hit (+11.9% of the routed experts over PCIe)
+[strata] thinking: 229 of max 400 tokens, 241.6 tok/s, 1 s
+[strata] done: 400 tokens in 2 s (259.8 tok/s) (length, cancel=False), expert cache 94.3% hit (+2.5% of the routed experts over PCIe)
+[strata] the reply reached max tokens while still thinking, so it has no answer: a thinking budget (reasoning_budget_tokens, in the request or in strata-<model>.json for every request) leaves room to answer

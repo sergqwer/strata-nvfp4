@@ -1,0 +1,75 @@
+{
+ "tag": "fin5_pic_b",
+ "tree": "D:/Projects/strata-r5/bench-r5/final/b/strata-nvfp4",
+ "exe": "D:/Projects/strata-r5/bench-r5/final/b/strata-nvfp4/engine/strata.exe",
+ "vision": {
+  "exe": "D:/Projects/strata-r5/bench-r5/final/b/strata-nvfp4/engine/strata-vision.exe",
+  "mmproj": "C:/LLM_models/Strata-data/models/mmproj-qwen/mmproj-Qwen3.8-Flash-Next-BF16.gguf",
+  "model": "C:/LLM_models/Strata-data/hf/qwen-nvfp4-gptq/qwen-nvfp4-gptq-dense.gguf",
+  "gpu": false,
+  "threads": 16,
+  "max_tokens": 1024,
+  "in_engine": true,
+  "preload": true
+ },
+ "events": [
+  {
+   "t": 16.123,
+   "wall": 1795264291.863202,
+   "ev": "http_up"
+  },
+  {
+   "t": 16.381,
+   "wall": 1795264292.12121,
+   "ev": "warm",
+   "ttft_ms": 237.3,
+   "wall_ms": 257.4,
+   "tok_s": 150.4,
+   "prompt_ms": 211.4,
+   "prompt_n": 55,
+   "gen": 4,
+   "md5": "00ba934040",
+   "text": "We need to respond"
+  },
+  {
+   "t": 18.227,
+   "wall": 1795264293.9668028,
+   "ev": "text",
+   "ttft_ms": 226.5,
+   "wall_ms": 1845.8,
+   "tok_s": 246.2,
+   "prompt_ms": 206.1,
+   "prompt_n": 76,
+   "gen": 400,
+   "md5": "d653821338",
+   "text": "factor near 1 means each bucket has about one entry on average; with open addressing, performance degrades more sharply as the table fills.  Resizing, or rehash"
+  },
+  {
+   "t": 19.178,
+   "wall": 1795264294.918114,
+   "ev": "image_s",
+   "ttft_ms": 649.7,
+   "wall_ms": 946.0,
+   "tok_s": 211.6,
+   "prompt_ms": 535.0,
+   "prompt_n": 329,
+   "gen": 64,
+   "md5": "702b58684e",
+   "text": "provided image, specifically mentioning the shapes, their colors, and their locations. 2.  **Analyze the Image:**     *   Shape 1: Circle. Color: Red. Location:"
+  },
+  {
+   "t": 20.826,
+   "wall": 1795264296.5656097,
+   "ev": "text",
+   "ttft_ms": 76.6,
+   "wall_ms": 1648.0,
+   "tok_s": 253.6,
+   "prompt_ms": 45.9,
+   "prompt_n": 5,
+   "gen": 400,
+   "md5": "37b08b04c7",
+   "text": "  When the load factor exceeds the threshold, the table resizes. Resizing usually means allocating a larger array, often double the previous size, and rehashing"
+  }
+ ],
+ "pid": 7476
+}
