@@ -480,6 +480,17 @@ void test_resident_memory_budget() {
     using strata::core::detail::clamp_resident_budget;
     constexpr uint64_t GiB = 1ull << 30, margin = 256ull << 20, headroom = 4 * GiB;
     constexpr uint64_t unlimited = std::numeric_limits<uint64_t>::max();
+    {
+        // #3725: a 14.81 GiB copy with 12.97 GiB of the segment left (8.97 after the 4 GiB margin) on two cards
+        using strata::core::detail::skip_whole_pin_for_shared_segment;
+        const uint64_t cap = 8970ull * GiB / 1000, copy = 14810ull * GiB / 1000;
+        require(skip_whole_pin_for_shared_segment(copy, 2, true, cap), "a copy over the shared cap on two GPUs was pinned whole");
+        require(!skip_whole_pin_for_shared_segment(copy, 1, true, cap), "one GPU lost its one-allocation pin");
+        require(!skip_whole_pin_for_shared_segment(8 * GiB, 2, true, cap), "a copy under the shared cap lost its one-allocation pin");
+        require(!skip_whole_pin_for_shared_segment(cap, 2, true, cap), "a copy exactly at the shared cap lost its one-allocation pin");
+        require(!skip_whole_pin_for_shared_segment(copy, 2, false, 0), "an unknown cap skipped the one-allocation pin");
+        require(skip_whole_pin_for_shared_segment(1, 3, true, 0), "a full segment let a copy be pinned whole");
+    }
     // #730: RAM can hold the requested cache, but Windows cannot commit it.
     require(clamp_resident_budget(66 * GiB, 69 * GiB, 47 * GiB, headroom) == 43 * GiB - margin,
             "a RAM budget exceeded available commit capacity");

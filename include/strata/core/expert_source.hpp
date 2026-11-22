@@ -109,6 +109,11 @@ bool wait_for_ram(uint64_t need, double max_wait_s, double step_s, double note_s
 /// Pass UINT64_MAX for commit when the platform does not report it.
 uint64_t clamp_resident_budget(uint64_t requested, uint64_t physical, uint64_t commit, uint64_t headroom);
 
+/// #3725 (this fork's form): under WDDM one portable page-locked allocation of the whole complement is charged to the
+/// shared segment of every adapter.  True when path 1 is skipped for the capped slices: two or more devices, a known
+/// cap (the tightest adapter's room less the margin) and a copy larger than it.
+bool skip_whole_pin_for_shared_segment(uint64_t bytes, int devices, bool cap_known, uint64_t cap);
+
 /// #1250: one cudaHostAlloc of the whole page-locked complement has no way back when the kernel does not give the
 /// pages as fast as the driver takes them (the process is OOM-killed, even with MemAvailable high: clean file cache
 /// that cannot be reclaimed at that moment).  `free_now` is MemFree (pages that are really free), `bytes` the

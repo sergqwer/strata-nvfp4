@@ -517,8 +517,16 @@ __global__ void __launch_bounds__(gm::CT, 1) gdn_mid_kernel(const gm::MidP p) {
 #endif
 }
 
+// The grid per device: every CTA must be resident at once (the hand-offs spin), so a layer split's smaller card must not
+// take the grid the first card sized (170 on a 5090 against ~168 resident blocks on a 5080).  Set up on each device too
+// (cudaFuncSetAttribute is per device).
 int mid_grid() {
-    static const int g = [] {
+    static std::atomic<int> grid_of[64];   // 0 unknown, else grid + 1
+    int cur = 0;
+    if (cudaGetDevice(&cur) != cudaSuccess || cur < 0 || cur >= 64) { (void) cudaGetLastError(); return 0; }
+    const int known = grid_of[cur].load(std::memory_order_acquire);
+    if (known != 0) return known - 1;
+    const int g = [] {
         int dev = 0, sms = 0, optin = 0;
         cudaGetDevice(&dev);
         cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
@@ -532,6 +540,7 @@ int mid_grid() {
         if (occ < 1) return 0;
         return sms < 170 ? sms : 170;
     }();
+    grid_of[cur].store(g + 1, std::memory_order_release);
     return g;
 }
 

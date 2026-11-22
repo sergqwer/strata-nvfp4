@@ -132,6 +132,10 @@ uint64_t clamp_resident_budget(uint64_t requested, uint64_t physical, uint64_t c
     return room > margin ? room - margin : 0;
 }
 
+bool skip_whole_pin_for_shared_segment(uint64_t bytes, int devices, bool cap_known, uint64_t cap) {
+    return devices >= 2 && cap_known && bytes > cap;
+}
+
 bool pin_depends_on_reclaim(uint64_t free_now, uint64_t bytes, uint64_t reserve) {
     return bytes > 0 && free_now < bytes + reserve;
 }
@@ -3969,7 +3973,52 @@ bool FileExpertSource::pin_cache_complement(
             if (std::strcmp(v, "all") == 0) return -2.0;
             return std::max(0.0, std::atof(v));
         }();
-        if (pin && !paced) {
+        // The auto cap of the shared (non-local) WDDM segment: its room on the tightest GPU less the margin
+        // (shared_pin_limit_for, STRATA_PIN_MARGIN_GIB).  A portable mapping is charged to every adapter.
+        auto shared_cap = [&](bool all_devices, uint64_t& cap, std::string& cap_why) -> bool {
+            int cur = 0, n_dev = 1;
+            if (cudaGetDevice(&cur) != cudaSuccess) { (void) cudaGetLastError(); cur = 0; }
+            if (!all_devices || cudaGetDeviceCount(&n_dev) != cudaSuccess) {
+                (void) cudaGetLastError();
+                n_dev = 1;
+            }
+            bool have = false;
+            for (int k = 0; k < n_dev; ++k) {
+                const int d = n_dev == 1 ? cur : k;
+                uint64_t limit = 0;
+                std::string why;
+                if (shared_pin_limit_for(d, limit, why) && (!have || limit < cap)) {
+                    cap = limit;
+                    cap_why = why;
+                    have = true;
+                }
+            }
+            return have;
+        };
+        // #3725, this fork's form: with two or more GPUs path 1 (one portable allocation) is skipped when the copy is
+        // larger than that cap.  It could take the segment to its last few hundred MB, and the next small allocation
+        // on a stage failed with out of memory before READY.  Path 2 then pins in slices up to the cap.  One GPU,
+        // STRATA_COMPLEMENT_PIN_GIB=all or N: unchanged.
+        bool skip_whole = false;
+#if defined(_WIN32)
+        if (pin && !paced && slice_cap_gib == -1.0 && test_complement_refuse() == 0) {
+            int n_dev = 1;
+            if (cudaGetDeviceCount(&n_dev) != cudaSuccess) { (void) cudaGetLastError(); n_dev = 1; }
+            uint64_t cap = 0;
+            std::string why;
+            const bool known = n_dev >= 2 && shared_cap(true, cap, why);
+            if (detail::skip_whole_pin_for_shared_segment(bytes, n_dev, known, cap)) {
+                skip_whole = true;
+                char b[160];
+                std::snprintf(b, sizeof b, "one page-locked allocation of %.2f GiB is over the WDDM shared-segment cap "
+                                           "of %.2f GiB on %d GPUs (#3725)",
+                              (double) bytes / 1073741824.0, (double) cap / 1073741824.0, n_dev);
+                note = b;
+                std::fprintf(stderr, "FileExpertSource: %s: %s\n", b, why.c_str());
+            }
+        }
+#endif
+        if (pin && !paced && !skip_whole) {
             const cudaError_t allocated = test_complement_refuse() != 0   // a TEST knob (fork #20), see close()
                                               ? cudaErrorMemoryAllocation
                                               : cudaHostAlloc(&arena, (size_t) bytes,
@@ -4089,22 +4138,11 @@ bool FileExpertSource::pin_cache_complement(
                     } else if (slice_cap_gib == -1.0) {
                         // the per-adapter budget (extras/wddm-pin) of the GPU that reads the copy; a split's other
                         // stages map the portable slices too and WDDM charges each adapter: the smallest room counts
-                        int cur = 0, n_dev = 1;
-                        if (cudaGetDevice(&cur) != cudaSuccess) { (void) cudaGetLastError(); cur = 0; }
-                        if (additional_gpu_pairs.empty() || cudaGetDeviceCount(&n_dev) != cudaSuccess) {
-                            (void) cudaGetLastError();
-                            n_dev = 1;
-                        }
-                        bool have = false;
-                        for (int k = 0; k < n_dev; ++k) {
-                            const int d = n_dev == 1 ? cur : k;
-                            uint64_t limit = 0;
-                            std::string why;
-                            if (shared_pin_limit_for(d, limit, why) && (!have || limit < cap)) {
-                                cap = limit;
-                                cap_why = why + "; STRATA_COMPLEMENT_PIN_GIB=all pins until the driver refuses";
-                                have = true;
-                            }
+                        uint64_t limit = 0;
+                        std::string why;
+                        if (shared_cap(!additional_gpu_pairs.empty() || skip_whole, limit, why)) {
+                            cap = limit;
+                            cap_why = why + "; STRATA_COMPLEMENT_PIN_GIB=all pins until the driver refuses";
                         }
                     }
                     std::string stop;
