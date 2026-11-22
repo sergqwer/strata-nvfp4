@@ -1,0 +1,6 @@
+strata p_0 prose: 1200 generated in 4619 ms (259.8 tok/s), drafts accepted 686 of 1020, 0 checkpoints | 514 windows, avg T 2.98, 2.33 tokens/window, 8.99 ms/window | verify 8.28 draft 0.64 
+strata p_0 struct: 7230 generated in 14938 ms (484.0 tok/s), drafts accepted 6294 of 6429, 0 checkpoints | 936 windows, avg T 7.87, 7.72 tokens/window, 15.96 ms/window | verify 14.74 draft 1.13 
+strata p16_0 struct: 7230 generated in 45311 ms (159.6 tok/s), drafts accepted 6305 of 6390, 0 checkpoints | 925 windows, avg T 7.91, 7.82 tokens/window, 48.98 ms/window | verify 47.74 draft 1.14 
+strata p_1 prose: 1200 generated in 4583 ms (261.8 tok/s), drafts accepted 673 of 1008, 0 checkpoints | 527 windows, avg T 2.91, 2.28 tokens/window, 8.70 ms/window | verify 8.01 draft 0.63 
+strata p_1 struct: 7230 generated in 15052 ms (480.3 tok/s), drafts accepted 6291 of 6427, 0 checkpoints | 939 windows, avg T 7.84, 7.70 tokens/window, 16.03 ms/window | verify 14.82 draft 1.13 
+strata p16_1 struct: 7230 generated in 44983 ms (160.7 tok/s), drafts accepted 6301 of 6378, 0 checkpoints | 929 windows, avg T 7.87, 7.78 tokens/window, 48.42 ms/window | verify 47.17 draft 1.15 

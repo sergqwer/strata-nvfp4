@@ -1,0 +1,8 @@
+-rw-r--r-- 1 sergi 197609      114 Nov 20 05:30 D:/Projects/strata-dec-int/bench-int/nsys/f_p.client.log
+-rw-r--r-- 1 sergi 197609    10583 Nov 20 05:30 D:/Projects/strata-dec-int/bench-int/nsys/f_p.engine.log
+-rw-r--r-- 1 sergi 197609 22318754 Nov 20 05:30 D:/Projects/strata-dec-int/bench-int/nsys/f_p.nsys-rep
+-rw-r--r-- 1 sergi 197609     2458 Nov 20 05:30 D:/Projects/strata-dec-int/bench-int/nsys/f_p.nsys.out
+-rw-r--r-- 1 sergi 197609        0 Nov 20 05:30 D:/Projects/strata-dec-int/bench-int/nsys/f_p.out
+-rw-r--r-- 1 sergi 197609 67678208 Nov 20 05:30 D:/Projects/strata-dec-int/bench-int/nsys/f_p.sqlite
+DONE 600 19 90.0 2692.8 length 342 503 0 340566 358164 0 0 0.0 19 7116 chunk=0 experts_streamed=0 | wall 2847 ms
+strata decode timing: 258 windows, avg T 2.95, 2.33 tokens/window, 10.44 ms/window = adapt wait 0.02 + verify 9.54 (GPU-reach wait 5.25 + per-layer host 3.43 [plan 0.08 actq 0.04 jobs 0.01 CPU 3.29] + stage 0.00) + commit/emit 0.04 + draft 0.80 + adapt join 0.03 + other 0.00; per layer-window: CPU e

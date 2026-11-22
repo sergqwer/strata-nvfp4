@@ -1,0 +1,5 @@
+g0: attention layers [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47]: front 100.4 us, back 77.8 GDN layers (35): front 84.2 us, back 83.0  | decode timing: 257 windows, avg T 3.02, 2.33 tokens/window, 10.58 ms/window
+g1: attention layers [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47]: front 103.2 us, back 78.1 GDN layers (35): front 84.1 us, back 84.1  | decode timing: 257 windows, avg T 3.02, 2.33 tokens/window, 10.55 ms/window
+g2: attention layers [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47]: front 100.4 us, back 70.7 GDN layers (35): front 82.7 us, back 76.4  | decode timing: 263 windows, avg T 2.89, 2.28 tokens/window, 10.28 ms/window
+qw: attention layers [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47]: front 96.8 us, back 76.0 GDN layers (35): front 83.9 us, back 81.3  | decode timing: 251 windows, avg T 3.01, 2.39 tokens/window, 10.49 ms/window
+kp0: attention layers [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47]: front 98.3 us, back 76.2 GDN layers (35): front 83.5 us, back 81.8  | decode timing: 249 windows, avg T 3.00, 2.41 tokens/window, 10.61 ms/window

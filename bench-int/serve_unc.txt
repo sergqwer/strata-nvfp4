@@ -1,0 +1,8 @@
+strata n4_ubD struct: 7230 generated in 21342 ms (338.8 tok/s), drafts accepted 5938 of 6428, 0 checkpoints | 1292 windows, avg T 5.98, 5.60 tokens/window, 16.52 ms/window | verify 15.69 draft 0.73 
+strata n4_uiA struct: 7230 generated in 17827 ms (405.6 tok/s), drafts accepted 6296 of 6438, 0 checkpoints | 934 windows, avg T 7.89, 7.74 tokens/window, 19.09 ms/window | verify 17.47 draft 1.51 
+strata n4_ubD conv: 1001 generated in 4510 ms (221.9 tok/s), drafts accepted 641 of 896, 0 checkpoints | 360 windows, avg T 3.49, 2.78 tokens/window, 12.53 ms/window | verify 11.69 draft 0.74 
+strata n4_uiA conv: 1070 generated in 4366 ms (245.1 tok/s), drafts accepted 702 of 903, 0 checkpoints | 368 windows, avg T 3.45, 2.91 tokens/window, 11.86 ms/window | verify 10.92 draft 0.80 
+strata n4_ubD prose: 1200 generated in 5683 ms (211.2 tok/s), drafts accepted 668 of 1103, 0 checkpoints | 532 windows, avg T 3.07, 2.26 tokens/window, 10.68 ms/window | verify 9.86 draft 0.74 
+strata n4_uiA prose: 1191 generated in 5121 ms (232.6 tok/s), drafts accepted 666 of 981, 0 checkpoints | 525 windows, avg T 2.87, 2.27 tokens/window, 9.75 ms/window | verify 8.95 draft 0.69 
+strata n4_ubD uk: 1200 generated in 7976 ms (150.4 tok/s), drafts accepted 285 of 678, 0 checkpoints | 915 windows, avg T 1.74, 1.31 tokens/window, 8.72 ms/window | verify 7.94 draft 0.71 
+strata n4_uiA uk: 1200 generated in 5591 ms (214.6 tok/s), drafts accepted 547 of 798, 0 checkpoints | 653 windows, avg T 2.22, 1.84 tokens/window, 8.56 ms/window | verify 7.86 draft 0.58 

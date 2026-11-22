@@ -1,0 +1,5 @@
+c24: attention layers [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47]: front 88.8 us, back 75.3 GDN layers (35): front 83.7 us, back 80.6 
+c48: attention layers [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47]: front 85.4 us, back 74.5 GDN layers (35): front 84.2 us, back 80.2 
+c80: attention layers [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47]: front 88.6 us, back 78.1 GDN layers (35): front 84.4 us, back 83.8 
+c48p: attention layers [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47]: front 84.0 us, back 77.5 GDN layers (35): front 84.4 us, back 83.5 
+c48a1: attention layers [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47]: front 86.3 us, back 76.7 GDN layers (35): front 84.1 us, back 81.8 

@@ -1,0 +1,23 @@
+strata l2_A_r1 struct: 7230 generated in 19261 ms (375.4 tok/s), drafts accepted 6295 of 6434, 0 checkpoints | 935 windows, avg T 7.88, 7.73 tokens/window, 20.60 ms/window | verify 18.97 draft 1.51 
+strata l2_L64_r1 struct:  |  | 
+strata l2_A_r1 struct: 7230 generated in 19074 ms (379.1 tok/s), drafts accepted 6300 of 6420, 0 checkpoints | 930 windows, avg T 7.90, 7.77 tokens/window, 20.51 ms/window | verify 18.88 draft 1.52 
+strata l2_G0_r1 struct: 7230 generated in 19890 ms (363.5 tok/s), drafts accepted 6287 of 6512, 0 checkpoints | 943 windows, avg T 7.91, 7.67 tokens/window, 21.09 ms/window | verify 19.44 draft 1.53 
+strata l2_L64_r1 struct:  |  | 
+strata l2_A_r1 conv: 965 generated in 4285 ms (225.2 tok/s), drafts accepted 595 of 767, 0 checkpoints | 370 windows, avg T 3.07, 2.61 tokens/window, 11.58 ms/window | verify 10.70 draft 0.73 
+strata l2_L64_r1 conv:  |  | 
+strata l2_G0_r1 struct: 7230 generated in 19230 ms (376.0 tok/s), drafts accepted 6300 of 6419, 0 checkpoints | 930 windows, avg T 7.90, 7.77 tokens/window, 20.68 ms/window | verify 19.02 draft 1.54 
+strata l2_G0_r1 conv: 1044 generated in 4795 ms (217.7 tok/s), drafts accepted 662 of 895, 0 checkpoints | 382 windows, avg T 3.34, 2.73 tokens/window, 12.55 ms/window | verify 11.63 draft 0.78 
+strata l2_MP_r1 struct: 7230 generated in 19517 ms (370.4 tok/s), drafts accepted 6293 of 6507, 0 checkpoints | 937 windows, avg T 7.94, 7.72 tokens/window, 20.83 ms/window | verify 19.20 draft 1.51 
+strata l2_A_r2 struct: 7230 generated in 19567 ms (369.5 tok/s), drafts accepted 6293 of 6492, 0 checkpoints | 937 windows, avg T 7.93, 7.72 tokens/window, 20.88 ms/window | verify 19.26 draft 1.51 
+strata l2_DP_r1 struct: 7230 generated in 21159 ms (341.7 tok/s), drafts accepted 5934 of 6457, 0 checkpoints | 1296 windows, avg T 5.98, 5.58 tokens/window, 16.33 ms/window | verify 15.49 draft 0.74 
+strata l2_A_r1 conv: 1024 generated in 4602 ms (222.5 tok/s), drafts accepted 657 of 863, 0 checkpoints | 367 windows, avg T 3.35, 2.79 tokens/window, 12.54 ms/window | verify 11.61 draft 0.78 
+strata l2_L64_r1 conv:  |  | 
+strata l2_L64_r2 struct:  |  | 
+strata l2_G0_r1 conv: 1058 generated in 4780 ms (221.3 tok/s), drafts accepted 674 of 896, 0 checkpoints | 384 windows, avg T 3.33, 2.76 tokens/window, 12.45 ms/window | verify 11.53 draft 0.77 
+strata l2_G0_r2 struct: 7230 generated in 19362 ms (373.4 tok/s), drafts accepted 6294 of 6434, 0 checkpoints | 936 windows, avg T 7.87, 7.72 tokens/window, 20.69 ms/window | verify 19.06 draft 1.52 
+strata l2_A_r2 conv: 977 generated in 4417 ms (221.2 tok/s), drafts accepted 626 of 856, 0 checkpoints | 351 windows, avg T 3.44, 2.78 tokens/window, 12.58 ms/window | verify 11.63 draft 0.79 
+strata l2_L64_r2 conv:  |  | 
+strata l2_MP_r1 conv: 984 generated in 4538 ms (216.8 tok/s), drafts accepted 615 of 852, 0 checkpoints | 369 windows, avg T 3.31, 2.67 tokens/window, 12.30 ms/window | verify 11.38 draft 0.77 
+strata l2_G0_r2 conv: 1061 generated in 4794 ms (221.3 tok/s), drafts accepted 666 of 897, 0 checkpoints | 395 windows, avg T 3.27, 2.69 tokens/window, 12.14 ms/window | verify 11.23 draft 0.76 
+AB-DONE
+strata l2_DP_r1 conv: 1100 generated in 5326 ms (206.6 tok/s), drafts accepted 718 of 980, 0 checkpoints | 382 windows, avg T 3.57, 2.88 tokens/window, 13.94 ms/window | verify 12.93 draft 0.75 

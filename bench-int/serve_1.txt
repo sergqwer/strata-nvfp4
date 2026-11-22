@@ -1,0 +1,21 @@
+strata 1_bDF2 conv: 1007 generated in 4694 ms (214.5 tok/s), drafts accepted 610 of 850, 0 checkpoints | 397 windows, avg T 3.14, 2.54 tokens/window, 11.82 ms/window | verify 10.99 draft 0.74 
+strata 1_iDF2 conv: 1062 generated in 4752 ms (223.5 tok/s), drafts accepted 684 of 909, 0 checkpoints | 378 windows, avg T 3.40, 2.81 tokens/window, 12.57 ms/window | verify 11.73 draft 0.75 
+strata 1_iMTP8 conv: 1007 generated in 4542 ms (221.7 tok/s), drafts accepted 644 of 871, 0 checkpoints | 363 windows, avg T 3.40, 2.77 tokens/window, 12.51 ms/window | verify 11.58 draft 0.79 
+strata 1_iMTP8hc conv: 1011 generated in 4227 ms (239.2 tok/s), drafts accepted 632 of 820, 0 checkpoints | 379 windows, avg T 3.16, 2.67 tokens/window, 11.15 ms/window | verify 10.27 draft 0.74 
+basalt 1_B8 conv: 1148 generated in 4608 ms (249.1 tok/s), drafts accepted 764 of 1017, 0 checkpoints | 388 windows, avg T 3.63, 2.96 tokens/window, 11.88 ms/window | verify 11.30 draft 0.53 
+strata 1_bDF2 struct: 7230 generated in 21301 ms (339.4 tok/s), drafts accepted 5934 of 6449, 0 checkpoints | 1296 windows, avg T 5.98, 5.58 tokens/window, 16.44 ms/window | verify 15.62 draft 0.73 
+strata 1_iDF2 struct: 7230 generated in 21315 ms (339.2 tok/s), drafts accepted 5934 of 6458, 0 checkpoints | 1296 windows, avg T 5.98, 5.58 tokens/window, 16.45 ms/window | verify 15.61 draft 0.74 
+strata 1_iMTP8 struct: 7230 generated in 19059 ms (379.4 tok/s), drafts accepted 6300 of 6414, 0 checkpoints | 930 windows, avg T 7.90, 7.77 tokens/window, 20.49 ms/window | verify 18.86 draft 1.52 
+strata 1_iMTP8hc struct: 7230 generated in 18020 ms (401.2 tok/s), drafts accepted 6297 of 6434, 0 checkpoints | 933 windows, avg T 7.90, 7.75 tokens/window, 19.31 ms/window | verify 17.69 draft 1.51 
+basalt 1_B8 struct: 7230 generated in 15318 ms (472.0 tok/s), drafts accepted 6300 of 6447, 0 checkpoints | 934 windows, avg T 7.90, 7.74 tokens/window, 16.40 ms/window | verify 15.40 draft 0.99 
+strata 1_bDF2 prose: 1200 generated in 5710 ms (210.2 tok/s), drafts accepted 676 of 1149, 0 checkpoints | 524 windows, avg T 3.19, 2.29 tokens/window, 10.90 ms/window | verify 10.08 draft 0.74 
+strata 1_iDF2 prose: 1141 generated in 5501 ms (207.4 tok/s), drafts accepted 619 of 1087, 0 checkpoints | 522 windows, avg T 3.08, 2.19 tokens/window, 10.54 ms/window | verify 9.71 draft 0.75 
+strata 1_iMTP8 prose: 1200 generated in 5399 ms (222.2 tok/s), drafts accepted 686 of 1006, 0 checkpoints | 514 windows, avg T 2.96, 2.33 tokens/window, 10.50 ms/window | verify 9.67 draft 0.71 
+strata 1_iMTP8hc prose: 1200 generated in 5024 ms (238.9 tok/s), drafts accepted 691 of 981, 0 checkpoints | 509 windows, avg T 2.93, 2.36 tokens/window, 9.87 ms/window | verify 9.05 draft 0.70 
+basalt 1_B8 prose: 1144 generated in 4142 ms (276.2 tok/s), drafts accepted 642 of 957, 0 checkpoints | 506 windows, avg T 2.90, 2.26 tokens/window, 8.19 ms/window | verify 7.70 draft 0.45 
+strata 1_bDF2 uk: 1200 generated in 7765 ms (154.5 tok/s), drafts accepted 291 of 657, 0 checkpoints | 909 windows, avg T 1.72, 1.32 tokens/window, 8.54 ms/window | verify 7.77 draft 0.71 
+strata 1_iDF2 uk: 1200 generated in 7683 ms (156.2 tok/s), drafts accepted 301 of 655, 0 checkpoints | 899 windows, avg T 1.73, 1.33 tokens/window, 8.55 ms/window | verify 7.75 draft 0.72 
+strata 1_iMTP8 uk: 1200 generated in 5818 ms (206.3 tok/s), drafts accepted 534 of 736, 0 checkpoints | 666 windows, avg T 2.11, 1.80 tokens/window, 8.74 ms/window | verify 8.05 draft 0.55 
+strata 1_iMTP8hc uk: 1200 generated in 5601 ms (214.2 tok/s), drafts accepted 530 of 757, 0 checkpoints | 670 windows, avg T 2.13, 1.79 tokens/window, 8.36 ms/window | verify 7.69 draft 0.55 
+basalt 1_B8 uk: 1200 generated in 5003 ms (239.9 tok/s), drafts accepted 427 of 739, 0 checkpoints | 773 windows, avg T 1.96, 1.55 tokens/window, 6.47 ms/window | verify 6.08 draft 0.35 
+SERVE-DONE

@@ -1,0 +1,12 @@
+strata s10_b struct: 7230 generated in 21926 ms (329.7 tok/s), drafts accepted 5936 of 6425, 0 checkpoints | 1294 windows, avg T 5.97, 5.59 tokens/window, 16.94 ms/window | verify 15.78 draft 0.73 
+strata s10_i struct: 7230 generated in 14856 ms (486.7 tok/s), drafts accepted 6300 of 6416, 0 checkpoints | 930 windows, avg T 7.90, 7.77 tokens/window, 15.97 ms/window | verify 14.75 draft 1.14 
+basalt s10_B struct: 7230 generated in 15238 ms (474.5 tok/s), drafts accepted 6300 of 6447, 0 checkpoints | 934 windows, avg T 7.90, 7.74 tokens/window, 16.31 ms/window | verify 15.32 draft 0.98 
+strata s10_b conv: 1030 generated in 4714 ms (218.5 tok/s), drafts accepted 666 of 916, 0 checkpoints | 364 windows, avg T 3.52, 2.83 tokens/window, 12.95 ms/window | verify 11.89 draft 0.74 
+strata s10_i conv: 1060 generated in 3938 ms (269.2 tok/s), drafts accepted 691 of 912, 0 checkpoints | 369 windows, avg T 3.47, 2.87 tokens/window, 10.67 ms/window | verify 9.94 draft 0.66 
+basalt s10_B conv: 1148 generated in 4623 ms (248.3 tok/s), drafts accepted 764 of 1017, 0 checkpoints | 388 windows, avg T 3.63, 2.96 tokens/window, 11.92 ms/window | verify 11.33 draft 0.53 
+strata s10_b prose: 1092 generated in 5325 ms (205.1 tok/s), drafts accepted 607 of 983, 0 checkpoints | 485 windows, avg T 3.03, 2.25 tokens/window, 10.98 ms/window | verify 9.87 draft 0.74 
+strata s10_i prose: 1200 generated in 4591 ms (261.4 tok/s), drafts accepted 673 of 1008, 0 checkpoints | 527 windows, avg T 2.91, 2.28 tokens/window, 8.71 ms/window | verify 8.02 draft 0.63 
+basalt s10_B prose: 1144 generated in 4142 ms (276.2 tok/s), drafts accepted 642 of 957, 0 checkpoints | 506 windows, avg T 2.90, 2.26 tokens/window, 8.19 ms/window | verify 7.70 draft 0.45 
+strata s10_b uk: 1200 generated in 7779 ms (154.3 tok/s), drafts accepted 300 of 631, 0 checkpoints | 900 windows, avg T 1.70, 1.33 tokens/window, 8.64 ms/window | verify 7.74 draft 0.71 
+strata s10_i uk: 1200 generated in 4973 ms (241.3 tok/s), drafts accepted 532 of 754, 0 checkpoints | 668 windows, avg T 2.13, 1.80 tokens/window, 7.44 ms/window | verify 6.94 draft 0.45 
+basalt s10_B uk: 1200 generated in 5109 ms (234.9 tok/s), drafts accepted 427 of 739, 0 checkpoints | 773 windows, avg T 1.96, 1.55 tokens/window, 6.61 ms/window | verify 6.14 draft 0.35 

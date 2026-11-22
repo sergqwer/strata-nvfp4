@@ -1,0 +1,4 @@
+strata b6_prof struct: 7230 generated in 18658 ms (387.5 tok/s), drafts accepted 6301 of 6420, 0 checkpoints | 929 windows, avg T 7.91, 7.78 tokens/window, 20.08 ms/window | verify 18.28 draft 1.52 
+basalt b6_profB struct: 7230 generated in 17072 ms (423.5 tok/s), drafts accepted 6300 of 6447, 0 checkpoints | 934 windows, avg T 7.90, 7.74 tokens/window, 18.28 ms/window | verify 16.61 draft 1.66 
+strata b6_prof prose: 1200 generated in 5614 ms (213.8 tok/s), drafts accepted 686 of 976, 0 checkpoints | 514 windows, avg T 2.90, 2.33 tokens/window, 10.92 ms/window | verify 9.84 draft 0.70 
+basalt b6_profB prose: 1144 generated in 5092 ms (224.7 tok/s), drafts accepted 642 of 957, 0 checkpoints | 506 windows, avg T 2.90, 2.26 tokens/window, 10.06 ms/window | verify 9.21 draft 0.82 

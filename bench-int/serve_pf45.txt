@@ -1,0 +1,12 @@
+strata y_a_r1 struct: 7230 generated in 16447 ms (439.6 tok/s), drafts accepted 6299 of 6426, 0 checkpoints | 931 windows, avg T 7.90, 7.77 tokens/window, 17.67 ms/window | verify 16.30 draft 1.28 
+strata y_f_r1 struct: 7230 generated in 16102 ms (449.0 tok/s), drafts accepted 6296 of 6479, 0 checkpoints | 934 windows, avg T 7.94, 7.74 tokens/window, 17.24 ms/window | verify 15.87 draft 1.29 
+strata y_a_r1 prose: 1188 generated in 4802 ms (247.4 tok/s), drafts accepted 666 of 968, 0 checkpoints | 522 windows, avg T 2.85, 2.28 tokens/window, 9.20 ms/window | verify 8.46 draft 0.67 
+strata y_f_r1 prose: 1200 generated in 4798 ms (250.1 tok/s), drafts accepted 677 of 1016, 0 checkpoints | 523 windows, avg T 2.94, 2.29 tokens/window, 9.17 ms/window | verify 8.41 draft 0.70 
+strata y_a_r1 conv: 1052 generated in 4137 ms (254.3 tok/s), drafts accepted 692 of 932, 0 checkpoints | 360 windows, avg T 3.59, 2.92 tokens/window, 11.49 ms/window | verify 10.70 draft 0.71 
+strata y_f_r1 conv: 1200 generated in 4530 ms (264.9 tok/s), drafts accepted 784 of 1032, 0 checkpoints | 416 windows, avg T 3.48, 2.88 tokens/window, 10.89 ms/window | verify 10.11 draft 0.71 
+strata y_a_r2 struct: 7230 generated in 16428 ms (440.1 tok/s), drafts accepted 6297 of 6433, 0 checkpoints | 933 windows, avg T 7.89, 7.75 tokens/window, 17.61 ms/window | verify 16.25 draft 1.29 
+strata y_f_r2 struct: 7230 generated in 16049 ms (450.5 tok/s), drafts accepted 6297 of 6443, 0 checkpoints | 933 windows, avg T 7.91, 7.75 tokens/window, 17.20 ms/window | verify 15.83 draft 1.29 
+strata y_a_r2 prose: 1200 generated in 4816 ms (249.2 tok/s), drafts accepted 668 of 971, 0 checkpoints | 532 windows, avg T 2.83, 2.26 tokens/window, 9.05 ms/window | verify 8.32 draft 0.66 
+strata y_f_r2 prose: 1200 generated in 4808 ms (249.6 tok/s), drafts accepted 669 of 1019, 0 checkpoints | 531 windows, avg T 2.92, 2.26 tokens/window, 9.05 ms/window | verify 8.32 draft 0.68 
+strata y_a_r2 conv: 1052 generated in 4105 ms (256.3 tok/s), drafts accepted 692 of 932, 0 checkpoints | 360 windows, avg T 3.59, 2.92 tokens/window, 11.40 ms/window | verify 10.61 draft 0.71 
+strata y_f_r2 conv: 1165 generated in 4486 ms (259.7 tok/s), drafts accepted 758 of 1045, 0 checkpoints | 407 windows, avg T 3.57, 2.86 tokens/window, 11.02 ms/window | verify 10.23 draft 0.72 

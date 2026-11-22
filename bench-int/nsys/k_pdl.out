@@ -1,0 +1,8 @@
+-rw-r--r-- 1 sergi 197609      114 Nov 20 09:39 D:/Projects/strata-dec-int/bench-int/nsys/k_pdl.client.log
+-rw-r--r-- 1 sergi 197609    12271 Nov 20 09:39 D:/Projects/strata-dec-int/bench-int/nsys/k_pdl.engine.log
+-rw-r--r-- 1 sergi 197609 20696145 Nov 20 09:39 D:/Projects/strata-dec-int/bench-int/nsys/k_pdl.nsys-rep
+-rw-r--r-- 1 sergi 197609     2396 Nov 20 09:39 D:/Projects/strata-dec-int/bench-int/nsys/k_pdl.nsys.out
+-rw-r--r-- 1 sergi 197609        0 Nov 20 09:38 D:/Projects/strata-dec-int/bench-int/nsys/k_pdl.out
+-rw-r--r-- 1 sergi 197609 61235200 Nov 20 09:39 D:/Projects/strata-dec-int/bench-int/nsys/k_pdl.sqlite
+DONE 600 19 90.1 2567.1 length 341 482 0 331351 348601 0 0 0.0 19 7079 chunk=0 experts_streamed=0 | wall 2708 ms
+strata decode timing: 259 windows, avg T 2.86, 2.32 tokens/window, 9.91 ms/window = adapt wait 0.02 + verify 9.09 (GPU-reach wait 4.79 + per-layer host 3.42 [plan 0.07 actq 0.04 jobs 0.01 CPU 3.29] + stage 0.00) + commit/emit 0.05 + draft 0.75 + adapt join 0.01 + other 0.00; per layer-window: CPU ex

@@ -1,0 +1,10 @@
+qsa_post_parity: PASS, 2560 checks, 0 failures
+nv_defaults_test: ok
+q80p_parity: synthetic head, 65536 rows, 24 windows, 121 checks, 90 screens, 52796.5 exact rows a screen: PASS (0 failures)
+draft_proxy_parity: PASS, 769 checks, 0 failures (64 picks among the near-copy rows)
+strata: STRATA_HC_Q8=1: the 8-bit hyper-connection read hc8 (int8 rows + fp16 scales, fp32 sums), programmatic dependent launch
+strata: the hyper-connection read v4 (programmatic dependent launch)
+gr_hc8_check: 0 failures
+gdn_rec_parity: 0 failures
+   626      0.4453%    1.424e-05    8.170e-03     0.3585     0.1431     0.3126     0.2633      0.610%      0.544%  H quantizer: same bytes
+q81_div_parity: near-boundary blocks: 0 of 524288 differ (0 codes, 0 scale/sum words); random blocks: 0 of 524288 (0 codes, 0)

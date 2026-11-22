@@ -1,0 +1,2 @@
+p: strata generate: expert cache 8856 slots, 22.81 GiB of VRAM; policy is 
+i: strata trace: native dense slab 3585.9 of 3585.9 MiB used; q8_1 scratch 0.0 MiB; hc bf16 scratches 4 x 6.2 MiB strata generate: expert cache 8952 slots, 23.05 GiB of VRAM; policy is 

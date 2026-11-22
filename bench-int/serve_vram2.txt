@@ -1,0 +1,16 @@
+strata x_v8144_p_r1 struct: 7230 generated in 26505 ms (272.8 tok/s), drafts accepted 6299 of 6396, 0 checkpoints | 931 windows, avg T 7.87, 7.77 tokens/window, 28.47 ms/window | verify 27.10 draft 1.28 
+strata x_v8144_i_r1 struct: 7230 generated in 25067 ms (288.4 tok/s), drafts accepted 6286 of 6417, 0 checkpoints | 944 windows, avg T 7.80, 7.66 tokens/window, 26.55 ms/window | verify 25.17 draft 1.29 
+strata x_v8144_p_r1 conv: 1111 generated in 6159 ms (180.4 tok/s), drafts accepted 711 of 955, 0 checkpoints | 400 windows, avg T 3.39, 2.78 tokens/window, 15.40 ms/window | verify 14.64 draft 0.68 
+strata x_v8144_i_r1 conv: 1078 generated in 5784 ms (186.4 tok/s), drafts accepted 675 of 910, 0 checkpoints | 403 windows, avg T 3.26, 2.67 tokens/window, 14.35 ms/window | verify 13.61 draft 0.66 
+strata x_v8144_p_r2 struct: 7230 generated in 25947 ms (278.6 tok/s), drafts accepted 6298 of 6425, 0 checkpoints | 932 windows, avg T 7.89, 7.76 tokens/window, 27.84 ms/window | verify 26.47 draft 1.28 
+strata x_v8144_i_r2 struct: 7230 generated in 25055 ms (288.6 tok/s), drafts accepted 6295 of 6417, 0 checkpoints | 935 windows, avg T 7.86, 7.73 tokens/window, 26.80 ms/window | verify 25.40 draft 1.30 
+strata x_v8144_p_r2 conv: 1089 generated in 6267 ms (173.8 tok/s), drafts accepted 680 of 941, 0 checkpoints | 409 windows, avg T 3.30, 2.66 tokens/window, 15.32 ms/window | verify 14.57 draft 0.68 
+strata x_v8144_i_r2 conv: 1078 generated in 5790 ms (186.2 tok/s), drafts accepted 675 of 910, 0 checkpoints | 403 windows, avg T 3.26, 2.67 tokens/window, 14.37 ms/window | verify 13.63 draft 0.66 
+strata x_v16304_p_r1 struct: 7230 generated in 48593 ms (148.8 tok/s), drafts accepted 6302 of 6394, 0 checkpoints | 928 windows, avg T 7.89, 7.79 tokens/window, 52.36 ms/window | verify 50.98 draft 1.29 
+strata x_v16304_i_r1 struct: 7230 generated in 48286 ms (149.7 tok/s), drafts accepted 6301 of 6401, 0 checkpoints | 929 windows, avg T 7.89, 7.78 tokens/window, 51.98 ms/window | verify 50.58 draft 1.30 
+strata x_v16304_p_r1 conv: 1102 generated in 9425 ms (116.9 tok/s), drafts accepted 694 of 942, 0 checkpoints | 408 windows, avg T 3.31, 2.70 tokens/window, 23.10 ms/window | verify 22.38 draft 0.66 
+strata x_v16304_i_r1 conv: 988 generated in 7836 ms (126.1 tok/s), drafts accepted 629 of 815, 0 checkpoints | 359 windows, avg T 3.27, 2.75 tokens/window, 21.83 ms/window | verify 21.09 draft 0.67 
+strata x_v16304_p_r2 struct: 7230 generated in 49002 ms (147.5 tok/s), drafts accepted 6288 of 6414, 0 checkpoints | 942 windows, avg T 7.81, 7.68 tokens/window, 52.02 ms/window | verify 50.64 draft 1.29 
+strata x_v16304_i_r2 struct: 7230 generated in 48465 ms (149.2 tok/s), drafts accepted 6296 of 6413, 0 checkpoints | 934 windows, avg T 7.87, 7.74 tokens/window, 51.89 ms/window | verify 50.49 draft 1.30 
+strata x_v16304_p_r2 conv: 1115 generated in 9243 ms (120.6 tok/s), drafts accepted 723 of 935, 0 checkpoints | 392 windows, avg T 3.39, 2.84 tokens/window, 23.58 ms/window | verify 22.84 draft 0.67 
+strata x_v16304_i_r2 conv: 943 generated in 7507 ms (125.6 tok/s), drafts accepted 592 of 769, 0 checkpoints | 351 windows, avg T 3.19, 2.69 tokens/window, 21.39 ms/window | verify 20.66 draft 0.66 

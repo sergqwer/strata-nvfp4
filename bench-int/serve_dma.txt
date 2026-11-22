@@ -1,0 +1,8 @@
+strata h9_dma_r1 struct: 7230 generated in 18693 ms (386.8 tok/s), drafts accepted 6293 of 6449, 0 checkpoints | 937 windows, avg T 7.88, 7.72 tokens/window, 19.95 ms/window | verify 18.49 draft 1.36 
+strata h9_dma0_r1 struct: 7230 generated in 19039 ms (379.8 tok/s), drafts accepted 6297 of 6502, 0 checkpoints | 933 windows, avg T 7.97, 7.75 tokens/window, 20.41 ms/window | verify 18.95 draft 1.36 
+strata h9_dma_r1 prose: 1200 generated in 5591 ms (214.6 tok/s), drafts accepted 663 of 1008, 0 checkpoints | 537 windows, avg T 2.88, 2.23 tokens/window, 10.41 ms/window | verify 9.63 draft 0.72 
+strata h9_dma0_r1 prose: 1200 generated in 5636 ms (212.9 tok/s), drafts accepted 663 of 1008, 0 checkpoints | 537 windows, avg T 2.88, 2.23 tokens/window, 10.50 ms/window | verify 9.72 draft 0.72 
+strata h9_dma_r2 struct: 7230 generated in 18658 ms (387.5 tok/s), drafts accepted 6298 of 6458, 0 checkpoints | 932 windows, avg T 7.93, 7.76 tokens/window, 20.02 ms/window | verify 18.56 draft 1.36 
+strata h9_dma0_r2 struct: 7230 generated in 19054 ms (379.4 tok/s), drafts accepted 6295 of 6516, 0 checkpoints | 935 windows, avg T 7.97, 7.73 tokens/window, 20.38 ms/window | verify 18.93 draft 1.36 
+strata h9_dma_r2 prose: 1200 generated in 5464 ms (219.6 tok/s), drafts accepted 680 of 998, 0 checkpoints | 520 windows, avg T 2.92, 2.31 tokens/window, 10.51 ms/window | verify 9.72 draft 0.72 
+strata h9_dma0_r2 prose: 1200 generated in 5532 ms (216.9 tok/s), drafts accepted 677 of 1002, 0 checkpoints | 523 windows, avg T 2.92, 2.29 tokens/window, 10.58 ms/window | verify 9.78 draft 0.73 

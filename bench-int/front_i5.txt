@@ -1,0 +1,3 @@
+nsys/i5_prose.sqlite 161 windows
+attention layers [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47]: front 113.3 us, back 76.5
+GDN layers (35): front 84.1 us, back 81.6

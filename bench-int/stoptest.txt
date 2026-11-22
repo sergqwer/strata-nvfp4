@@ -1,0 +1,3 @@
+s1a | request 1: 305 tokens (STOP sent at 300) DONE 305 98 288.0 1232.5 cancel 262 283 0 130805 149054 0 0  | request 2: 300 tokens md5 09cfdf93b7
+s1b | request 1: 305 tokens (STOP sent at 300) DONE 305 98 289.9 1201.1 cancel 262 283 0 130805 149054 0 0  | request 2: 300 tokens md5 09cfdf93b7
+s0a | request 1: 305 tokens (STOP sent at 300) DONE 305 98 288.0 1230.5 cancel 262 283 0 130805 149054 0 0  | request 2: 300 tokens md5 09cfdf93b7

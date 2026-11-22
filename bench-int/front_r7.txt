@@ -1,0 +1,10 @@
+s0: attention layers [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47]: front 96.6 us, back 74.7 GDN layers (35): front 83.4 us, back 80.0 
+    174.9 us    12.0 x  attn_chunk_kernel_pre75
+     22.7 us     2.8 x  attn_chunk_draft_kernel
+     20.0 us    12.0 x  attn_merge_v2_kernel
+      5.1 us     2.8 x  attn_merge_draft_gq_kernel
+s1: attention layers [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47]: front 90.3 us, back 78.9 GDN layers (35): front 84.0 us, back 83.8 
+     90.5 us    12.0 x  attn_chunk_staged_kernel
+     23.5 us     2.9 x  attn_chunk_draft_kernel
+     20.1 us    12.0 x  attn_merge_v2_kernel
+      5.3 us     2.9 x  attn_merge_draft_gq_kernel

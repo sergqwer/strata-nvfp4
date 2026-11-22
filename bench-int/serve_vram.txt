@@ -1,0 +1,12 @@
+strata n4_v8144_bM struct: 7230 generated in 30401 ms (237.8 tok/s), drafts accepted 5990 of 6131, 0 checkpoints | 1240 windows, avg T 5.94, 5.83 tokens/window, 24.52 ms/window | verify 22.98 draft 1.43 
+strata n4_v8144_iM struct: 7230 generated in 29005 ms (249.3 tok/s), drafts accepted 5991 of 6107, 0 checkpoints | 1239 windows, avg T 5.93, 5.84 tokens/window, 23.41 ms/window | verify 21.90 draft 1.39 
+strata n4_v8144_iA struct: 7230 generated in 26739 ms (270.4 tok/s), drafts accepted 6288 of 6439, 0 checkpoints | 942 windows, avg T 7.84, 7.68 tokens/window, 28.39 ms/window | verify 26.75 draft 1.51 
+strata n4_v8144_bM conv: 1079 generated in 6785 ms (159.0 tok/s), drafts accepted 604 of 870, 0 checkpoints | 475 windows, avg T 2.83, 2.27 tokens/window, 14.28 ms/window | verify 13.31 draft 0.83 
+strata n4_v8144_iM conv: 1091 generated in 6369 ms (171.3 tok/s), drafts accepted 647 of 888, 0 checkpoints | 444 windows, avg T 3.00, 2.46 tokens/window, 14.34 ms/window | verify 13.35 draft 0.85 
+strata n4_v8144_iA conv: 1104 generated in 6320 ms (174.7 tok/s), drafts accepted 697 of 950, 0 checkpoints | 407 windows, avg T 3.33, 2.71 tokens/window, 15.53 ms/window | verify 14.61 draft 0.76 
+strata n4_v16304_bM struct: 7230 generated in 55626 ms (130.0 tok/s), drafts accepted 5961 of 6079, 0 checkpoints | 1269 windows, avg T 5.79, 5.70 tokens/window, 43.83 ms/window | verify 42.29 draft 1.44 
+strata n4_v16304_iM struct: 7230 generated in 52874 ms (136.7 tok/s), drafts accepted 5960 of 6098, 0 checkpoints | 1270 windows, avg T 5.80, 5.69 tokens/window, 41.63 ms/window | verify 40.13 draft 1.41 
+strata n4_v16304_iA struct: 7230 generated in 50004 ms (144.6 tok/s), drafts accepted 6299 of 6390, 0 checkpoints | 931 windows, avg T 7.86, 7.77 tokens/window, 53.71 ms/window | verify 52.09 draft 1.51 
+strata n4_v16304_bM conv: 1110 generated in 10193 ms (108.9 tok/s), drafts accepted 666 of 908, 0 checkpoints | 444 windows, avg T 3.05, 2.50 tokens/window, 22.96 ms/window | verify 22.01 draft 0.86 
+strata n4_v16304_iM conv: 1067 generated in 9348 ms (114.1 tok/s), drafts accepted 627 of 854, 0 checkpoints | 440 windows, avg T 2.94, 2.42 tokens/window, 21.25 ms/window | verify 20.32 draft 0.84 
+strata n4_v16304_iA conv: 1193 generated in 9882 ms (120.7 tok/s), drafts accepted 783 of 1011, 0 checkpoints | 410 windows, avg T 3.47, 2.91 tokens/window, 24.10 ms/window | verify 23.23 draft 0.78 

@@ -1,0 +1,8 @@
+b prefill_3k.txt | prompt 3072 tokens = 0 reused + 3072 read in 924 ms (3323.4 tok/s)
+i prefill_3k.txt | prompt 3072 tokens = 0 reused + 3072 read in 853 ms (3601.3 tok/s)
+b prefill_16k.txt | prompt 16676 tokens = 0 reused + 16676 read in 1938 ms (8603.9 tok/s)
+i prefill_16k.txt | prompt 16676 tokens = 0 reused + 16676 read in 1657 ms (10065.8 tok/s)
+b prefill_64k.txt | prompt 66617 tokens = 0 reused + 66617 read in 7845 ms (8491.7 tok/s)
+i prefill_64k.txt | prompt 66617 tokens = 0 reused + 66617 read in 6163 ms (10808.9 tok/s)
+b prefill_131k.txt | prompt 131000 tokens = 0 reused + 131000 read in 14460 ms (9059.8 tok/s)
+i prefill_131k.txt | prompt 131000 tokens = 0 reused + 131000 read in 12471 ms (10504.5 tok/s)

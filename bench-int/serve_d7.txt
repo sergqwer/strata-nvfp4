@@ -1,0 +1,12 @@
+strata d7_prev_r1 struct: 7230 generated in 18435 ms (392.2 tok/s), drafts accepted 6289 of 6437, 0 checkpoints | 941 windows, avg T 7.84, 7.68 tokens/window, 19.59 ms/window | verify 17.65 draft 1.53 
+strata d7_new_r1 struct: 7230 generated in 17980 ms (402.1 tok/s), drafts accepted 6299 of 6429, 0 checkpoints | 931 windows, avg T 7.91, 7.77 tokens/window, 19.31 ms/window | verify 17.64 draft 1.30 
+strata d7_prev_r1 conv: 1111 generated in 4844 ms (229.4 tok/s), drafts accepted 722 of 923, 0 checkpoints | 389 windows, avg T 3.37, 2.86 tokens/window, 12.45 ms/window | verify 11.15 draft 0.78 
+strata d7_new_r1 conv: 1142 generated in 4896 ms (233.2 tok/s), drafts accepted 762 of 965, 0 checkpoints | 380 windows, avg T 3.54, 3.01 tokens/window, 12.89 ms/window | verify 11.29 draft 0.70 
+strata d7_prev_r1 prose: 1200 generated in 5159 ms (232.6 tok/s), drafts accepted 684 of 977, 0 checkpoints | 516 windows, avg T 2.89, 2.33 tokens/window, 10.00 ms/window | verify 8.94 draft 0.70 
+strata d7_new_r1 prose: 1200 generated in 5148 ms (233.1 tok/s), drafts accepted 670 of 976, 0 checkpoints | 530 windows, avg T 2.84, 2.26 tokens/window, 9.71 ms/window | verify 8.89 draft 0.60 
+strata d7_prev_r2 struct: 7230 generated in 17997 ms (401.7 tok/s), drafts accepted 6298 of 6421, 0 checkpoints | 932 windows, avg T 7.89, 7.76 tokens/window, 19.31 ms/window | verify 17.44 draft 1.52 
+strata d7_new_r2 struct: 7230 generated in 18211 ms (397.0 tok/s), drafts accepted 6292 of 6455, 0 checkpoints | 938 windows, avg T 7.88, 7.71 tokens/window, 19.41 ms/window | verify 17.55 draft 1.30 
+strata d7_prev_r2 conv: 1063 generated in 4668 ms (227.7 tok/s), drafts accepted 682 of 907, 0 checkpoints | 381 windows, avg T 3.38, 2.79 tokens/window, 12.25 ms/window | verify 10.81 draft 0.79 
+strata d7_new_r2 conv: 1200 generated in 4939 ms (243.0 tok/s), drafts accepted 789 of 1035, 0 checkpoints | 411 windows, avg T 3.52, 2.92 tokens/window, 12.02 ms/window | verify 10.98 draft 0.70 
+strata d7_prev_r2 prose: 1200 generated in 5178 ms (231.7 tok/s), drafts accepted 667 of 983, 0 checkpoints | 533 windows, avg T 2.84, 2.25 tokens/window, 9.72 ms/window | verify 8.90 draft 0.69 
+strata d7_new_r2 prose: 1200 generated in 5264 ms (228.0 tok/s), drafts accepted 680 of 1008, 0 checkpoints | 520 windows, avg T 2.94, 2.31 tokens/window, 10.12 ms/window | verify 8.99 draft 0.61 

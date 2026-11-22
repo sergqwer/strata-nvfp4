@@ -1,0 +1,5 @@
+strata prof_P_r1 conv: 1071 generated in 5097 ms (210.1 tok/s), drafts accepted 683 of 894, 0 checkpoints | 388 windows, avg T 3.30, 2.76 tokens/window, 13.14 ms/window | verify 12.21 draft 0.77 
+basalt prof_BP_r1 conv: 1148 generated in 5323 ms (215.7 tok/s), drafts accepted 764 of 1017, 0 checkpoints | 388 windows, avg T 3.63, 2.96 tokens/window, 13.72 ms/window | verify 12.42 draft 1.26 
+strata prof_P_r1 struct: 7230 generated in 20081 ms (360.0 tok/s), drafts accepted 6296 of 6447, 0 checkpoints | 934 windows, avg T 7.90, 7.74 tokens/window, 21.50 ms/window | verify 19.89 draft 1.51 
+basalt prof_BP_r1 struct: 7230 generated in 17127 ms (422.2 tok/s), drafts accepted 6300 of 6447, 0 checkpoints | 934 windows, avg T 7.90, 7.74 tokens/window, 18.34 ms/window | verify 16.67 draft 1.66 
+AB-DONE
