@@ -1,0 +1,14 @@
+600.00 W, 405 MHz, 14001 MHz
+d1 prose 1 | 277 rounds | 600 tokens in 7339.8 ms  ->  81.75 tok/s | out 53fde85c40 | wait for rings 4.045  pool 21.129  host 0.047  commit 0.029 ms/round
+d2 prose 1 | 277 rounds | 600 tokens in 7565.2 ms  ->  79.31 tok/s | out 53fde85c40 | wait for rings 4.051  pool 21.934  host 0.032  commit 0.028 ms/round
+d2 prose 2 | 277 rounds | 600 tokens in 7269.0 ms  ->  82.54 tok/s | out 53fde85c40 | wait for rings 3.987  pool 20.911  host 0.044  commit 0.029 ms/round
+d1 prose 2 | 277 rounds | 600 tokens in 7334.7 ms  ->  81.80 tok/s | out 53fde85c40 | wait for rings 4.101  pool 21.051  host 0.034  commit 0.027 ms/round
+d1 prose 3 | 277 rounds | 600 tokens in 7295.0 ms  ->  82.25 tok/s | out 53fde85c40 | wait for rings 4.031  pool 20.986  host 0.039  commit 0.029 ms/round
+d2 prose 3 | 277 rounds | 600 tokens in 7388.8 ms  ->  81.20 tok/s | out 53fde85c40 | wait for rings 4.018  pool 21.330  host 0.037  commit 0.030 ms/round
+d1 struct 1 | 112 rounds | 600 tokens in 7281.2 ms  ->  82.40 tok/s | out 84de0c4d7c | wait for rings 4.764  pool 58.123  host 0.009  commit 0.047 ms/round
+d2 struct 1 | 112 rounds | 600 tokens in 7145.8 ms  ->  83.97 tok/s | out 84de0c4d7c | wait for rings 4.710  pool 56.897  host 0.007  commit 0.068 ms/round
+d2 struct 2 | 112 rounds | 600 tokens in 7175.2 ms  ->  83.62 tok/s | out 84de0c4d7c | wait for rings 4.715  pool 57.155  host 0.008  commit 0.069 ms/round
+d1 struct 2 | 112 rounds | 600 tokens in 7322.1 ms  ->  81.94 tok/s | out 84de0c4d7c | wait for rings 4.955  pool 58.295  host 0.008  commit 0.047 ms/round
+d1 struct 3 | 112 rounds | 600 tokens in 7257.4 ms  ->  82.67 tok/s | out 84de0c4d7c | wait for rings 4.763  pool 57.892  host 0.009  commit 0.048 ms/round
+d2 struct 3 | 112 rounds | 600 tokens in 7172.5 ms  ->  83.65 tok/s | out 84de0c4d7c | wait for rings 4.756  pool 57.007  host 0.008  commit 0.047 ms/round
+600.00 W, 7001 MHz

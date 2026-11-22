@@ -1,0 +1,9 @@
+# ab smoke16 2026-11-21 05:31:32 A=/d/Projects/strata-dec3/bench-d3/d6/strata.exe [] [] B=/d/Projects/strata-dec3/bench-d4/w16/strata.exe [] [--spec 16]
+# 05:31:32 600.00 W, 405 MHz, 14001 MHz
+A struct 1 | 1500 generated in 3514 ms (426.9 tok/s) | 199 windows, avg T 7.78, 7.54 tokens/window, 17.66 ms/window = adapt wait 0.02 + verify 16.33 (GPU-reach wait 5.97 + per-layer host 9.95 [plan 0.25 actq 0.12 jobs 0.03 CPU 9.45] + stage 0.10) draft 1.23 + adapt join 0.00 + other 0.00 | slots 8323 | window up to 8 tokens, 91.2 MiB | free 572
+B struct 1 | 1500 generated in 4256 ms (352.4 tok/s) | 126 windows, avg T 12.97, 11.90 tokens/window, 33.78 ms/window = adapt wait 0.02 + verify 31.16 (GPU-reach wait 12.92 + per-layer host 17.36 [plan 0.47 actq 0.20 jobs 0.04 CPU 16.62] + stage 0.02) draft 2.45 + adapt join 0.00 + other 0.01 | slots 8316 | window up to 16 tokens, 140.1 MiB | free 462
+# 05:32:20 600.00 W, 7001 MHz, 14001 MHz
+summary smoke16 (mean of the runs; B vs A on ms/token and tok/s)
+  struct A n=1  ms/tok 2.342 (2.342..2.342)  tok/s 426.9  ms/window 17.66  T 7.78  tok/window 7.54  verify 16.33  reach 5.97  host 9.95  CPU 9.45  draft 1.23  slots 8323
+  struct B n=1  ms/tok 2.839 (2.839..2.839)  tok/s 352.4  ms/window 33.78  T 12.97  tok/window 11.90  verify 31.16  reach 12.92  host 17.36  CPU 16.62  draft 2.45  slots 8316
+  struct B vs A: ms/token +0.4965 (+21.20%), tok/s -17.45%

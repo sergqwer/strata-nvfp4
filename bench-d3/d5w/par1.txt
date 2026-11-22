@@ -1,0 +1,10 @@
+append parity: 53 / 53 cases bitwise
+  resolve T 1 kind 0: misses 351 (old) 351 (new)
+  resolve T 1 kind 1: misses 0 (old) 0 (new)
+  resolve T 1 kind 2: misses 234 (old) 234 (new)
+  resolve T 8 kind 0: misses 352 (old) 352 (new)
+  resolve T 8 kind 1: misses 0 (old) 0 (new)
+  resolve T 8 kind 2: misses 235 (old) 235 (new)
+resolve parity: 24 / 24 cases
+done
+inner=0

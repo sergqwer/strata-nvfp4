@@ -1,0 +1,22 @@
+600.00 W, 405 MHz, 14001 MHz, 41.50
+r1 head 0  1:46.7 3:48.1 8:55.4  bitwise *** 0
+r1 head 1  1:47.3 3:47.8 8:55.8  bitwise *** 0
+r1 head 2  1:46.6 3:47.2 8:55.1  bitwise *** 0
+r1 head 3  1:46.9 3:47.5 8:55.9  bitwise *** 0
+r1 head 7  1:46.9 3:47.4 8:55.8  bitwise *** 0
+r2 head 0  1:46.9 3:47.7 8:55.4  bitwise *** 0
+r2 head 1  1:47.2 3:47.8 8:55.7  bitwise *** 0
+r2 head 2  1:46.7 3:47.2 8:55.2  bitwise *** 0
+r2 head 3  1:47.0 3:47.8 8:55.7  bitwise *** 0
+r2 head 7  1:47.0 3:47.7 8:55.7  bitwise *** 0
+r3 head 0  1:46.7 3:48.0 8:55.4  bitwise *** 0
+r3 head 1  1:47.4 3:48.1 8:55.9  bitwise *** 0
+r3 head 2  1:46.7 3:47.3 8:55.3  bitwise *** 0
+r3 head 3  1:46.9 3:47.6 8:55.7  bitwise *** 0
+r3 head 7  1:47.1 3:47.6 8:55.9  bitwise *** 0
+r4 head 0  1:46.6 3:47.9 8:55.5  bitwise *** 0
+r4 head 1  1:47.5 3:47.7 8:55.6  bitwise *** 0
+r4 head 2  1:46.4 3:47.3 8:55.2  bitwise *** 0
+r4 head 3  1:47.0 3:47.4 8:55.8  bitwise *** 0
+r4 head 7  1:47.0 3:47.8 8:55.9  bitwise *** 0
+600.00 W, 14507 MHz, 45.29

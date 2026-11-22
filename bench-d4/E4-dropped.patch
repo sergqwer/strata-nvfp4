@@ -1,0 +1,313 @@
+diff --git a/src/kernels/cpu/nvfp4_avx512.cpp b/src/kernels/cpu/nvfp4_avx512.cpp
+index 3353c2ada..4dafa8fe5 100644
+--- a/src/kernels/cpu/nvfp4_avx512.cpp
++++ b/src/kernels/cpu/nvfp4_avx512.cpp
+@@ -15,6 +15,7 @@
+ 
+ #include <immintrin.h>
+ 
++#include <atomic>
+ #include <cmath>
+ #include <cstdlib>
+ #include <cstring>
+@@ -22,6 +23,20 @@
+ namespace strata::kernels::cpu {
+ namespace {
+ 
++// decode round 4 E4: STRATA_NVFP4_REGACC (default 1) = row_dot_reg, the per-token accumulators as named registers; =0 the
++// acc[] loop (MSVC kept acc[] on the stack: a store + reload on every FMA's chain). The same operations in the same order:
++// bitwise (nvfp4_avx512_parity --regacc). Read on first use (behind the CPU check, see below); a test overrides it.
++std::atomic<int> g_regacc{-1};
++inline bool regacc_on() {
++    int v = g_regacc.load(std::memory_order_relaxed);
++    if (v < 0) {
++        const char* e = std::getenv("STRATA_NVFP4_REGACC");
++        v = e == nullptr || std::atoi(e) != 0 ? 1 : 0;
++        g_regacc.store(v, std::memory_order_relaxed);
++    }
++    return v != 0;
++}
++
+ // A compile-time table, not a constructor: this file is compiled for a wide ISA, and a namespace-scope object with a
+ // constructor runs at program start on EVERY CPU - the compiler vectorises the loop with AVX/FMA, and a CPU without them
+ // (Westmere, Sandy Bridge, ...) died with an illegal instruction before main (#2324).  Powers of two: exact.
+@@ -124,13 +139,63 @@ inline void row_dot(const uint8_t* row, const Acts& a, float* res) {
+     for (int t = 0; t < NT; ++t) res[t] = _mm512_reduce_add_ps(acc[t]);
+ }
+ 
++// E4 (gpu-probe r4/cpu/nvfp4_fast.cpp): row_dot's arithmetic with the accumulators as named registers, forced inline,
++// the prefetch distance read once per call. One core 13.9 -> 24.5 GB/s at 1 token (r4 probe).
++#define NVFP4_ACC_STEP(k)                                                                                             \
++    if constexpr (NT > k) {                                                                                           \
++        const block_q8_0* yb = a.y[k] + 2 * ib;                                                                       \
++        const __m512i yv = _mm512_inserti64x4(_mm512_castsi256_si512(_mm256_loadu_si256((const __m256i*) yb[0].qs)), \
++                                              _mm256_loadu_si256((const __m256i*) yb[1].qs), 1);                      \
++        const __m512i ys = _mm512_mask_sub_epi8(yv, neg, zero, yv);                                                   \
++        const __m512i p = _mm512_dpbusd_epi32(zero, g, ys);                                                           \
++        acc##k = _mm512_fmadd_ps(_mm512_mul_ps(sw, a.dy[(size_t) k * a.nb + ib]), _mm512_cvtepi32_ps(p), acc##k);     \
++    }
++#if defined(_MSC_VER)
++#define NVFP4_INLINE __forceinline
++#else
++#define NVFP4_INLINE inline __attribute__((always_inline))
++#endif
+ template <int NT>
++NVFP4_INLINE void row_dot_reg(const uint8_t* row, const Acts& a, float* res, int prefetch_ahead) {
++    static_assert(NT >= 1 && NT <= 7, "Acts holds 7 tokens");
++    const __m512i mag = _mm512_broadcast_i32x4(_mm_setr_epi8(0, 1, 2, 3, 4, 6, 8, 12, 0, 1, 2, 3, 4, 6, 8, 12));
++    const __m512i eight = _mm512_set1_epi8(8);
++    const __m512i zero = _mm512_setzero_si512();
++    __m512 acc0 = _mm512_setzero_ps(), acc1 = acc0, acc2 = acc0, acc3 = acc0, acc4 = acc0, acc5 = acc0, acc6 = acc0;
++    const block_nvfp4* x = (const block_nvfp4*) row;
++    for (int ib = 0; ib < a.nb; ++ib) {
++        if (prefetch_ahead > 0) _mm_prefetch((const char*) (x + ib) + prefetch_ahead, _MM_HINT_T0);
++        const __m512i codes = codes64(x[ib].qs);
++        const __m512i g = _mm512_shuffle_epi8(mag, codes);
++        const __mmask64 neg = _mm512_test_epi8_mask(codes, eight);
++        const __m512 sw = sub_scales(x[ib].d);
++        NVFP4_ACC_STEP(0) NVFP4_ACC_STEP(1) NVFP4_ACC_STEP(2) NVFP4_ACC_STEP(3) NVFP4_ACC_STEP(4) NVFP4_ACC_STEP(5)
++        NVFP4_ACC_STEP(6)
++    }
++    res[0] = _mm512_reduce_add_ps(acc0);
++    if constexpr (NT > 1) res[1] = _mm512_reduce_add_ps(acc1);
++    if constexpr (NT > 2) res[2] = _mm512_reduce_add_ps(acc2);
++    if constexpr (NT > 3) res[3] = _mm512_reduce_add_ps(acc3);
++    if constexpr (NT > 4) res[4] = _mm512_reduce_add_ps(acc4);
++    if constexpr (NT > 5) res[5] = _mm512_reduce_add_ps(acc5);
++    if constexpr (NT > 6) res[6] = _mm512_reduce_add_ps(acc6);
++}
++#undef NVFP4_ACC_STEP
++
++template <int NT, bool REG>
++NVFP4_INLINE void row_any(const uint8_t* row, const Acts& a, float* res, int pf) {
++    if constexpr (REG) row_dot_reg<NT>(row, a, res, pf);
++    else row_dot<NT>(row, a, res);
++}
++
++template <int NT, bool REG = false>
+ void gu_rows(const uint8_t* blob, size_t gu_row, size_t up_off, const Acts& a, float* const* ff, int r0, int r1,
+              float sg, float su) {
+     float g[NT], u[NT];
++    const int pf = REG ? prefetch_distance() : 0;
+     for (int r = r0; r < r1; ++r) {
+-        row_dot<NT>(blob + (size_t) r * gu_row, a, g);
+-        row_dot<NT>(blob + up_off + (size_t) r * gu_row, a, u);
++        row_any<NT, REG>(blob + (size_t) r * gu_row, a, g, pf);
++        row_any<NT, REG>(blob + up_off + (size_t) r * gu_row, a, u, pf);
+         for (int t = 0; t < NT; ++t) {
+             const float gs = g[t] * sg;
+             ff[t][r] = (gs / (1.f + std::exp(-gs))) * (u[t] * su);
+@@ -138,11 +203,12 @@ void gu_rows(const uint8_t* blob, size_t gu_row, size_t up_off, const Acts& a, f
+     }
+ }
+ 
+-template <int NT>
++template <int NT, bool REG = false>
+ void dot_rows(const uint8_t* w, size_t row_bytes, const Acts& a, float* const* out, int r0, int r1, float scale) {
+     float res[NT];
++    const int pf = REG ? prefetch_distance() : 0;
+     for (int r = r0; r < r1; ++r) {
+-        row_dot<NT>(w + (size_t) r * row_bytes, a, res);
++        row_any<NT, REG>(w + (size_t) r * row_bytes, a, res, pf);
+         for (int t = 0; t < NT; ++t) out[t][r] = res[t] * scale;
+     }
+ }
+@@ -151,6 +217,8 @@ void dot_rows(const uint8_t* w, size_t row_bytes, const Acts& a, float* const* o
+ 
+ bool nvfp4_512_fits(int n) { return n % QK_NVFP4 == 0 && n / QK_NVFP4 <= kMaxBlocks; }
+ 
++void nvfp4_512_set_regacc(int on) { g_regacc.store(on < 0 ? -1 : on ? 1 : 0, std::memory_order_relaxed); }
++
+ // Windows wider than 7 run in balanced slices of at most 7: at 8 the accumulators no longer fit beside the loads and
+ // MSVC spills (measured 0.32 ms for 8 tokens against 2 x 0.13 for 4 + 4).
+ template <typename F>
+@@ -165,9 +233,22 @@ inline void slices(int nt, F&& run) {
+ 
+ void nvfp4_512_gu_rows(const uint8_t* blob, size_t gu_row, size_t up_off, int n, const void* const* act, int nt,
+                        float* const* ff, int r0, int r1, float s_gate, float s_up) {
++    const bool reg = regacc_on();
+     slices(nt, [&](int t0, int w) {
+         const Acts a(act + t0, w, n / QK_NVFP4);
+         float* const* f = ff + t0;
++        if (reg) {
++            switch (w) {
++                case 1: gu_rows<1, true>(blob, gu_row, up_off, a, f, r0, r1, s_gate, s_up); break;
++                case 2: gu_rows<2, true>(blob, gu_row, up_off, a, f, r0, r1, s_gate, s_up); break;
++                case 3: gu_rows<3, true>(blob, gu_row, up_off, a, f, r0, r1, s_gate, s_up); break;
++                case 4: gu_rows<4, true>(blob, gu_row, up_off, a, f, r0, r1, s_gate, s_up); break;
++                case 5: gu_rows<5, true>(blob, gu_row, up_off, a, f, r0, r1, s_gate, s_up); break;
++                case 6: gu_rows<6, true>(blob, gu_row, up_off, a, f, r0, r1, s_gate, s_up); break;
++                default: gu_rows<7, true>(blob, gu_row, up_off, a, f, r0, r1, s_gate, s_up); break;
++            }
++            return;
++        }
+         switch (w) {
+             case 1: gu_rows<1>(blob, gu_row, up_off, a, f, r0, r1, s_gate, s_up); break;
+             case 2: gu_rows<2>(blob, gu_row, up_off, a, f, r0, r1, s_gate, s_up); break;
+@@ -182,9 +263,22 @@ void nvfp4_512_gu_rows(const uint8_t* blob, size_t gu_row, size_t up_off, int n,
+ 
+ void nvfp4_512_rows(const uint8_t* w, size_t row_bytes, int n, const void* const* act, int nt, float* const* out,
+                     int r0, int r1, float scale) {
++    const bool reg = regacc_on();
+     slices(nt, [&](int t0, int k) {
+         const Acts a(act + t0, k, n / QK_NVFP4);
+         float* const* o = out + t0;
++        if (reg) {
++            switch (k) {
++                case 1: dot_rows<1, true>(w, row_bytes, a, o, r0, r1, scale); break;
++                case 2: dot_rows<2, true>(w, row_bytes, a, o, r0, r1, scale); break;
++                case 3: dot_rows<3, true>(w, row_bytes, a, o, r0, r1, scale); break;
++                case 4: dot_rows<4, true>(w, row_bytes, a, o, r0, r1, scale); break;
++                case 5: dot_rows<5, true>(w, row_bytes, a, o, r0, r1, scale); break;
++                case 6: dot_rows<6, true>(w, row_bytes, a, o, r0, r1, scale); break;
++                default: dot_rows<7, true>(w, row_bytes, a, o, r0, r1, scale); break;
++            }
++            return;
++        }
+         switch (k) {
+             case 1: dot_rows<1>(w, row_bytes, a, o, r0, r1, scale); break;
+             case 2: dot_rows<2>(w, row_bytes, a, o, r0, r1, scale); break;
+diff --git a/src/kernels/cpu/nvfp4_avx512_parity.cpp b/src/kernels/cpu/nvfp4_avx512_parity.cpp
+index c96490be0..856896036 100644
+--- a/src/kernels/cpu/nvfp4_avx512_parity.cpp
++++ b/src/kernels/cpu/nvfp4_avx512_parity.cpp
+@@ -13,11 +13,16 @@
+ //
+ //     nvfp4_avx512_parity --bw THREADS TOKENS [ggml|avx2]
+ //     nvfp4_avx512_parity --expert pack/experts.bin [layer expert]
++//     nvfp4_avx512_parity --regacc pack/experts.bin [experts]
+ //
+ // --expert: one whole expert as decode runs it (Q8_0 input, gate/up + silu, Q8_0 of the hidden, down) against a
+ // double-precision reference with the checkpoint's global scales, with s_down folded into up (the hidden becomes
+ // ~1e-5 and its Q8_0 scale an FP16 subnormal) and with s_down applied to the output instead.
+ //
++// --regacc (decode round 4 E4): the register-accumulator rows (STRATA_NVFP4_REGACC=1, the default) against the acc[] loop
++// (=0), bit for bit: gate/up through silu with each expert's own tail scales and the down rows, 1..9 tokens, on `experts`
++// real experts (default 32) spread over every layer of the pack, plus random blocks; then one core's time per expert.
++//
+ // DRAM rate: THREADS threads each run whole experts (gate/up through silu, then down) out of 4.2 GB of blobs -
+ // 40x the L3 - for TOKENS tokens; GB/s of weights read. STRATA_NVFP4_PREFETCH sets the kernel's prefetch distance.
+ #include "strata/kernels/cpu/expert_layout.hpp"
+@@ -321,10 +326,98 @@ int expert_e2e(const char* path, int layer, int e) {
+     return 0;
+ }
+ 
++// --regacc: both AVX-512 row paths on the same inputs; any differing float fails
++int regacc_compare(const uint8_t* b, std::mt19937& rng, int& rows_checked) {
++    namespace kc = strata::kernels::cpu;
++    constexpr int NT = 9, F = ROWS / 2;
++    float tail[4];
++    std::memcpy(tail, b + BLOB - 16, sizeof tail);
++    const size_t up_off = (size_t) F * ROW_BYTES, d_off = (size_t) ROWS * ROW_BYTES;
++    Acts ax(N, NT, rng), ah(FF, NT, rng);
++    std::vector<std::vector<float>> f0(NT, std::vector<float>(F)), f1 = f0, o0(NT, std::vector<float>(N)), o1 = o0;
++    std::vector<float*> pf0(NT), pf1(NT), po0(NT), po1(NT);
++    for (int t = 0; t < NT; ++t) { pf0[t] = f0[t].data(); pf1[t] = f1[t].data(); po0[t] = o0[t].data(); po1[t] = o1[t].data(); }
++    int bad = 0;
++    for (int nt = 1; nt <= NT; ++nt) {
++        for (int reg = 0; reg < 2; ++reg) {
++            kc::nvfp4_512_set_regacc(reg);
++            kc::nvfp4_512_gu_rows(b, ROW_BYTES, up_off, N, ax.p.data(), nt, (reg ? pf1 : pf0).data(), 0, F, tail[0], tail[1]);
++            kc::nvfp4_512_rows(b + d_off, D_ROW, FF, ah.p.data(), nt, (reg ? po1 : po0).data(), 0, N, tail[2]);
++        }
++        for (int t = 0; t < nt; ++t) {
++            bad += std::memcmp(f0[t].data(), f1[t].data(), sizeof(float) * F) != 0;
++            bad += std::memcmp(o0[t].data(), o1[t].data(), sizeof(float) * N) != 0;
++            rows_checked += F + N;
++        }
++    }
++    kc::nvfp4_512_set_regacc(-1);
++    return bad;
++}
++
++int regacc_main(const char* path, int count) {
++    namespace kc = strata::kernels::cpu;
++    if (!kc::cpu_avx512_ok()) { std::printf("this CPU has no AVX-512 rows: nothing to compare\n"); return 0; }
++    constexpr size_t STRIDE = 2764816, LAYER = 512 * STRIDE;
++    std::ifstream f(path, std::ios::binary);
++    f.seekg(0, std::ios::end);
++    const int layers = (int) ((size_t) f.tellg() / LAYER);
++    if (layers < 1) { std::fprintf(stderr, "cannot read %s\n", path); return 2; }
++    std::mt19937 rng(20261121);
++    int bad = 0, rows = 0;
++    {   // random blocks first (every code, wide scales)
++        std::vector<uint8_t> w(BLOB);
++        std::uniform_int_distribution<int> byte(0, 255), sc(0x20, 0x5f);
++        for (size_t o = 0; o + BLK <= BLOB - 16; o += BLK) {
++            for (int s = 0; s < 4; ++s) w[o + s] = (uint8_t) sc(rng);
++            for (int q = 4; q < BLK; ++q) w[o + q] = (uint8_t) byte(rng);
++        }
++        const float one[4] = {1.f, 1.f, 1.f, 1.f};
++        std::memcpy(w.data() + BLOB - 16, one, sizeof one);
++        bad += regacc_compare(w.data(), rng, rows);
++    }
++    std::vector<uint8_t> b(BLOB);
++    std::uniform_int_distribution<int> ex(0, 511);
++    for (int i = 0; i < count; ++i) {
++        const int layer = i % layers, e = ex(rng);
++        f.clear();
++        f.seekg((std::streamoff) (layer * LAYER + (size_t) e * STRIDE));
++        if (!f.read((char*) b.data(), (std::streamsize) b.size())) { std::fprintf(stderr, "cannot read %s\n", path); return 2; }
++        const int d = regacc_compare(b.data(), rng, rows);
++        if (d) std::printf("layer %d expert %d: %d token rows differ\n", layer, e, d);
++        bad += d;
++    }
++    std::printf("regacc vs acc[]: random blocks + %d real experts (%d layers), 1..9 tokens, %d output rows: %s (%d differing "
++                "token vectors)\n", count, layers, rows, bad ? "DIFFER" : "bit-identical", bad);
++    // one core, one expert (gate/up + down) out of L2/L3, best of 50
++    Acts ax(N, 8, rng), ah(FF, 8, rng);
++    std::vector<float> ff((size_t) 8 * (ROWS / 2)), out((size_t) 8 * N);
++    float* fp[8];
++    float* op[8];
++    for (int t = 0; t < 8; ++t) { fp[t] = ff.data() + (size_t) t * (ROWS / 2); op[t] = out.data() + (size_t) t * N; }
++    std::printf("\n%-6s %12s %12s %8s   (one expert, gate/up + down, one core, cached; best of 50)\n", "tokens", "acc[] us",
++                "regacc us", "speedup");
++    for (int nt : {1, 2, 3, 4, 7, 8}) {
++        double best[2] = {1e30, 1e30};
++        for (int rep = 0; rep < 50; ++rep)
++            for (int reg = 0; reg < 2; ++reg) {
++                kc::nvfp4_512_set_regacc(reg);
++                const double t0 = now_ms();
++                kc::nvfp4_512_gu_rows(b.data(), ROW_BYTES, (size_t) (ROWS / 2) * ROW_BYTES, N, ax.p.data(), nt, fp, 0, ROWS / 2, 1.f, 1.f);
++                kc::nvfp4_512_rows(b.data() + (size_t) ROWS * ROW_BYTES, D_ROW, FF, ah.p.data(), nt, op, 0, N, 1.f);
++                best[reg] = std::fmin(best[reg], now_ms() - t0);
++            }
++        std::printf("%-6d %12.1f %12.1f %7.2fx\n", nt, best[0] * 1e3, best[1] * 1e3, best[0] / best[1]);
++    }
++    kc::nvfp4_512_set_regacc(-1);
++    std::printf("\nRESULT: %s\n", bad ? "MISMATCH" : "regacc bit-identical");
++    return bad ? 1 : 0;
++}
++
+ }  // namespace
+ 
+ int main(int argc, char** argv) {
+     ggml_cpu_init();
++    if (argc >= 3 && std::string(argv[1]) == "--regacc") return regacc_main(argv[2], argc >= 4 ? std::atoi(argv[3]) : 32);
+     if (argc >= 3 && std::string(argv[1]) == "--expert")
+         return expert_e2e(argv[2], argc >= 4 ? std::atoi(argv[3]) : 0, argc >= 5 ? std::atoi(argv[4]) : 0);
+     const bool has512 = strata::kernels::cpu::cpu_avx512_ok(), has256 = strata::kernels::cpu::cpu_avx2_ok();
+diff --git a/include/strata/kernels/cpu/nvfp4_avx512.hpp b/include/strata/kernels/cpu/nvfp4_avx512.hpp
+index d9ba296d6..27e8a1741 100644
+--- a/include/strata/kernels/cpu/nvfp4_avx512.hpp
++++ b/include/strata/kernels/cpu/nvfp4_avx512.hpp
+@@ -25,4 +25,7 @@ void nvfp4_512_gu_rows(const uint8_t* blob, size_t gu_row, size_t up_off, int n,
+ void nvfp4_512_rows(const uint8_t* w, size_t row_bytes, int n, const void* const* act, int nt, float* const* out,
+                     int r0, int r1, float scale = 1.f);
+ 
++/// Tests: 1 = the register-accumulator rows (the default, STRATA_NVFP4_REGACC), 0 = the acc[] loop, -1 = the env again.
++void nvfp4_512_set_regacc(int on);
++
+ }  // namespace strata::kernels::cpu
+diff --git a/src/kernels/cpu/portable.cpp b/src/kernels/cpu/portable.cpp
+index ff023cf17..8800d90b1 100644
+--- a/src/kernels/cpu/portable.cpp
++++ b/src/kernels/cpu/portable.cpp
+@@ -214,6 +214,7 @@ void nvfp4_256_rows(const uint8_t* w, size_t row_bytes, int n, const void* const
+ bool nvfp4_512_fits(int n) { return false; }
+ void nvfp4_512_gu_rows(const uint8_t* blob, size_t gu_row, size_t up_off, int n, const void* const* act, int nt, float* const* ff, int r0, int r1, float s_gate, float s_up) { cpu_kernel_unreachable("nvfp4_512_gu_rows"); }
+ void nvfp4_512_rows(const uint8_t* w, size_t row_bytes, int n, const void* const* act, int nt, float* const* out, int r0, int r1, float scale) { cpu_kernel_unreachable("nvfp4_512_rows"); }
++void nvfp4_512_set_regacc(int) {}
+ void q2_0_gguf_rows_multi_avx1_legacy(const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a, int nt, float* const* out, int r0, int r1) { cpu_kernel_unreachable("q2_0_gguf_rows_multi_avx1_legacy"); }
+ void q2_0_gguf_rows_multi_avx1(const uint8_t* w, size_t row_bytes, int nblocks, const ActQ* const* a, int nt, float* const* out, int r0, int r1) { cpu_kernel_unreachable("q2_0_gguf_rows_multi_avx1"); }
+ void q8k_quant_avx1(const float* x, void* y, int64_t n) { cpu_kernel_unreachable("q8k_quant_avx1"); }

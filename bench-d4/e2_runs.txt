@@ -1,0 +1,42 @@
+# T1 same placement
+req 0 prompt 19 gen 600 md5 32f832fa48 | DONE 600 19 91.9 2465.8 length 350 530 0 345983 365713 0 0 0.0 19 8687 chunk=0 experts_streamed=0 | wall 2567 ms
+req 1 prompt 98 gen 600 md5 fbe05a25c1 | DONE 600 98 283.5 2057.4 length 515 541 0 258730 281477 0 0 0.0 98 19003 chunk=97 experts_streamed=3170 | wall 2345 ms
+req 0 prompt 19 gen 600 md5 32f832fa48 | DONE 600 19 91.2 2463.3 length 350 530 0 345983 365713 0 0 0.0 19 8687 chunk=0 experts_streamed=0 | wall 2565 ms
+req 1 prompt 98 gen 600 md5 fbe05a25c1 | DONE 600 98 284.6 2171.5 length 513 550 0 263657 286681 0 0 0.0 98 19079 chunk=97 experts_streamed=3175 | wall 2460 ms
+# T2 long 32K + dialog cache
+req 0 prompt 32000 gen 300 md5 1890fdf33a | DONE 300 32000 2342.5 1534.0 length 181 264 0 167354 178100 0 0 0.0 32000 5740 chunk=31999 experts_streamed=19891 | wall 3889 ms
+req 1 prompt 19 gen 200 md5 a8d8926309 | DONE 200 19 70.1 667.5 length 127 173 0 112386 116651 0 0 0.0 19 1429 chunk=0 experts_streamed=0 | wall 740 ms
+req 2 prompt 32300 gen 200 md5 e02af7ee6f | DONE 200 32300 2364.1 969.3 length 116 170 0 115812 120649 0 0 0.0 32300 1271 chunk=32299 experts_streamed=19954 | wall 3340 ms
+req 0 prompt 32000 gen 300 md5 b58a41428a | DONE 300 32000 2349.4 1684.5 length 164 262 0 172610 184684 0 0 0.0 32000 6356 chunk=31999 experts_streamed=20200 | wall 4046 ms
+req 1 prompt 19 gen 200 md5 a2f8d0c09f | DONE 200 19 69.7 687.1 length 119 167 0 113282 117620 0 0 0.0 19 1420 chunk=0 experts_streamed=0 | wall 759 ms
+req 2 prompt 32300 gen 200 md5 5267ce7742 | DONE 200 32300 2363.6 1057.5 length 102 160 0 117555 122428 0 0 0.0 32300 1412 chunk=32299 experts_streamed=20253 | wall 3428 ms
+# T2b long 32K + dialog cache (prompt cache on)
+req 0 prompt 32000 gen 300 md5 d09eb4c117 | DONE 300 32000 2613.7 1373.2 length 182 253 0 161083 172078 0 0 0.0 32000 6002 chunk=31993 experts_streamed=19891 | wall 4006 ms
+req 1 prompt 19 gen 200 md5 3f29081636 | DONE 200 19 251.3 678.8 length 119 167 0 113735 117826 0 0 0.0 19 1214 chunk=0 experts_streamed=0 | wall 932 ms
+req 2 prompt 32300 gen 200 md5 250f666614 | DONE 200 32300 54.4 785.3 length 105 158 32299 117028 120750 0 0 0.0 1 690 chunk=0 experts_streamed=0 | wall 847 ms
+req 3 prompt 219 gen 100 md5 4a179fc1e8 | DONE 100 219 37.3 383.4 length 51 84 218 61481 63453 0 0 0.0 1 387 chunk=0 experts_streamed=0 | wall 425 ms
+# T3 long 32K + dialog cache, same placement (8323 slots; E2 grows from new VRAM: STRATA_KV_GROW_FLOOR=100000)
+req 0 prompt 32000 gen 300 md5 d0085f2587 | DONE 300 32000 2593.9 1393.9 length 175 252 0 162736 174511 0 0 0.0 32000 6449 chunk=31993 experts_streamed=20200 | wall 3999 ms
+req 1 prompt 19 gen 200 md5 a2f8d0c09f | DONE 200 19 232.0 712.9 length 119 164 0 112158 116281 0 0 0.0 19 1319 chunk=0 experts_streamed=0 | wall 947 ms
+req 2 prompt 32300 gen 200 md5 89c3ed2e5d | DONE 200 32300 54.2 869.0 length 102 152 32299 114178 118913 0 0 0.0 1 1087 chunk=0 experts_streamed=0 | wall 929 ms
+req 3 prompt 219 gen 100 md5 187a2496f1 | DONE 100 219 33.3 368.6 length 54 81 218 58512 60495 0 0 0.0 1 465 chunk=0 experts_streamed=0 | wall 404 ms
+req 0 prompt 32000 gen 300 md5 d0085f2587 | DONE 300 32000 2601.6 1391.7 length 175 252 0 162736 174511 0 0 0.0 32000 6449 chunk=31993 experts_streamed=20200 | wall 4005 ms
+req 1 prompt 19 gen 200 md5 99568cd50c | DONE 200 19 218.7 682.3 length 122 168 0 111886 116422 0 0 0.0 19 1658 chunk=0 experts_streamed=0 | wall 903 ms
+req 2 prompt 32300 gen 200 md5 26ff76344d | DONE 200 32300 48.7 785.2 length 106 157 32299 115611 119682 0 0 0.0 1 798 chunk=0 experts_streamed=0 | wall 840 ms
+req 3 prompt 219 gen 100 md5 c6fb79c9d0 | DONE 100 219 32.8 336.3 length 63 80 218 52779 55283 0 0 0.0 1 877 chunk=0 experts_streamed=0 | wall 371 ms
+# T4 long 32K + dialog cache, fixed placement in serve (exact.sh's switches, 8323 slots; E2 grows from new VRAM)
+req 0 prompt 32000 gen 300 md5 767128ce85 | DONE 300 32000 2608.2 3467.0 length 175 248 0 82274 179040 0 0 0.0 32000 0 chunk=31993 experts_streamed=20200 | wall 6085 ms
+req 1 prompt 19 gen 200 md5 1fe403b13b | DONE 200 19 288.6 2336.5 length 119 163 0 50153 117120 0 0 0.0 19 0 chunk=0 experts_streamed=0 | wall 2626 ms
+req 2 prompt 32300 gen 200 md5 308b47de9b | DONE 200 32300 47.8 2428.1 length 100 145 32299 50799 117600 0 0 0.0 1 0 chunk=0 experts_streamed=0 | wall 2480 ms
+req 3 prompt 219 gen 100 md5 132db21c0c | DONE 100 219 32.3 1174.4 length 55 80 218 25507 60000 0 0 0.0 1 0 chunk=0 experts_streamed=0 | wall 1207 ms
+req 0 prompt 32000 gen 300 md5 767128ce85 | DONE 300 32000 2616.4 3431.0 length 175 248 0 82274 179040 0 0 0.0 32000 0 chunk=31993 experts_streamed=20200 | wall 6057 ms
+req 1 prompt 19 gen 200 md5 1fe403b13b | DONE 200 19 285.9 2205.9 length 119 163 0 50153 117120 0 0 0.0 19 0 chunk=0 experts_streamed=0 | wall 2492 ms
+req 2 prompt 32300 gen 200 md5 308b47de9b | DONE 200 32300 48.1 2493.8 length 100 145 32299 50799 117600 0 0 0.0 1 0 chunk=0 experts_streamed=0 | wall 2546 ms
+req 3 prompt 219 gen 100 md5 132db21c0c | DONE 100 219 31.9 1254.5 length 55 80 218 25507 60000 0 0 0.0 1 0 chunk=0 experts_streamed=0 | wall 1287 ms
+# T5 from-cache growth + trim + regrow with STRATA_SESSION_GROW_CHECK
+req 0 prompt 32000 gen 300 md5 d09eb4c117 | DONE 300 32000 2596.2 1340.9 length 182 253 0 161083 172078 0 0 0.0 32000 6002 chunk=31993 experts_streamed=19891 | wall 3949 ms
+req 1 prompt 19 gen 200 md5 3f29081636 | DONE 200 19 222.5 688.0 length 119 167 0 113735 117826 0 0 0.0 19 1214 chunk=0 experts_streamed=0 | wall 913 ms
+req 2 prompt 32300 gen 200 md5 9ad719d1b5 | DONE 200 32300 52.8 829.8 length 101 162 32299 120316 124469 0 0 0.0 1 811 chunk=0 experts_streamed=0 | wall 889 ms
+req 3 prompt 219 gen 100 md5 893bf4debd | DONE 100 219 38.1 362.1 length 52 81 218 60150 61643 0 0 0.0 1 277 chunk=0 experts_streamed=0 | wall 404 ms
+# T6 switch STRATA_SESSION_GROW=0
+req 0 prompt 19 gen 200 md5 a2f8d0c09f | DONE 200 19 91.5 945.5 length 120 161 0 102957 111017 0 0 0.0 19 4663 chunk=0 experts_streamed=0 | wall 1047 ms

@@ -1,0 +1,12 @@
+ident base done 01:16:03
+build rc=0 01:16:13
+parity done
+cc rc=0
+OK native_bf16.cu sm_75 
+OK native_bf16.cu sm_86 
+OK native_bf16.cu sm_89 
+OK native_bf16.cu sm_120 
+OK native_router.cu sm_75 
+OK native_router.cu sm_86 
+OK native_router.cu sm_89 
+OK native_router.cu sm_120 

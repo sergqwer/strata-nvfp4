@@ -147,7 +147,11 @@ std::vector<std::pair<std::string, std::string>> nv_default_env(int major, int m
             // combine's count (with the next attention layer's indexer-tail snapshot on that branch); gdn_mid's tile copies after
             // its grid wait (their flood held the read up); route + doorbell in one launch, the rows first.  All bitwise;
             // nsys prose front GDN 77.6 -> ~72, attention 79.1 -> ~75 us.
-            {"STRATA_EARLY_READ", "1"},
+            // STRATA_EARLY_READ (the early read above) left the table in decode round 4 E4: serve e2 vs e2 + =0, 5 ABAB pairs, 600 W:
+            // struct 16.98 -> 16.73 ms/window (5 of 5), prose 8.83 -> 8.90 (noise); bitwise; =1 still turns it on (bench-d4 NOTES-d4.md E4).
+            // decode round 3 D6: PDL edges in the MTP draft graphs (their kernels read only weights before the wait): the same drafts
+            // (dumps identical), CLI fixed struct: chain steps 0.791 -> 0.774 ms a round (6 runs each), round graph 0.309 -> 0.305 (bench-d3 NOTES-d3.md D6).
+            {"STRATA_MTP_PDL", "1"},
             {"STRATA_GDN_MID_HEAD", "2"},
             {"STRATA_ROUTE_DB", "2"},
             // dec/pf-num (NOTES-pfnum.md): the prompt path's QSA block scores on int8 tensor cores (i8x6, ~2x the 3xTF32 kernel,

@@ -1,0 +1,4 @@
+600.00 W, 405 MHz, 14001 MHz, 40.89
+r1 depth 0 pieces 4  1:46.9 3:49.3 8:59.6  bitwise
+r1 depth 2 pieces 4  1:45.7 3:47.4 8:57.3  bitwise
+600.00 W, 14507 MHz, 42.93

@@ -97,6 +97,10 @@ void fused_gr_v3_print_resources();
 /// The bench and tests only: the hyper-connection read v4 (0 = v3, 1 = v4, 2 = v4 with programmatic dependent launch
 /// on sm_90+); -1 = STRATA_GR_V4 (unset: 2, the fork's default).
 void fused_gr_set_v4(int mode);
+/// The bench and tests only (dec-round3 D3; 1 = on, the default, 0 = the old path, -1 = the env): hc8 `up` stages lo with
+/// every load in flight at once (STRATA_HC8_LOSTAGE); the early read counts its gate pass after the dots (STRATA_ER_LATE_PASS).
+void fused_gr_set_hc8_lostage(int on);
+void fused_gr_set_er_late_pass(int on);
 /// The bench and tests only: the hyper-connection read v5 on top of v4's dispatch (1) or off (0, the default);
 /// -1 = STRATA_GR_V5 (=1: on).  The same bits as v4 (gr_v4_check); used only where v4 runs (STRATA_GR_V4 1 or 2).
 void fused_gr_set_v5(int on);

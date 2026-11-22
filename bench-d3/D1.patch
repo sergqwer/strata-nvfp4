@@ -1,0 +1,94 @@
+diff --git a/src/kernels/cuda/native_bf16.cu b/src/kernels/cuda/native_bf16.cu
+index 14fbaf648..c5e6f0167 100644
+--- a/src/kernels/cuda/native_bf16.cu
++++ b/src/kernels/cuda/native_bf16.cu
+@@ -435,8 +435,11 @@ void bf16_gemv_fp32_mmvf_multi(const float* x, int64_t ldx, const uint16_t* w, f
+             throw std::runtime_error(std::string("bf16_gemv_fp32_mmvf_multi launch: ") + cudaGetErrorString(result));
+         return;
+     }
+-    // 9..16 rows (wide builds only): one exact instantiation per row count, each row's dot independent of the others.  7 and 8
+-    // rows stay with the default case below, the instantiation they always had.
++    // 9..16 rows (wide builds only): one exact instantiation per row count, each row's dot independent of the others.
++    // dec/round3 D1 (STRATA_MMVF_EXACT78=0 turns it off): 7 and 8 rows get exact instantiations too instead of the default
++    // case's <N, 8, false> with its runtime row guards; the same per-row FMAs and reductions (bitwise), router at T = 8
++    // 8.02 -> 6.02 us in gpu-probe's router_poc.
++    static const bool exact78 = [] { const char* v = std::getenv("STRATA_MMVF_EXACT78"); return !(v != nullptr && v[0] == '0'); }();
+ #if STRATA_VERIFY_MAX_T > 8
+ #define STRATA_MMVF_W(N, T) case T: launch_pdl(bf16_f32_mmvf_multi_kernel<N, T, true>, dim3((unsigned) n_out), dim3(N), 0, st, x, ldx, w, y, ldy, (int) n_in, n_tok, mmvf_fast()); break;
+ #if STRATA_VERIFY_MAX_T > 12
+@@ -459,6 +462,13 @@ void bf16_gemv_fp32_mmvf_multi(const float* x, int64_t ldx, const uint16_t* w, f
+         case 4: launch_pdl(bf16_f32_mmvf_multi_kernel<N, 4, true>, dim3((unsigned) n_out), dim3(N), 0, st, x, ldx, w, y, ldy, (int) n_in, n_tok, mmvf_fast()); break; \
+         case 5: launch_pdl(bf16_f32_mmvf_multi_kernel<N, 5, true>, dim3((unsigned) n_out), dim3(N), 0, st, x, ldx, w, y, ldy, (int) n_in, n_tok, mmvf_fast()); break; \
+         case 6: launch_pdl(bf16_f32_mmvf_multi_kernel<N, 6, true>, dim3((unsigned) n_out), dim3(N), 0, st, x, ldx, w, y, ldy, (int) n_in, n_tok, mmvf_fast()); break; \
++        case 7: case 8: \
++            if (exact78) { \
++                if (n_tok == 7) launch_pdl(bf16_f32_mmvf_multi_kernel<N, 7, true>, dim3((unsigned) n_out), dim3(N), 0, st, x, ldx, w, y, ldy, (int) n_in, n_tok, mmvf_fast()); \
++                else launch_pdl(bf16_f32_mmvf_multi_kernel<N, 8, true>, dim3((unsigned) n_out), dim3(N), 0, st, x, ldx, w, y, ldy, (int) n_in, n_tok, mmvf_fast()); \
++                break; \
++            } \
++            [[fallthrough]]; \
+         default: launch_pdl(bf16_f32_mmvf_multi_kernel<N, 8, false>, dim3((unsigned) n_out), dim3(N), 0, st, x, ldx, w, y, ldy, (int) n_in, n_tok, mmvf_fast()); break; \
+     } break
+     switch (mmvf_block_size(n_in)) {
+diff --git a/src/kernels/router_chain_bench.cpp b/src/kernels/router_chain_bench.cpp
+index 588c60138..5a145145e 100644
+--- a/src/kernels/router_chain_bench.cpp
++++ b/src/kernels/router_chain_bench.cpp
+@@ -113,7 +113,7 @@ int main(int argc, char** argv) {
+                 CK(cudaMalloc((void**) &dws[l], (size_t) no * ni * 2));
+                 CK(cudaMemcpy(dws[l], w.data(), (size_t) no * ni * 2 < w.size() * 2 ? (size_t) no * ni * 2 : w.size() * 2, cudaMemcpyHostToDevice));
+             }
+-            for (int tk : {1, 2, 3, 4, 6}) {
++            for (int tk : {1, 2, 3, 4, 6, 7, 8}) {
+                 cudaGraph_t g;
+                 cudaGraphExec_t ge;
+                 CK(cudaStreamBeginCapture(s, cudaStreamCaptureModeThreadLocal));
+@@ -171,5 +171,48 @@ int main(int argc, char** argv) {
+         cudaGraphExecDestroy(ge);
+         cudaGraphDestroy(g);
+     }
++    {   // dec/round3 D1: mmvf + native_route_doorbell_res (the engine's STRATA_ROUTE_DB path) with the rows and ids to mapped host
++        // memory, as verify's m_x_ / m_ids_; STRATA_ROUTE_DB=2 (EARLY) and STRATA_ROUTE_DB_BLOCKS pick the kernel's shape
++        float* hxo;
++        int32_t* hio;
++        CK(cudaHostAlloc((void**) &hxo, xh.size() * 4, cudaHostAllocMapped | cudaHostAllocPortable));
++        CK(cudaHostAlloc((void**) &hio, (size_t) T * KK * 4, cudaHostAllocMapped | cudaHostAllocPortable));
++        float* dhxo;
++        int32_t* dhio;
++        CK(cudaHostGetDevicePointer((void**) &dhxo, hxo, 0));
++        CK(cudaHostGetDevicePointer((void**) &dhio, hio, 0));
++        for (int mode = 0; mode < 2; ++mode) {
++            cudaGraph_t g;
++            cudaGraphExec_t ge;
++            CK(cudaStreamBeginCapture(s, cudaStreamCaptureModeThreadLocal));
++            for (int l = 0; l < L; ++l) {
++                if (mode == 1) K::bf16_gemv_fp32_mmvf_multi(dx, N, dw[l], dlog, NE, N, NE, T, s);
++                K::native_route_doorbell_res(dlog, dids, dwt, T, dx, dres, NE, (int64_t) T * N, dhxo, dhio, dseq, s);
++            }
++            CK(cudaStreamEndCapture(s, &g));
++            CK(cudaGraphInstantiate(&ge, g, nullptr, nullptr, 0));
++            const uint32_t seq0 = *(volatile uint32_t*) hseq;
++            for (int i = 0; i < 5; ++i) CK(cudaGraphLaunch(ge, s));
++            CK(cudaStreamSynchronize(s));
++            std::vector<float> ms;
++            for (int r = 0; r < reps; ++r) {
++                CK(cudaEventRecord(e0, s));
++                CK(cudaGraphLaunch(ge, s));
++                CK(cudaEventRecord(e1, s));
++                CK(cudaEventSynchronize(e1));
++                float m = 0;
++                CK(cudaEventElapsedTime(&m, e0, e1));
++                ms.push_back(m);
++            }
++            const uint32_t rings = *(volatile uint32_t*) hseq - seq0;
++            const bool rows_ok = std::memcmp(hxo, xh.data(), xh.size() * 4) == 0;
++            std::sort(ms.begin(), ms.end());
++            std::printf("T %d %-20s : %6.2f us per layer (median of %d graphs of %d layers; rings %u of %d, rows %s)\n", T,
++                        mode ? "mmvf+route_db host" : "route_db host", 1e3 * ms[ms.size() / 2] / L, reps, L, rings, (5 + reps) * L,
++                        rows_ok ? "ok" : "DIFFER");
++            cudaGraphExecDestroy(ge);
++            cudaGraphDestroy(g);
++        }
++    }
+     return 0;
+ }

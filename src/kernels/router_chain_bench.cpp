@@ -113,7 +113,7 @@ int main(int argc, char** argv) {
                 CK(cudaMalloc((void**) &dws[l], (size_t) no * ni * 2));
                 CK(cudaMemcpy(dws[l], w.data(), (size_t) no * ni * 2 < w.size() * 2 ? (size_t) no * ni * 2 : w.size() * 2, cudaMemcpyHostToDevice));
             }
-            for (int tk : {1, 2, 3, 4, 6}) {
+            for (int tk : {1, 2, 3, 4, 6, 7, 8}) {
                 cudaGraph_t g;
                 cudaGraphExec_t ge;
                 CK(cudaStreamBeginCapture(s, cudaStreamCaptureModeThreadLocal));
@@ -170,6 +170,49 @@ int main(int argc, char** argv) {
         std::printf("T %d %-20s : %6.2f us per layer (median of %d graphs of %d layers)\n", T, names[mode], 1e3 * ms[ms.size() / 2] / L, reps, L);
         cudaGraphExecDestroy(ge);
         cudaGraphDestroy(g);
+    }
+    {   // dec/round3 D1: mmvf + native_route_doorbell_res (the engine's STRATA_ROUTE_DB path) with the rows and ids to mapped host
+        // memory, as verify's m_x_ / m_ids_; STRATA_ROUTE_DB=2 (EARLY) and STRATA_ROUTE_DB_BLOCKS pick the kernel's shape
+        float* hxo;
+        int32_t* hio;
+        CK(cudaHostAlloc((void**) &hxo, xh.size() * 4, cudaHostAllocMapped | cudaHostAllocPortable));
+        CK(cudaHostAlloc((void**) &hio, (size_t) T * KK * 4, cudaHostAllocMapped | cudaHostAllocPortable));
+        float* dhxo;
+        int32_t* dhio;
+        CK(cudaHostGetDevicePointer((void**) &dhxo, hxo, 0));
+        CK(cudaHostGetDevicePointer((void**) &dhio, hio, 0));
+        for (int mode = 0; mode < 2; ++mode) {
+            cudaGraph_t g;
+            cudaGraphExec_t ge;
+            CK(cudaStreamBeginCapture(s, cudaStreamCaptureModeThreadLocal));
+            for (int l = 0; l < L; ++l) {
+                if (mode == 1) K::bf16_gemv_fp32_mmvf_multi(dx, N, dw[l], dlog, NE, N, NE, T, s);
+                K::native_route_doorbell_res(dlog, dids, dwt, T, dx, dres, NE, (int64_t) T * N, dhxo, dhio, dseq, s);
+            }
+            CK(cudaStreamEndCapture(s, &g));
+            CK(cudaGraphInstantiate(&ge, g, nullptr, nullptr, 0));
+            const uint32_t seq0 = *(volatile uint32_t*) hseq;
+            for (int i = 0; i < 5; ++i) CK(cudaGraphLaunch(ge, s));
+            CK(cudaStreamSynchronize(s));
+            std::vector<float> ms;
+            for (int r = 0; r < reps; ++r) {
+                CK(cudaEventRecord(e0, s));
+                CK(cudaGraphLaunch(ge, s));
+                CK(cudaEventRecord(e1, s));
+                CK(cudaEventSynchronize(e1));
+                float m = 0;
+                CK(cudaEventElapsedTime(&m, e0, e1));
+                ms.push_back(m);
+            }
+            const uint32_t rings = *(volatile uint32_t*) hseq - seq0;
+            const bool rows_ok = std::memcmp(hxo, xh.data(), xh.size() * 4) == 0;
+            std::sort(ms.begin(), ms.end());
+            std::printf("T %d %-20s : %6.2f us per layer (median of %d graphs of %d layers; rings %u of %d, rows %s)\n", T,
+                        mode ? "mmvf+route_db host" : "route_db host", 1e3 * ms[ms.size() / 2] / L, reps, L, rings, (5 + reps) * L,
+                        rows_ok ? "ok" : "DIFFER");
+            cudaGraphExecDestroy(ge);
+            cudaGraphDestroy(g);
+        }
     }
     return 0;
 }

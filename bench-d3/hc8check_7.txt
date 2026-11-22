@@ -1,0 +1,32 @@
+strata: STRATA_HC_Q8=1: the 8-bit hyper-connection read hc8 (int8 rows + fp16 scales, fp32 sums), programmatic dependent launch
+strata: the hyper-connection read v4 (programmatic dependent launch)
+gr_hc8_check on NVIDIA GeForce RTX 5090 (170 SMs)
+  q8_1 image vs native_quantize_q8_1 (apply=0 inject=0): 0 of 640 blocks differ, 0 codes
+  q8_1 image vs native_quantize_q8_1 (apply=0 inject=1): 0 of 640 blocks differ, 0 codes
+  q8_1 image vs native_quantize_q8_1 (apply=1 inject=0): 0 of 640 blocks differ, 0 codes
+  q8_1 image vs native_quantize_q8_1 (apply=1 inject=1): 0 of 640 blocks differ, 0 codes
+  window invariance (T 1..8, early and late columns), graph replays, q8_1 image: 124 of 124 cases pass
+  accuracy, max |err| / RMS over 8 tokens (pending write + inject):
+    read             R_out      rs         lo         inject     mixed
+    hc8 (Q8_0)       2.06e-06   1.04e-07   8.70e-07   6.88e-07   2.57e-06
+    v4 (bf16)        2.06e-06   1.29e-07          -   8.97e-07   3.42e-06
+  time per read (down + up), 24 weight sets in rotation, medians of 15 replays of 24 reads:
+    T   v4 bf16 us   hc8 old   lostage   +flag 1   lost - old  flag+lost - old
+    1      11.78       7.85       7.73       6.58      -0.12      -1.27
+    2      13.15       8.20       8.11       9.10      -0.09      +0.90
+    3      14.59       9.81       9.70       9.75      -0.11      -0.06
+    4      16.48       9.67       9.18       9.74      -0.48      +0.07
+    5      18.17      10.83      10.23      10.90      -0.60      +0.07
+    6      19.68      11.52      10.93      12.01      -0.59      +0.49
+    7      24.45      12.29      11.61      12.61      -0.68      +0.32
+    8      26.35      13.34      12.46      13.47      -0.87      +0.14
+  early read (gated on the combine), 24 layers a graph, 4 small kernels before each combine, us a layer (medians of 31):
+    T   old       lostage   +flag 2   +flag 3   l - old  f3 - old  bitwise
+    2     16.31     16.25     16.03     16.82    -0.06    +0.51   yes
+    3     16.15     15.97     15.94     16.29    -0.19    +0.14   yes
+    4     18.02     17.62     17.47     18.10    -0.40    +0.08   yes
+    5     19.05     18.51     18.41     19.05    -0.54    -0.01   yes
+    6     18.71     18.08     18.01     18.49    -0.64    -0.23   yes
+    7     21.04     20.25     20.17     21.00    -0.79    -0.04   yes
+    8     20.47     19.63     19.51     19.98    -0.85    -0.50   yes
+gr_hc8_check: 0 failures

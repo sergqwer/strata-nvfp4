@@ -288,6 +288,15 @@ void qsa_set_kv_resident(int64_t cells);
 /// captured graphs stay valid.  Set before sizing and initializing the session and the drafter.
 void qsa_set_kv_elastic(bool enabled, int64_t init_cells);
 bool qsa_kv_elastic();
+/// E2: a streamed (KV streaming, mode 1) state's indexer pooled keys and the primary's RoPE table get the same
+/// treatment: addresses for the whole context, physical memory for the first cells (qsa_set_kv_elastic's init_cells),
+/// grown / shrunk by the calls below with the K/V pools.  Set before sizing and initializing the session.
+void qsa_set_session_elastic(bool enabled);
+/// Whether any such table pool was made (the session then grows like an elastic K/V does: kvg_ensure).
+bool qsa_session_elastic();
+/// A whole new table for an elastic table array at `dev` (`floats` of them): its host copy takes `src`, its mapped
+/// rows are uploaded (synchronous).  -1: `dev` is no elastic table (copy it yourself); 0: failed; 1: done.
+int qsa_elastic_table_store(const float* dev, const float* src, size_t floats);
 /// batch-vram: the states made from now on belong to this owner (0: the main session and its drafter, the default;
 /// 1 + b: --batch slot b, which grows on its own).  Every call below takes the owner its pools were made under.
 void qsa_set_kv_elastic_owner(int owner);

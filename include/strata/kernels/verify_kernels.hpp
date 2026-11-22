@@ -102,6 +102,9 @@ void wait_flag_ge_stamped(const uint32_t* flag, uint32_t value, unsigned long lo
 /// the GPU's %globaltimer (ns) into buf[i] (a one-thread kernel: the verify window's stage profiler).  Inside a PDL
 /// stretch (pdl.hpp) the stamp passes the early launch on, so a profiled window keeps the chain it measures.
 void gpu_stamp(unsigned long long* buf, int i, void* stream);
+/// multiarch tests (STRATA_EMULATE_SMS=N): hold every multiprocessor past the first keep_sms with an idle kernel for the life of the
+/// process (CUDA only); returns how many it holds (0: not started)
+int sm_hog_start(int keep_sms);
 /// an empty one-thread kernel (a graph node that does nothing: STRATA_DUMMY_NODES measures what a node costs in a window)
 void gpu_noop(void* stream);
 /// dst[r][0, w) = src[r][0, w) for `rows` rows of source stride `src_w` floats (the query half of each q/gate head

@@ -1,0 +1,3 @@
+strata: STRATA_HC_Q8=1: the 8-bit hyper-connection read hc8 (int8 rows + fp16 scales, fp32 sums), programmatic dependent launch
+strata: the hyper-connection read v4 (programmatic dependent launch)
+strata early read: the combine's gate timed out (block 10, 0 of 10): results invalid

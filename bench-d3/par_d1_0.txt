@@ -1,0 +1,54 @@
+  modulo vs interleave head pairing          yes  (142.04% apart)
+  decay before vs after the update           yes  (76.93% apart)
+
+  o vs reference                             rel 1.942e-07
+  state (read via (S,h_v,S)) vs reference    rel 4.023e-08
+  gate=beta=0 from a zero state is a no-op   yes
+
+  conv weight layout is observable           yes  (132.6% apart)
+  conv out vs reference                      rel 1.092e-08
+  conv state slide (mapped) vs reference     rel 0.000e+00
+
+  eps on sum vs on mean is observable        yes  (1031.4% apart)
+  l2_norm vs reference                       rel 0.000e+00
+
+  out norm (rms * ssm_norm * sigmoid z)      rel 1.041e-08
+  sigmoid vs SiLU on the gate is observable  yes  (86.78% apart)
+
+  gdn_ab_multi T=1..8 == fused_gdn_ab        bitwise (8 cases)
+  gdn_step_norm_multi T=1..8 == single-token bitwise (79 cases)
+strata: STRATA_GDN_MID=1: GDN layers on gdn_mid (170 CTAs)
+  gdn_mid timing T=1 (cold L2 per launch): chain 64.2 us, gdn_mid 47.1 us
+    phases (mean / max over CTAs, us): 0:0.0/0.1 1:5.4/10.2 2:5.4/10.2 3:30.1/34.5 4:32.5/34.0 5:37.8/38.3 6:38.0/38.5 7:38.7/39.2 8:39.5/39.6 9:39.9/40.2 10:43.2/43.6
+    cta   0: pair end 31.1, qkv released 26.0 / 26.0, rec start -1.0
+    cta  60: pair end 33.1, qkv released 28.0 / 28.0, rec start -1.0
+    cta  81: pair end 31.4, qkv released 25.5 / 23.8, rec start -1.0
+    cta  82: pair end 32.9, qkv released 27.6 / 20.3, rec start -1.0
+    cta 121: pair end 28.4, qkv released 25.2 / 18.8, rec start -1.0
+    cta 122: pair end 28.9, qkv released 27.6 / 26.3, rec start 32.4
+    cta 145: pair end 26.2, qkv released 25.7 / 24.8, rec start 31.7
+    cta 169: pair end 27.6, qkv released 25.3 / 24.2, rec start 32.8
+  gdn_mid timing T=3 (cold L2 per launch): chain 71.2 us, gdn_mid 51.2 us
+    phases (mean / max over CTAs, us): 0:0.0/0.0 1:5.4/10.8 2:5.4/10.8 3:30.5/34.6 4:34.2/34.9 5:40.3/40.9 6:40.5/41.0 7:42.1/42.6 8:42.9/43.2 9:43.6/44.1 10:46.8/47.5
+    cta   0: pair end 32.1, qkv released 26.8 / 26.8, rec start -1.0
+    cta  60: pair end 33.2, qkv released 28.7 / 28.7, rec start -1.0
+    cta  81: pair end 31.0, qkv released 25.5 / 25.2, rec start -1.0
+    cta  82: pair end 33.2, qkv released 28.4 / 22.7, rec start -1.0
+    cta 121: pair end 28.0, qkv released 25.8 / 17.5, rec start -1.0
+    cta 122: pair end 26.6, qkv released 25.8 / 27.5, rec start 33.8
+    cta 145: pair end 26.7, qkv released 25.5 / 24.3, rec start 34.6
+    cta 169: pair end 26.9, qkv released 25.4 / 24.3, rec start 34.2
+  gdn_mid timing T=8 (cold L2 per launch): chain 109.5 us, gdn_mid 61.4 us
+    phases (mean / max over CTAs, us): 0:0.0/0.0 1:7.9/13.0 2:8.2/13.0 3:32.5/36.1 4:36.9/36.9 5:46.2/46.6 6:46.4/46.8 7:50.0/50.4 8:50.8/51.2 9:52.3/53.1 10:57.4/58.3
+    cta   0: pair end 33.5, qkv released 28.2 / 28.1, rec start -1.0
+    cta  60: pair end 33.9, qkv released 29.8 / 29.8, rec start -1.0
+    cta  81: pair end 33.8, qkv released 29.6 / 28.9, rec start -1.0
+    cta  82: pair end 34.2, qkv released 30.7 / 25.7, rec start -1.0
+    cta 121: pair end 31.6, qkv released 29.3 / 20.2, rec start -1.0
+    cta 122: pair end 31.6, qkv released 31.3 / 29.5, rec start 36.9
+    cta 145: pair end 29.1, qkv released 27.1 / 28.4, rec start 36.9
+    cta 169: pair end 29.3, qkv released 28.1 / 26.9, rec start 36.9
+  gdn_mid == dense_tc+conv+ab+step_norm+q8_1+dense_tc bitwise (32 cases)
+  gdn_commit_layers == per-layer commit      bitwise (8 cases, 5 layers)
+
+gdn: 0 failures

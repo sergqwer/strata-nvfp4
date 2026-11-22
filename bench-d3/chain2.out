@@ -1,0 +1,39 @@
+# ab d1 2026-11-21 01:21:20 A=D:/Projects/strata-dec3/bench-d3/base/strata.exe [] B=D:/Projects/strata-dec3/bench-d3/d1/strata.exe []
+# 01:21:20 600.00 W, 405 MHz, 14001 MHz
+A struct 1 | 1500 generated in 3726 ms (402.5 tok/s) | 199 windows, avg T 7.82, 7.54 tokens/window, 18.73 ms/window = adapt wait 0.02 + verify 17.46 (GPU-reach wait 7.45 + per-layer host 9.55 [plan 0.26 actq 0.12 jobs 0.03 CPU 9.09] + stage 0.04) draft 1.19 + adapt join 0.00 + other 0.00
+B struct 1 | 1500 generated in 3567 ms (420.5 tok/s) | 199 windows, avg T 7.82, 7.54 tokens/window, 17.92 ms/window = adapt wait 0.03 + verify 16.64 (GPU-reach wait 6.58 + per-layer host 9.65 [plan 0.27 actq 0.12 jobs 0.03 CPU 9.19] + stage 0.04) draft 1.19 + adapt join 0.00 + other 0.00
+B struct 2 | 1500 generated in 3563 ms (421.0 tok/s) | 196 windows, avg T 7.86, 7.65 tokens/window, 18.18 ms/window = adapt wait 0.02 + verify 16.36 (GPU-reach wait 6.45 + per-layer host 9.44 [plan 0.26 actq 0.12 jobs 0.03 CPU 8.99] + stage 0.04) draft 1.24 + adapt join 0.00 + other 0.01
+A struct 2 | 1500 generated in 3585 ms (418.4 tok/s) | 200 windows, avg T 7.80, 7.50 tokens/window, 17.93 ms/window = adapt wait 0.02 + verify 16.60 (GPU-reach wait 6.55 + per-layer host 9.64 [plan 0.26 actq 0.12 jobs 0.02 CPU 9.19] + stage 0.04) draft 1.23 + adapt join 0.00 + other 0.00
+A struct 3 | 1500 generated in 3537 ms (424.1 tok/s) | 199 windows, avg T 7.81, 7.54 tokens/window, 17.77 ms/window = adapt wait 0.02 + verify 16.49 (GPU-reach wait 6.66 + per-layer host 9.40 [plan 0.26 actq 0.12 jobs 0.03 CPU 8.96] + stage 0.04) draft 1.20 + adapt join 0.00 + other 0.00
+B struct 3 | 1500 generated in 3551 ms (422.4 tok/s) | 199 windows, avg T 7.85, 7.54 tokens/window, 17.84 ms/window = adapt wait 0.02 + verify 16.58 (GPU-reach wait 6.46 + per-layer host 9.71 [plan 0.26 actq 0.12 jobs 0.02 CPU 9.26] + stage 0.04) draft 1.18 + adapt join 0.00 + other 0.00
+# 01:26:41 600.00 W, 7001 MHz, 14001 MHz
+summary d1 (mean of the runs; B vs A on ms/window and tok/s)
+  struct A n=3  ms/window 18.14 (17.77..18.73)  tok/s 415.0  T 7.81  tok/window 7.53  verify 16.85  reach 6.89  host 9.53
+  struct B n=3  ms/window 17.98 (17.84..18.18)  tok/s 421.3  T 7.84  tok/window 7.58  verify 16.53  reach 6.50  host 9.60
+  struct B vs A: ms/window -0.163 (-0.90%), tok/s +1.52%
+# ab d1p 2026-11-21 01:26:41 A=D:/Projects/strata-dec3/bench-d3/base/strata.exe [] B=D:/Projects/strata-dec3/bench-d3/d1/strata.exe []
+# 01:26:41 600.00 W, 7001 MHz, 14001 MHz
+A prose 1 | 1200 generated in 4583 ms (261.8 tok/s) | 525 windows, avg T 2.83, 2.29 tokens/window, 8.73 ms/window = adapt wait 0.02 + verify 8.04 (GPU-reach wait 4.78 + per-layer host 2.88 [plan 0.07 actq 0.04 jobs 0.01 CPU 2.74] + stage 0.02) draft 0.63 + adapt join 0.00 + other 0.00
+B prose 1 | 1164 generated in 4640 ms (250.9 tok/s) | 521 windows, avg T 2.86, 2.23 tokens/window, 8.91 ms/window = adapt wait 0.02 + verify 8.22 (GPU-reach wait 4.71 + per-layer host 3.13 [plan 0.07 actq 0.04 jobs 0.01 CPU 2.98] + stage 0.02) draft 0.63 + adapt join 0.00 + other 0.00
+B prose 2 | 1200 generated in 4575 ms (262.3 tok/s) | 524 windows, avg T 2.84, 2.29 tokens/window, 8.73 ms/window = adapt wait 0.02 + verify 8.05 (GPU-reach wait 4.77 + per-layer host 2.90 [plan 0.07 actq 0.04 jobs 0.01 CPU 2.75] + stage 0.03) draft 0.62 + adapt join 0.00 + other 0.00
+A prose 2 | 1200 generated in 4597 ms (261.0 tok/s) | 522 windows, avg T 2.87, 2.30 tokens/window, 8.81 ms/window = adapt wait 0.02 + verify 8.12 (GPU-reach wait 4.77 + per-layer host 2.98 [plan 0.07 actq 0.04 jobs 0.01 CPU 2.83] + stage 0.03) draft 0.63 + adapt join 0.00 + other 0.00
+# 01:30:10 600.00 W, 14507 MHz, 14001 MHz
+summary d1p (mean of the runs; B vs A on ms/window and tok/s)
+  prose  A n=2  ms/window 8.77 (8.73..8.81)  tok/s 261.4  T 2.85  tok/window 2.29  verify 8.08  reach 4.78  host 2.93
+  prose  B n=2  ms/window 8.82 (8.73..8.91)  tok/s 256.6  T 2.85  tok/window 2.26  verify 8.14  reach 4.74  host 3.01
+  prose  B vs A: ms/window +0.050 (+0.57%), tok/s -1.84%
+# ident d1 2026-11-21 01:30:10 D:/Projects/strata-dec3/bench-d3/d1/strata.exe []
+# 01:30:10 600.00 W, 14507 MHz, 14001 MHz
+waiting: VRAM used 2096 MiB, tray engines 1
+waiting: VRAM used 12400 MiB, tray engines 1
+waiting: VRAM used 31428 MiB, tray engines 1
+def16 |  out 93c4688100 | logits e9d907e164 | prefill                  16675 tokens in 1415.7 ms
+def64 |  out a13d259b7f | logits 5b1479d38d | prefill                  66616 tokens in 5271.2 ms
+d3_d1_D_conv | speculation              166 rounds of 6, drafts accepted 236 of 337 (0.700), 2.42 tokens per round | 166 windows screened (166 screens ran, 12.3 exact rows a screen), 0 windows every row exac | 400 tokens in 3083.8 ms  ->  129.71 tok/s | out 26c5e96e8e
+d3_d1_P8_conv | speculation              175 rounds of 8, drafts accepted 225 of 312 (0.721), 2.29 tokens per round | 175 windows screened (175 screens ran, 11.1 exact rows a screen), 0 windows every row exac | 400 tokens in 3015.4 ms  ->  132.65 tok/s | out 26c5e96e8e
+d3_d1_off_D_conv | speculation              143 rounds of 6, drafts accepted 257 of 379 (0.678), 2.80 tokens per round | 143 windows screened (143 screens ran, 11.4 exact rows a screen), 0 windows every row exac | 400 tokens in 3303.3 ms  ->  121.09 tok/s | out 293b92d3b9
+d3_d1_P8_struct | speculation              258 rounds of 8, drafts accepted 1745 of 1777 (0.982), 7.76 tokens per round | 258 windows screened (258 screens ran, 7.3 exact rows a screen), 0 windows every row exact | 2000 tokens in 21939.9 ms  ->  91.16 tok/s | out 30b9f645ca
+d3_d1_Ds_prose | speculation              285 rounds of 6, drafts accepted 315 of 587 (0.537), 2.11 tokens per round | 285 windows screened (285 screens ran, 981.6 exact rows a screen), 0 windows every row exa | 600 tokens in 8244.7 ms  ->  72.77 tok/s | out 10df564211
+# 01:35:33 600.00 W, 7001 MHz, 14001 MHz
+IDENT-DONE
+CHAIN2-DONE

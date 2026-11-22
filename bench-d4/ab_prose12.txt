@@ -1,0 +1,11 @@
+# ab prose12 2026-11-21 05:35:28 A=/d/Projects/strata-dec3/bench-d3/d6/strata.exe [] [] B=/d/Projects/strata-dec3/bench-d4/w12/strata.exe [] [--spec 12]
+# 05:35:28 600.00 W, 405 MHz, 14001 MHz
+A prose 1 | 1130 generated in 4406 ms (256.5 tok/s) | 484 windows, avg T 2.99, 2.33 tokens/window, 9.10 ms/window = adapt wait 0.02 + verify 8.40 (GPU-reach wait 4.70 + per-layer host 3.32 [plan 0.07 actq 0.04 jobs 0.01 CPU 3.16] + stage 0.03) draft 0.64 + adapt join 0.00 + other 0.00 | slots 8323 | window up to 8 tokens, 91.2 MiB | free 572
+B prose 1 | 1200 generated in 4793 ms (250.3 tok/s) | 510 windows, avg T 3.01, 2.35 tokens/window, 9.40 ms/window = adapt wait 0.02 + verify 8.64 (GPU-reach wait 4.72 + per-layer host 3.53 [plan 0.08 actq 0.04 jobs 0.01 CPU 3.37] + stage 0.02) draft 0.67 + adapt join 0.03 + other 0.00 | slots 8319 | window up to 12 tokens, 115.6 MiB | free 515
+B prose 2 | 1200 generated in 4688 ms (256.0 tok/s) | 528 windows, avg T 2.84, 2.27 tokens/window, 8.88 ms/window = adapt wait 0.02 + verify 8.18 (GPU-reach wait 4.70 + per-layer host 3.10 [plan 0.07 actq 0.04 jobs 0.01 CPU 2.95] + stage 0.02) draft 0.64 + adapt join 0.00 + other 0.00 | slots 8320 | window up to 12 tokens, 115.6 MiB | free 516
+A prose 2 | 1130 generated in 4426 ms (255.3 tok/s) | 484 windows, avg T 2.99, 2.33 tokens/window, 9.14 ms/window = adapt wait 0.02 + verify 8.43 (GPU-reach wait 4.68 + per-layer host 3.37 [plan 0.07 actq 0.04 jobs 0.01 CPU 3.22] + stage 0.03) draft 0.65 + adapt join 0.00 + other 0.00 | slots 8323 | window up to 8 tokens, 91.2 MiB | free 572
+# 05:37:07 600.00 W, 7001 MHz, 14001 MHz
+summary prose12 (mean of the runs; B vs A on ms/token and tok/s)
+  prose  A n=2  ms/tok 3.914 (3.906..3.923)  tok/s 255.9  ms/window 9.12  T 2.99  tok/window 2.33  verify 8.41  reach 4.69  host 3.34  CPU 3.19  draft 0.65  slots 8323
+  prose  B n=2  ms/tok 3.956 (3.912..4.000)  tok/s 253.2  ms/window 9.14  T 2.92  tok/window 2.31  verify 8.41  reach 4.71  host 3.31  CPU 3.16  draft 0.66  slots 8320
+  prose  B vs A: ms/token +0.0418 (+1.07%), tok/s -1.07%

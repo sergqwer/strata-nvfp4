@@ -992,6 +992,10 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   add_executable(router_chain_bench src/kernels/router_chain_bench.cpp)
   target_include_directories(router_chain_bench PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(router_chain_bench PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+  # dec3 D5: the QSA indexer chain (window append, resolve) old vs new, bitwise, and its time per layer
+  add_executable(qsa_front_bench src/kernels/qsa_front_bench.cpp)
+  target_include_directories(qsa_front_bench PRIVATE ${_strata_gpu_include_directories})
+  target_link_libraries(qsa_front_bench PRIVATE strata_kernels ${_strata_gpu_runtime_target})
   # B6: the dense projections' time per verify row at the model's shapes, default vs STRATA_B6_MMVQ_ROWS, bitwise
   if(STRATA_ENABLE_CUDA)
     add_executable(b6_mmvq_bench src/kernels/b6_mmvq_bench.cpp)

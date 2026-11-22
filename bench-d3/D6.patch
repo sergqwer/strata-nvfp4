@@ -1,0 +1,36 @@
+diff --git a/src/core/nv_defaults.cpp b/src/core/nv_defaults.cpp
+index c1fca99f6..a58fca1ea 100644
+--- a/src/core/nv_defaults.cpp
++++ b/src/core/nv_defaults.cpp
+@@ -148,6 +148,9 @@ std::vector<std::pair<std::string, std::string>> nv_default_env(int major, int m
+             // its grid wait (their flood held the read up); route + doorbell in one launch, the rows first.  All bitwise;
+             // nsys prose front GDN 77.6 -> ~72, attention 79.1 -> ~75 us.
+             {"STRATA_EARLY_READ", "1"},
++            // decode round 3 D6: PDL edges in the MTP draft graphs (their kernels read only weights before the wait): the same drafts
++            // (dumps identical), CLI fixed struct: chain steps 0.791 -> 0.774 ms a round (6 runs each), round graph 0.309 -> 0.305 (bench-d3 NOTES-d3.md D6).
++            {"STRATA_MTP_PDL", "1"},
+             {"STRATA_GDN_MID_HEAD", "2"},
+             {"STRATA_ROUTE_DB", "2"},
+             // dec/pf-num (NOTES-pfnum.md): the prompt path's QSA block scores on int8 tensor cores (i8x6, ~2x the 3xTF32 kernel,
+diff --git a/src/core/nv_defaults_test.cpp b/src/core/nv_defaults_test.cpp
+index 2bdfb3bd9..431fac72d 100644
+--- a/src/core/nv_defaults_test.cpp
++++ b/src/core/nv_defaults_test.cpp
+@@ -57,7 +57,7 @@ int main() {
+     CHECK(nv_default_env(12, 1, false).size() == 6);
+     unset("STRATA_SM121_PERF");
+     // sm_120 (RTX 50): strata-nvfp4's table (hc8, equal chunks, GDN TC: 5 switches), none with STRATA_DEFAULTS=026; sm_100 gets nothing
+-    CHECK(nv_default_env(12, 0, false).size() == 29);
++    CHECK(nv_default_env(12, 0, false).size() == 30);
+     CHECK(nv_default_env(12, 0, true).empty());
+     CHECK(nv_default_env(10, 0, false).empty());
+     CHECK(nv_default_env(8, 9, false).empty());
+@@ -137,7 +137,7 @@ int main() {
+         unset("STRATA_PF_FUSED_SM86");
+     }
+     // the other tables are unchanged by it
+-    CHECK(nv_default_env(12, 0, false).size() == 29);
++    CHECK(nv_default_env(12, 0, false).size() == 30);
+     // round 0212: the NVIDIA prompt-chunk ceiling of a bare `--prefill auto` (nv_chunk.hpp)
+     CHECK(nv_chunk_ceiling(nullptr, false) == 32768);
+     CHECK(nv_chunk_ceiling("1", false) == 32768);

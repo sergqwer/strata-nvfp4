@@ -3,6 +3,8 @@
 #include "strata/kernels/kv_q4.hpp"
 #include "strata/kernels/kv_q8.hpp"
 
+#include "strata/core/dispatch_stats.hpp"
+
 #include <cuda_runtime.h>
 
 #include <algorithm>
@@ -86,6 +88,11 @@ __device__ int block_scan(int v, int* warp_sums, int& total) {
     return excl;
 }
 
+// dec3 D5 STRATA_KV_RESOLVE_ILP (default on, =0 the old loop): step 1 for RQ queries at a time with every id load,
+// then every page-table load, then the stamps / claims - not one dependent ids -> table round trip per (query, pass).
+// The same lookups, stamps and claims (a claim is an atomicCAS either way; the miss list order was never fixed).
+constexpr int RK = 2;   // passes per query in a round (ids past RK * RT: the plain loop after it)
+template <int RQ>   // queries per round (4 or 8); 0 = the plain loop
 __global__ void __launch_bounds__(RT) resolve_kernel(KvStreamMap m, const int32_t* __restrict__ ids,
                                                      const int32_t* __restrict__ steps, int n_q, int cap, int page_size) {
     __shared__ int s_nmiss, s_lookups, s_cut;
@@ -95,21 +102,73 @@ __global__ void __launch_bounds__(RT) resolve_kernel(KvStreamMap m, const int32_
     __syncthreads();
     // 1. hits take this epoch and their reference bit; a missing block is claimed exactly once (-1 -> -2)
     int lookups = 0;
+    auto look = [&](const int32_t* qi, int i) {   // one id of step 1 (the plain loop's body)
+        const int b = qi[i] / page_size;
+        if (i > 0 && qi[i - 1] / page_size == b) return;   // ids are ascending: one lookup per block
+        ++lookups;
+        const int sl = m.page_table[b];
+        if (sl >= 0) {
+            m.slot_stamp[sl] = epoch;
+            m.slot_ref[sl] = 1;
+        } else if (sl == -1 && atomicCAS(&m.page_table[b], -1, -2) == -1) {
+            m.miss_block[atomicAdd(&s_nmiss, 1)] = b;
+        }
+    };
+    if (RQ > 0) for (int q0 = 0; q0 < n_q; q0 += (RQ > 0 ? RQ : 1)) {
+        constexpr int Q = RQ > 0 ? RQ : 1;
+        int width[Q], cur[Q][RK], prv[Q][RK], bb[Q][RK], sl[Q][RK];
+        bool lk[Q][RK];
+#pragma unroll
+        for (int a = 0; a < Q; ++a) width[a] = 0;
+#pragma unroll
+        for (int a = 0; a < Q; ++a)
+            if (q0 + a < n_q) width[a] = steps[(q0 + a) * kStepCount + kStepWidth];
+#pragma unroll
+        for (int a = 0; a < Q; ++a) {   // the loads only, no use in between: all in flight at once
+            const int32_t* qi = ids + (long long) (q0 + a) * cap;
+#pragma unroll
+            for (int k = 0; k < RK; ++k) {
+                const int i = threadIdx.x + k * RT;
+                cur[a][k] = 0;
+                prv[a][k] = 0;
+                if (i < width[a]) cur[a][k] = qi[i];
+                if (i < width[a] && i > 0) prv[a][k] = qi[i - 1];
+            }
+        }
+#pragma unroll
+        for (int a = 0; a < Q; ++a)
+#pragma unroll
+            for (int k = 0; k < RK; ++k) {
+                const int i = threadIdx.x + k * RT;
+                const int b = cur[a][k] / page_size;
+                // ids are ascending: one lookup per block
+                bb[a][k] = b;
+                lk[a][k] = i < width[a] && !(i > 0 && prv[a][k] / page_size == b);
+            }
+#pragma unroll
+        for (int a = 0; a < Q; ++a)
+#pragma unroll
+            for (int k = 0; k < RK; ++k) sl[a][k] = lk[a][k] ? m.page_table[bb[a][k]] : 0;
+#pragma unroll
+        for (int a = 0; a < Q; ++a)
+#pragma unroll
+            for (int k = 0; k < RK; ++k) {
+                const int b = bb[a][k];
+                if (!lk[a][k]) continue;
+                ++lookups;
+                if (sl[a][k] >= 0) {
+                    m.slot_stamp[sl[a][k]] = epoch;
+                    m.slot_ref[sl[a][k]] = 1;
+                } else if (sl[a][k] == -1 && atomicCAS(&m.page_table[b], -1, -2) == -1) {
+                    m.miss_block[atomicAdd(&s_nmiss, 1)] = b;
+                }
+            }
+    }
+    // ILP: the ids past the round's RK passes (a long context: threads 0..2 at width 2,051); else every id
     for (int q = 0; q < n_q; ++q) {
         const int width = steps[q * kStepCount + kStepWidth];
         const int32_t* qi = ids + (long long) q * cap;
-        for (int i = threadIdx.x; i < width; i += RT) {
-            const int b = qi[i] / page_size;
-            if (i > 0 && qi[i - 1] / page_size == b) continue;   // ids are ascending: one lookup per block
-            ++lookups;
-            const int sl = m.page_table[b];
-            if (sl >= 0) {
-                m.slot_stamp[sl] = epoch;
-                m.slot_ref[sl] = 1;
-            } else if (sl == -1 && atomicCAS(&m.page_table[b], -1, -2) == -1) {
-                m.miss_block[atomicAdd(&s_nmiss, 1)] = b;
-            }
-        }
+        for (int i = threadIdx.x + (RQ > 0 ? RK * RT : 0); i < width; i += RT) look(qi, i);
     }
     if (lookups > 0) atomicAdd(&s_lookups, lookups);   // (#783, stuchapin909) most threads see none: skip the shared atomic
     __syncthreads();
@@ -194,7 +253,16 @@ __global__ void ring_kernel(int32_t* table, long long n_blocks, long long n_slot
         table[i] = (int32_t) (i % n_slots);
 }
 
+int g_resolve_ilp = -1;   // kv_stream_set_resolve_ilp: -1 = STRATA_KV_RESOLVE_ILP (default on)
+bool resolve_ilp_on() {
+    if (g_resolve_ilp >= 0) return g_resolve_ilp != 0;
+    static const bool on = [] { const char* v = std::getenv("STRATA_KV_RESOLVE_ILP"); return v == nullptr || std::atoi(v) != 0; }();
+    return on;
+}
+
 }  // namespace
+
+void kv_stream_set_resolve_ilp(int on) { g_resolve_ilp = on; }
 
 uint64_t kv_block_bytes(const QsaShapes& s, int fmt) {
     const uint64_t rows = (uint64_t) (s.n_head_kv * s.page_size);
@@ -227,7 +295,16 @@ void kv_stream_resolve(const KvStreamMap& m, const QsaAttnPools& slots, const Kv
                              "slot twice\n", (long long) m.n_slots, RT);
         std::exit(1);
     }
-    resolve_kernel<<<1, RT, 0, (cudaStream_t) stream>>>(m, ids, steps, (int) n_q, (int) cap, (int) s.page_size);
+    // dec3 D5: the batched lookups from 3 queries (bench: T 2 is 0.3 us slower with them), 4 a round up to 4, else 8
+    const cudaStream_t st = (cudaStream_t) stream;
+    if (resolve_ilp_on() && n_q >= 3 && n_q <= 4) {
+        strata::dispatch::note("kv stream: resolve, batched lookups 4 (STRATA_KV_RESOLVE_ILP)");
+        resolve_kernel<4><<<1, RT, 0, st>>>(m, ids, steps, (int) n_q, (int) cap, (int) s.page_size);
+    } else if (resolve_ilp_on() && n_q >= 5) {
+        strata::dispatch::note("kv stream: resolve, batched lookups 8 (STRATA_KV_RESOLVE_ILP)");
+        resolve_kernel<8><<<1, RT, 0, st>>>(m, ids, steps, (int) n_q, (int) cap, (int) s.page_size);
+    } else
+        resolve_kernel<0><<<1, RT, 0, st>>>(m, ids, steps, (int) n_q, (int) cap, (int) s.page_size);
     check("resolve");
     copy_kernel<<<96, 128, 0, (cudaStream_t) stream>>>(m, runs_of(slots, host, fmt, s));
     check("copy");

@@ -1,0 +1,11 @@
+# ident r5f2 2026-11-21 10:50:10 D:/Projects/strata-r5/bench-r5/f2/strata.exe []
+# 10:50:10 600.00 W, 405 MHz, 14001 MHz
+def16 |  out 93c4688100 | logits e9d907e164 | prefill                  16675 tokens in 1429.6 ms
+def64 |  out a13d259b7f | logits 5b1479d38d | prefill                  66616 tokens in 5652.9 ms
+d3_r5f2_D_conv | speculation              166 rounds of 6, drafts accepted 236 of 337 (0.700), 2.42 tokens per round | 166 windows screened (166 screens ran, 12.3 exact rows a screen), 0 windows every row exac | 400 tokens in 3083.0 ms  ->  129.74 tok/s | out 26c5e96e8e
+d3_r5f2_P8_conv | speculation              175 rounds of 8, drafts accepted 225 of 312 (0.721), 2.29 tokens per round | 175 windows screened (175 screens ran, 11.1 exact rows a screen), 0 windows every row exac | 400 tokens in 3036.2 ms  ->  131.74 tok/s | out 26c5e96e8e
+d3_r5f2_off_D_conv | speculation              143 rounds of 6, drafts accepted 257 of 379 (0.678), 2.80 tokens per round | 143 windows screened (143 screens ran, 11.4 exact rows a screen), 0 windows every row exac | 400 tokens in 3329.4 ms  ->  120.14 tok/s | out 293b92d3b9
+d3_r5f2_P8_struct | speculation              258 rounds of 8, drafts accepted 1745 of 1777 (0.982), 7.76 tokens per round | 258 windows screened (258 screens ran, 7.3 exact rows a screen), 0 windows every row exact | 2000 tokens in 22098.1 ms  ->  90.51 tok/s | out 30b9f645ca
+d3_r5f2_Ds_prose | speculation              285 rounds of 6, drafts accepted 315 of 587 (0.537), 2.11 tokens per round | 285 windows screened (285 screens ran, 981.6 exact rows a screen), 0 windows every row exa | 600 tokens in 8606.9 ms  ->  69.71 tok/s | out 10df564211
+# 10:52:32 600.00 W, 7001 MHz, 14001 MHz
+IDENT-DONE

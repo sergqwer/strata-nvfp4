@@ -1,0 +1,264 @@
+--- a/include/strata/core/mtp.hpp
++++ b/include/strata/core/mtp.hpp
+@@ -23,6 +23,7 @@
+ #include "strata/core/pinned_ring.hpp"
+ #include "strata/core/session.hpp"
+ #include "strata/kernels/sampler.hpp"
++#include "strata/kernels/window_limits.hpp"
+ #include "strata/spec/draft_cum.hpp"
+ 
+ #include <cuda_runtime.h>
+@@ -58,6 +59,10 @@
+     }
+     /// At most this many drafts per round (below max_t - 1): a window longer than the MTP's comes from elsewhere.
+     void set_max_drafts(int k) { max_drafts_ = k; }
++    /// decode round 4 E1 (wide build, STRATA_WIDE_MTP): before load, a chain of up to `c` drafts (<= kWindowMaxT - 1) while
++    /// the round keeps max_t rows (a window past max_t rows is caught up by draft_long).  0 = max_t - 1, the old chain.
++    void set_chain_cap(int c) { chain_req_ = c; }
++    int chain_cap() const { return C_; }
+     /// --mtp-cum BASE[:LO] (spec/draft_cum.hpp): the chain keeps draft j while prod_{i<=j} acc(p_i) >= the request's
+     /// threshold (from BASE toward LO as the request's drafts run better than the table predicts); 0 = off (min_p / chain
+     /// rule).  cum_begin() at a request's start; cum_observe() after each verified MTP window; cum_th() is the threshold the
+@@ -277,12 +282,12 @@
+     int cond_steps_[9] = {};
+     bool cond_off_ = false;      ///< a conditional capture failed: the per-step graphs from then on
+     float* cond_hist_ = nullptr; ///< [16] the chain's probabilities on the device (the keep kernels)
+-    cudaGraphExec_t step_exec_[9] = {};
++    cudaGraphExec_t step_exec_[strata::kernels::kWindowMaxT + 1] = {};
+     // coupled draft sampling: its own round/step graphs (the argmax ones stay as they were), the request's
+     // parameters and the penalty ring (mapped staging + device copies), the split scratch, token id -> subset index
+     bool setup_coupled(std::string& err);
+     cudaGraphExec_t round_exec_c_[9] = {};
+-    cudaGraphExec_t step_exec_c_[9] = {};
++    cudaGraphExec_t step_exec_c_[strata::kernels::kWindowMaxT + 1] = {};
+     bool coupled_ok_ = false, coupled_active_ = false;
+     bool coupled_rec_ = false;   ///< record_forward: the full layer ends in the coupled sampler (draft coupled_j_)
+     int coupled_j_ = 0;
+@@ -301,6 +306,10 @@
+     const NativeHead* head_ = nullptr;
+     const float* window_R_ = nullptr;
+     int max_t_ = 0;
++    int chain_req_ = 0;   ///< set_chain_cap
++    int C_ = 0;           ///< the chain's drafts at most (max_t_ - 1 unless set_chain_cap)
++    /// step/pos row of draft 0's cell: after the max_t_ round rows and the chain steps' rows (2 * max_t_ - 1 when C_ = max_t_ - 1)
++    int draft0_row() const { return max_t_ + C_; }
+     int device_ = -1;   ///< the device `load` ran on: the public calls switch to it (layer split)
+     int max_drafts_ = 1 << 30;
+     float cum_base_ = 0.0f, cum_lo_ = 0.0f, cum_used_ = 0.0f;
+--- a/src/core/mtp.cpp
++++ b/src/core/mtp.cpp
+@@ -376,6 +376,8 @@
+     rt_dir_ = rt_dir;
+     // (the draft layer's kernels - the resident grouping, the grouped experts, the fused reads - are built for the narrow window)
+     if (max_t < 1 || max_t > strata::kernels::kVerifyNarrowT) { err = "mtp: max_t out of range"; return false; }
++    // E1: the chain's drafts (one-row steps) may outrun the round's rows on a wide build (set_chain_cap)
++    C_ = std::max(max_t - 1, std::min(chain_req_, (int) strata::kernels::kWindowMaxT - 1));
+     if (shared != nullptr) {
+         if (shared->device_ != device_ || shared->g_ != &g || shared->dense_ == nullptr ||
+             shared->experts_ == nullptr || shared->rt_dir_ != rt_dir) {
+@@ -512,13 +514,15 @@
+     attn_scratch_floats_ = (int64_t) strata::kernels::qsa_decode_attn_scratch_floats(cap_, s);
+     const uint64_t T = (uint64_t) max_t, N = (uint64_t) g.n_embd, HC = (uint64_t) g.hc, K = (uint64_t) ss.k;
+     const uint64_t NH = (uint64_t) g.n_head, HD = (uint64_t) g.head_dim, NKV = (uint64_t) g.n_head_kv;
+-    const uint64_t R2 = 2 * T;   // step/pos rows: T catch-up rows + up to T-2 chain steps
++    // step/pos rows: T catch-up rows + up to C_-1 chain steps + draft 0's cell (2 * T when C_ = T - 1)
++    const uint64_t R2 = T + (uint64_t) C_ + 1;
++    const uint64_t TO = std::max<uint64_t>(T, (uint64_t) C_ + 1);   // the chain's outputs (T when C_ = T - 1)
+     bool ok = mapped(T * 4 + 64, (void**) &h_tok_, (void**) &m_tok_) &&
+               mapped(R2 * 4 * 4 + 64, (void**) &h_step_, (void**) &m_step_) &&
+               mapped(R2 * NH * 4 + 64, (void**) &h_pos_, (void**) &m_pos_) &&
+               mapped(64, (void**) &h_row_, (void**) &m_row_) &&
+-              mapped(T * 4 + 64, (void**) &h_out_, (void**) &m_out_) &&
+-              mapped(T * 4 + 64, (void**) &h_prob_, (void**) &m_prob_) &&
++              mapped(TO * 4 + 64, (void**) &h_out_, (void**) &m_out_) &&
++              mapped(TO * 4 + 64, (void**) &h_prob_, (void**) &m_prob_) &&
+               (!force_on_ || mapped(64, (void**) &h_force_, (void**) &m_force_));
+     if (!ok) { err = "mtp: mapped staging failed"; return false; }
+     if (h_force_ != nullptr) for (int j = 0; j < 16; ++j) h_force_[j] = -1;
+@@ -552,8 +556,8 @@
+         hit_scratch_ = b.take<uint8_t>(strata::kernels::moe_hit_grouped_scratch_bytes((int64_t) (T * K), g.n_embd, g.n_ff));
+         sh_scratch_ = (float*) b.take<uint8_t>(strata::kernels::shared_expert_scratch_bytes(g.n_ff));
+         x_bf16_ = b.take<uint16_t>(N);
+-        out_ids_ = b.take<int32_t>(T + 4);
+-        probs_ = b.take<float>(T + 4);
++        out_ids_ = b.take<int32_t>(TO + 4);
++        probs_ = b.take<float>(TO + 4);
+         cond_hist_ = b.take<float>(16);
+         arg_scratch_ = b.take<uint8_t>(strata::kernels::argmax_rows_scratch_bytes((int) T));
+         top_scratch_ = b.take<uint8_t>(strata::kernels::row_top_prob_scratch_bytes((int) T));
+@@ -677,8 +681,8 @@
+ void MtpDrafter::record_top2(int j) {
+     const int64_t nv = dhead_ != nullptr ? n_dvocab_ : n_vocab_;
+     if ((int64_t) lg_host_.size() < nv) lg_host_.resize((size_t) nv);
+-    if ((int) top2_.size() < max_t_) top2_.assign((size_t) max_t_, -1);
+-    if (j < 0 || j >= max_t_) return;
++    if ((int) top2_.size() < C_ + 1) top2_.assign((size_t) C_ + 1, -1);
++    if (j < 0 || j > C_) return;
+     if (cudaMemcpy(lg_host_.data(), head_logits_, (size_t) nv * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess) {
+         top2_[(size_t) j] = -1;
+         return;
+@@ -761,7 +765,7 @@
+     // coupled draft sampling (STRATA_SPEC_COUPLED=1 only): an upper bound - the id -> subset map, the penalty ring,
+     // the split scratch (64 lists of 64 entries at most) and the parameters
+     if (coupled_draft_env() && cparams_ == nullptr)
+-        bytes += (uint64_t) n_vocab * 4 + (uint64_t) (kCoupledHistCap + max_t_) * 4 + 64ull * 64ull * 8ull + 4096;
++        bytes += (uint64_t) n_vocab * 4 + (uint64_t) (kCoupledHistCap + std::max(max_t_, C_ + 1)) * 4 + 64ull * 64ull * 8ull + 4096;
+     return bytes;
+ }
+ 
+@@ -786,7 +790,7 @@
+                              "argmax drafts\n", (long long) nv);
+         return true;
+     }
+-    const size_t ring = (size_t) (kCoupledHistCap + max_t_) * sizeof(int32_t);
++    const size_t ring = (size_t) (kCoupledHistCap + std::max(max_t_, C_ + 1)) * sizeof(int32_t);
+     if (cudaMalloc((void**) &cparams_, sizeof(strata::kernels::SamplerParams)) != cudaSuccess ||
+         cudaMalloc((void**) &cring_, ring) != cudaSuccess || cudaMalloc(&cscratch_, scratch) != cudaSuccess ||
+         !mapped(sizeof(strata::kernels::SamplerParams), (void**) &h_cparams_, (void**) &m_cparams_) ||
+@@ -795,7 +799,7 @@
+         return false;
+     }
+     if (spec_prob_env() &&
+-        !mapped((size_t) max_t_ * (size_t) kSpecQStride * sizeof(int32_t), (void**) &h_q_, (void**) &m_q_)) {
++        !mapped((size_t) std::max(max_t_, C_ + 1) * (size_t) kSpecQStride * sizeof(int32_t), (void**) &h_q_, (void**) &m_q_)) {
+         err = "mtp: the draft distributions' buffer does not fit";
+         return false;
+     }
+@@ -1956,7 +1960,7 @@
+     // the catch-up: the layer's front for the window's T cells (their K/V), then its rest for row a only, on row
+     // a's intermediates copied to row 0, at the cell the host staged in step row 2*max_t - 1; the draft chain is
+     // one graph per step (`capture_step`) so the host can stop it when a draft is unlikely
+-    const int ra = 2 * max_t_ - 1;
++    const int ra = draft0_row();
+     const int64_t N = g_->n_embd, NH = g_->n_head;
+     // the draft round's seven inputs in one launch (STRATA_MTP_MULTI_COPY=0 keeps the separate copies)
+     const MappedCopy in[7] = {{tok_, m_tok_, T}, {step_, m_step_, (int64_t) 2 * T * 4}, {pos_, m_pos_, 2 * T * NH},
+@@ -1964,7 +1968,7 @@
+                               {pos_ + ra * NH, m_pos_ + ra * NH, NH}};
+     if (mtp_steps_from_round()) {
+         // every row the round and its chain read (the host stages them all before the round): the step graphs copy nothing
+-        const MappedCopy all[5] = {{tok_, m_tok_, T}, {step_, m_step_, (int64_t) 2 * max_t_ * 4}, {pos_, m_pos_, 2 * max_t_ * NH},
++        const MappedCopy all[5] = {{tok_, m_tok_, T}, {step_, m_step_, (int64_t) (draft0_row() + 1) * 4}, {pos_, m_pos_, (int64_t) (draft0_row() + 1) * NH},
+                                    {row_, m_row_, 5}, {Rin_, window_R_, T * HCN}};
+         copy_from_mapped_multi(all, 5, cs_);
+     } else {
+@@ -2342,7 +2346,7 @@
+     if (!capture_round(T, cp, err)) return false;
+     // Draft j writes its K/V at cell p + a + j, and the K/V ends at max_cells (its page table has no page past it):
+     // near the context's end the round drafts only the cells that exist
+-    const int max_steps = (int) std::min<int64_t>(std::min(max_t_ - 1, max_drafts_), st_.max_cells - (p + a));
++    const int max_steps = (int) std::min<int64_t>(std::min(C_, max_drafts_), st_.max_cells - (p + a));
+     for (int j = 1; j < max_steps; ++j)
+         if (!capture_step(j, cp, err)) return false;
+     // STRATA_MTP_COND: the --mtp-cum chain as one graph (the host applies the same rule to the same probabilities, so it
+@@ -2362,7 +2366,7 @@
+         h_tok_[t] = tokens[t];
+         put(t, p + t);
+     }
+-    put(2 * max_t_ - 1, coupled_draft_cell(p, a, 0));   // p + a: draft 0's cell
++    put(draft0_row(), coupled_draft_cell(p, a, 0));   // p + a: draft 0's cell
+     for (int j = 1; j < max_steps; ++j)
+         put(max_t_ + j - 1, coupled_draft_cell(p, a, j));
+     for (int j = 0; j < max_steps; ++j) ((volatile int32_t*) h_out_)[j] = -1;
+@@ -2549,7 +2553,7 @@
+         }
+     }
+     if (probs != nullptr) mtp_dump_round(p, a, drafts, probs, n);
+-    for (int j = n; j < max_t_ - 1; ++j) { drafts[j] = 0; if (probs) probs[j] = 0.0f; }
++    for (int j = n; j < C_; ++j) { drafts[j] = 0; if (probs) probs[j] = 0.0f; }
+     if (n_drafts) *n_drafts = n;
+     if (result) *result = {n, max_steps};
+     ms_draft += ms_since(t0);
+@@ -2636,7 +2640,7 @@
+         h_tok_[t] = tokens[t];
+         put(t, p + t);
+     }
+-    put(2 * max_t_ - 1, p + a);                                      // output 0's cell
++    put(draft0_row(), p + a);                                        // output 0's cell
+     for (int j = 1; j < n_out; ++j) put(max_t_ + j - 1, p + a + j);  // every step's cell, staged at once
+     for (int j = 0; j < 16; ++j) h_force_[j] = j < n_force ? force[j] : -1;
+     h_row_[0] = a;
+@@ -2707,6 +2711,7 @@
+     const OnDevice on_device(device_);
+     // row 0 is the real pair; rows 1.. repeat it and only write cells the next round overwrites
+     const int64_t HCN = g_->hc * g_->n_embd;
++    T = std::min(T, max_t_);   // E1: a wider window's chain comes from C_, not from the round's rows
+     for (int t = 0; t < T; ++t)
+         if (cudaMemcpy((void*) (window_R_ + (size_t) t * HCN), R_row, (size_t) HCN * sizeof(float),
+                        cudaMemcpyDeviceToDevice) != cudaSuccess) {
+--- a/src/program/generate.cpp
++++ b/src/program/generate.cpp
+@@ -3587,6 +3587,15 @@
+ // verifier gets the gated measure (core/gated_proposal.hpp).  That is exact only where the window choice cannot see a draw or a
+ // timing that the next rounds draw again.  Where it cannot be kept, say why and return false: the caller keeps the older rule
+ // (a warning, not a refusal).
++// decode round 4 E1: on a build whose windows hold more than 8 rows (-DSTRATA_WINDOW_MAX_T=12 / 16) an MTP window may be as wide
++// as the build: --spec N > 8 makes the drafter's chain N - 1 drafts long (MtpDrafter::set_chain_cap; its round keeps 8 rows).
++// STRATA_WIDE_MTP=0: the old cap (a speculative window of at most 8 rows).  Always off on the 8-row build.
++static bool wide_mtp_on() {
++    if (strata::kernels::kWindowMaxT <= strata::kernels::kVerifyNarrowT) return false;
++    static const bool on = [] { const char* v = std::getenv("STRATA_WIDE_MTP"); return v == nullptr || v[0] != '0'; }();
++    return on;
++}
++
+ static bool gated_proposal_usable(bool serial_single_device, int lookup_chain, int adapt_swaps, bool pcie_share, bool own_window_rule,
+                                   int window, double min_p) {
+     const char* why = nullptr;
+@@ -5036,7 +5045,7 @@
+     // edits +6-11%, ordinary text unchanged (bench/results/2026-09-27-spec). --suffix-draft 0 turns it off.
+     if (o.suffix_draft > 0 && o.spec >= 2 && o.mtp_max_t == 0) {
+         o.mtp_max_t = o.spec;
+-        o.spec = std::min(o.spec + 2, 8);   // kVerifyMaxT
++        o.spec = std::min(o.spec + 2, wide_mtp_on() && o.spec > 8 ? (int) strata::kernels::kWindowMaxT : 8);   // kVerifyMaxT (E1: wide)
+     }
+     // --lookup-max-t N: lookup windows up to N tokens, the MTP's stay at --spec.  Not given: 12 where the pr-nv2 runs measured it (serve, one GPU, the 8-row
+     // build: rewrites and agent edit turns +11..14%, prose and code within noise); --lookup-max-t 0 or STRATA_LOOKUP_MAX_T=0 turns it off.  The wide
+@@ -5070,6 +5079,7 @@
+     // buffers are sized for that.  Only a plain --batch forms the wider windows of a build with kVerifyMaxT > 8.
+     // (--lookup-max-t: a prompt-lookup window may be longer, up to kVerifyLongT; the MTP drafts stay at mtp_max_t)
+     const int spec_cap = o.lookup_max_t > 0 && o.suffix_draft > 0 ? (int) strata::kernels::kVerifyLongT
++                         : wide_mtp_on() ? (int) strata::kernels::kWindowMaxT   // E1
+                                                                   : (int) strata::kernels::kVerifyNarrowT;
+     if (o.spec > spec_cap) {
+         std::fprintf(stderr, "strata generate: --spec %d: a speculative window holds 2..%d tokens\n", o.spec, spec_cap);
+@@ -8627,6 +8637,10 @@
+         // longer window up in parts)
+         const int mtp_t = o.pipeline_windows >= 2 ? strata::kernels::kVerifyNarrowT : std::min(o.spec, (int) strata::kernels::kVerifyNarrowT);
+         if (o.pipeline_windows >= 2) mtp.set_force_capture(true);
++        if (wide_mtp_on() && o.pipeline_windows < 2) {   // E1: the chain may outrun the round's rows
++            const int s_mtp = o.mtp_max_t > 0 ? std::min(o.mtp_max_t, o.spec) : o.spec;
++            if (s_mtp > mtp_t) mtp.set_chain_cap(s_mtp - 1);
++        }
+         if (!o.mtp.empty() && !mtp.load(o.mtp, draft_geometry, last_st && !mtp_first ? last_st->ss : ss, mtp_t, err, o.mtp_window)) { std::fprintf(stderr, "strata generate: %s%s%s\n", err.c_str(), vram_free_note().c_str(), vram_batch_hint(err, o.batch).c_str()); return 1; }
+         if (!o.mtp.empty()) mtp.set_ple_session(&ss);
+ #if defined(STRATA_HAVE_DFLASH2)
+@@ -21682,15 +21696,15 @@
+             int64_t p = merge_T > 0 ? merge_at : n - 1;
+             int32_t x = (int32_t) ids[(size_t) p];
+             // (the drafter writes max_t - 1 drafts: 8 rows with --pipeline-windows 2)
+-            const size_t DS = (size_t) std::max(S, use_mtp ? mtp.max_t() : 0);
++            const size_t DS = (size_t) std::max({S, use_mtp ? mtp.max_t() : 0, use_mtp ? mtp.chain_cap() + 1 : 0});
+             const size_t WS = (size_t) std::max(S, merge_T);
+             std::vector<int32_t> drafts(DS, 0), window(WS), outv(WS);
+             std::vector<float> dprob(DS, 0.0f);
+-            std::array<float, 8> dwin_s{};   // the probabilities the current window was chosen from (STRATA_SPEC_COST)
++            std::array<float, strata::kernels::kWindowMaxT> dwin_s{};   // the probabilities the current window was chosen from (STRATA_SPEC_COST)
+             // STRATA_SPEC_TRACE=<file> in serve (bench only, off by default): per round "R p T a sfx ms k match | probs | drafts | lookup draft | committed tokens"
+             static std::FILE* const df2_trace = [] { const char* tf = std::getenv("STRATA_SPEC_TRACE"); return tf != nullptr && tf[0] != '\0' ? std::fopen(tf, "a") : nullptr; }();
+             static const bool trace_nopick = std::getenv("STRATA_SPEC_TRACE_NOPICK") != nullptr;   // the lookup draft is logged but never taken
+-            std::array<int32_t, 8> tr_d{};
++            std::array<int32_t, strata::kernels::kWindowMaxT> tr_d{};
+             std::array<int32_t, 16> tr_s{};
+             int tr_k = 0, tr_match = 0;
+             std::vector<int32_t> sbuf((size_t) S, 0);
+@@ -22633,8 +22647,8 @@
+                         T = t;
+                     }
+                 }
+-                std::copy(dprob.begin(), dprob.begin() + (std::ptrdiff_t) std::min<size_t>(dprob.size(), 8), dwin_s.begin());
+-                if (df2_trace != nullptr) std::copy(drafts.begin(), drafts.begin() + (std::ptrdiff_t) std::min<size_t>(drafts.size(), 8), tr_d.begin());
++                std::copy(dprob.begin(), dprob.begin() + (std::ptrdiff_t) std::min<size_t>(dprob.size(), dwin_s.size()), dwin_s.begin());
++                if (df2_trace != nullptr) std::copy(drafts.begin(), drafts.begin() + (std::ptrdiff_t) std::min<size_t>(drafts.size(), tr_d.size()), tr_d.begin());
+                 // --lookup-chain: what followed an earlier occurrence of the context + the MTP's drafts, after them
+                 int chain_n = 0, cm = 0;
+                 if (o.lookup_chain > 0 && !first_window && !from_sfx && T < S) {

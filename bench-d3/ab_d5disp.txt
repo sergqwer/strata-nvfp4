@@ -1,0 +1,9 @@
+# ab d5disp 2026-11-21 03:57:14 A=/d/Projects/strata-dec3/bench-d3/d5n/strata.exe [] B=/d/Projects/strata-dec3/bench-d3/d5n/strata.exe [STRATA_DISPATCH_REPORT=D:/Projects/strata-dec3/bench-d3/d5w/dispatch_struct.json]
+# 03:57:14 600.00 W, 810 MHz, 14001 MHz
+A struct 1 | 1500 generated in 3508 ms (427.6 tok/s) | 198 windows, avg T 7.82, 7.58 tokens/window, 17.72 ms/window = adapt wait 0.02 + verify 16.41 (GPU-reach wait 6.03 + per-layer host 9.97 [plan 0.28 actq 0.13 jobs 0.02 CPU 9.49] + stage 0.04) draft 1.21 + adapt join 0.00 + other 0.01
+B struct 1 | 1500 generated in 3608 ms (415.7 tok/s) | 197 windows, avg T 7.89, 7.61 tokens/window, 18.31 ms/window = adapt wait 0.02 + verify 16.56 (GPU-reach wait 6.06 + per-layer host 10.09 [plan 0.24 actq 0.12 jobs 0.03 CPU 9.66] + stage 0.04) draft 1.31 + adapt join 0.34 + other 0.01
+# 03:58:00 600.00 W, 7001 MHz, 14001 MHz
+summary d5disp (mean of the runs; B vs A on ms/window and tok/s)
+  struct A n=1  ms/window 17.72 (17.72..17.72)  tok/s 427.6  T 7.82  tok/window 7.58  verify 16.41  reach 6.03  host 9.97
+  struct B n=1  ms/window 18.31 (18.31..18.31)  tok/s 415.7  T 7.89  tok/window 7.61  verify 16.56  reach 6.06  host 10.09
+  struct B vs A: ms/window +0.590 (+3.33%), tok/s -2.78%

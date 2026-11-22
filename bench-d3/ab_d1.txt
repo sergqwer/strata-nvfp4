@@ -1,0 +1,13 @@
+# ab d1 2026-11-21 01:21:20 A=D:/Projects/strata-dec3/bench-d3/base/strata.exe [] B=D:/Projects/strata-dec3/bench-d3/d1/strata.exe []
+# 01:21:20 600.00 W, 405 MHz, 14001 MHz
+A struct 1 | 1500 generated in 3726 ms (402.5 tok/s) | 199 windows, avg T 7.82, 7.54 tokens/window, 18.73 ms/window = adapt wait 0.02 + verify 17.46 (GPU-reach wait 7.45 + per-layer host 9.55 [plan 0.26 actq 0.12 jobs 0.03 CPU 9.09] + stage 0.04) draft 1.19 + adapt join 0.00 + other 0.00
+B struct 1 | 1500 generated in 3567 ms (420.5 tok/s) | 199 windows, avg T 7.82, 7.54 tokens/window, 17.92 ms/window = adapt wait 0.03 + verify 16.64 (GPU-reach wait 6.58 + per-layer host 9.65 [plan 0.27 actq 0.12 jobs 0.03 CPU 9.19] + stage 0.04) draft 1.19 + adapt join 0.00 + other 0.00
+B struct 2 | 1500 generated in 3563 ms (421.0 tok/s) | 196 windows, avg T 7.86, 7.65 tokens/window, 18.18 ms/window = adapt wait 0.02 + verify 16.36 (GPU-reach wait 6.45 + per-layer host 9.44 [plan 0.26 actq 0.12 jobs 0.03 CPU 8.99] + stage 0.04) draft 1.24 + adapt join 0.00 + other 0.01
+A struct 2 | 1500 generated in 3585 ms (418.4 tok/s) | 200 windows, avg T 7.80, 7.50 tokens/window, 17.93 ms/window = adapt wait 0.02 + verify 16.60 (GPU-reach wait 6.55 + per-layer host 9.64 [plan 0.26 actq 0.12 jobs 0.02 CPU 9.19] + stage 0.04) draft 1.23 + adapt join 0.00 + other 0.00
+A struct 3 | 1500 generated in 3537 ms (424.1 tok/s) | 199 windows, avg T 7.81, 7.54 tokens/window, 17.77 ms/window = adapt wait 0.02 + verify 16.49 (GPU-reach wait 6.66 + per-layer host 9.40 [plan 0.26 actq 0.12 jobs 0.03 CPU 8.96] + stage 0.04) draft 1.20 + adapt join 0.00 + other 0.00
+B struct 3 | 1500 generated in 3551 ms (422.4 tok/s) | 199 windows, avg T 7.85, 7.54 tokens/window, 17.84 ms/window = adapt wait 0.02 + verify 16.58 (GPU-reach wait 6.46 + per-layer host 9.71 [plan 0.26 actq 0.12 jobs 0.02 CPU 9.26] + stage 0.04) draft 1.18 + adapt join 0.00 + other 0.00
+# 01:26:41 600.00 W, 7001 MHz, 14001 MHz
+summary d1 (mean of the runs; B vs A on ms/window and tok/s)
+  struct A n=3  ms/window 18.14 (17.77..18.73)  tok/s 415.0  T 7.81  tok/window 7.53  verify 16.85  reach 6.89  host 9.53
+  struct B n=3  ms/window 17.98 (17.84..18.18)  tok/s 421.3  T 7.84  tok/window 7.58  verify 16.53  reach 6.50  host 9.60
+  struct B vs A: ms/window -0.163 (-0.90%), tok/s +1.52%

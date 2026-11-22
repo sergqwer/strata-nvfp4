@@ -1,0 +1,61 @@
+strata: STRATA_HC_Q8=1: the 8-bit hyper-connection read hc8 (int8 rows + fp16 scales, fp32 sums), programmatic dependent launch
+strata: the hyper-connection read v4 (programmatic dependent launch)
+gr_hc8_check on NVIDIA GeForce RTX 5090 (170 SMs)
+  q8_1 image vs native_quantize_q8_1 (apply=0 inject=0): 0 of 640 blocks differ, 0 codes
+  q8_1 image vs native_quantize_q8_1 (apply=0 inject=1): 0 of 640 blocks differ, 0 codes
+  q8_1 image vs native_quantize_q8_1 (apply=1 inject=0): 0 of 640 blocks differ, 0 codes
+  q8_1 image vs native_quantize_q8_1 (apply=1 inject=1): 0 of 640 blocks differ, 0 codes
+  window invariance (T 1..8, early and late columns), graph replays, q8_1 image: 124 of 124 cases pass
+  accuracy, max |err| / RMS over 8 tokens (pending write + inject):
+    read             R_out      rs         lo         inject     mixed
+    hc8 (Q8_0)       2.06e-06   1.04e-07   8.70e-07   6.88e-07   2.57e-06
+    v4 (bf16)        2.06e-06   1.29e-07          -   8.97e-07   3.42e-06
+  time per read (down + up), 24 weight sets in rotation, medians of 15 replays of 24 reads:
+    T   v4 bf16 us   hc8 us   hc8 flag us   speedup   flag - grid-end
+    1      11.77       7.83       6.56       1.50x    -1.27
+    2      13.15       8.22       9.56       1.60x    +1.34
+    3      14.60       9.86      10.03       1.48x    +0.17
+    4      16.46       9.73      10.21       1.69x    +0.47
+    5      18.15      10.81      11.35       1.68x    +0.54
+    6      19.63      11.55      12.60       1.70x    +1.05
+    7      24.45      12.17      13.31       2.01x    +1.14
+    8      26.31      13.32      14.42       1.98x    +1.10
+  early read (gated on the combine), 24 layers a graph, 6 small nodes before each combine, us a layer (medians of 15):
+    T   flag 0    flag 1    flag 2    flag 3    3 - 0   bitwise
+  [T=2 flag 0 first run]
+strata early read: the combine's gate timed out (block 153, 0 of 10): results invalid
+  [T=2 flag 1 first run]
+  [T=2 flag 2 first run]
+  [T=2 flag 3 first run]
+    2     45.42     46.55     47.17     46.16    +0.73   yes
+  [T=3 flag 0 first run]
+  [T=3 flag 1 first run]
+  [T=3 flag 2 first run]
+  [T=3 flag 3 first run]
+    3     46.84     45.96     45.59     46.70    -0.14   yes
+  [T=4 flag 0 first run]
+  [T=4 flag 1 first run]
+  [T=4 flag 2 first run]
+  [T=4 flag 3 first run]
+    4     46.09     46.56     46.52     46.51    +0.42   yes
+  [T=5 flag 0 first run]
+  [T=5 flag 1 first run]
+  [T=5 flag 2 first run]
+  [T=5 flag 3 first run]
+    5     49.75     51.77     49.74     51.86    +2.10   yes
+  [T=6 flag 0 first run]
+  [T=6 flag 1 first run]
+  [T=6 flag 2 first run]
+  [T=6 flag 3 first run]
+    6     53.33     54.60     53.34     54.17    +0.84   yes
+  [T=7 flag 0 first run]
+  [T=7 flag 1 first run]
+  [T=7 flag 2 first run]
+  [T=7 flag 3 first run]
+    7     50.43     52.29     51.30     52.07    +1.64   yes
+  [T=8 flag 0 first run]
+  [T=8 flag 1 first run]
+  [T=8 flag 2 first run]
+  [T=8 flag 3 first run]
+    8     53.59     54.01     54.97     54.39    +0.79   yes
+gr_hc8_check: 0 failures

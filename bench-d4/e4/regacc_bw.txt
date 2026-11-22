@@ -1,0 +1,16 @@
+regacc=0 avx512  threads 1  tokens 1  prefetch 2048: 283.3 ms for 1536 experts -> 15.0 GB/s, 184.4 us/expert/thread
+regacc=1 avx512  threads 1  tokens 1  prefetch 2048: 161.1 ms for 1536 experts -> 26.4 GB/s, 104.9 us/expert/thread
+regacc=0 avx512  threads 1  tokens 3  prefetch 2048: 369.2 ms for 1536 experts -> 11.5 GB/s, 240.3 us/expert/thread
+regacc=1 avx512  threads 1  tokens 3  prefetch 2048: 293.0 ms for 1536 experts -> 14.5 GB/s, 190.7 us/expert/thread
+regacc=0 avx512  threads 16  tokens 1  prefetch 2048: 65.3 ms for 1536 experts -> 65.1 GB/s, 680.0 us/expert/thread
+regacc=1 avx512  threads 16  tokens 1  prefetch 2048: 73.9 ms for 1536 experts -> 57.5 GB/s, 769.3 us/expert/thread
+regacc=0 avx512  threads 16  tokens 3  prefetch 2048: 70.9 ms for 1536 experts -> 59.9 GB/s, 738.5 us/expert/thread
+regacc=1 avx512  threads 16  tokens 3  prefetch 2048: 69.0 ms for 1536 experts -> 61.5 GB/s, 719.2 us/expert/thread
+regacc=0 avx512  threads 1  tokens 1  prefetch 2048: 283.4 ms for 1536 experts -> 15.0 GB/s, 184.5 us/expert/thread
+regacc=1 avx512  threads 1  tokens 1  prefetch 2048: 160.3 ms for 1536 experts -> 26.5 GB/s, 104.4 us/expert/thread
+regacc=0 avx512  threads 1  tokens 3  prefetch 2048: 368.9 ms for 1536 experts -> 11.5 GB/s, 240.2 us/expert/thread
+regacc=1 avx512  threads 1  tokens 3  prefetch 2048: 291.8 ms for 1536 experts -> 14.6 GB/s, 190.0 us/expert/thread
+regacc=0 avx512  threads 16  tokens 1  prefetch 2048: 66.7 ms for 1536 experts -> 63.7 GB/s, 694.9 us/expert/thread
+regacc=1 avx512  threads 16  tokens 1  prefetch 2048: 69.2 ms for 1536 experts -> 61.3 GB/s, 721.3 us/expert/thread
+regacc=0 avx512  threads 16  tokens 3  prefetch 2048: 72.3 ms for 1536 experts -> 58.7 GB/s, 753.5 us/expert/thread
+regacc=1 avx512  threads 16  tokens 3  prefetch 2048: 66.9 ms for 1536 experts -> 63.5 GB/s, 696.8 us/expert/thread

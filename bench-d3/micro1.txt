@@ -1,0 +1,60 @@
+600.00 W, 7001 MHz, 14001 MHz
+== EXACT78=0
+PARITY n_in 2560 n_out 512 T 1 hash 5487e2fce0e3f774
+PARITY n_in 2560 n_out 512 T 2 hash c5c215a8d4a20756
+PARITY n_in 2560 n_out 512 T 3 hash 87fe8c372cc253e2
+PARITY n_in 2560 n_out 512 T 4 hash 4bc546f99fc3865f
+PARITY n_in 2560 n_out 512 T 5 hash 5bdba7799a5ace1b
+PARITY n_in 2560 n_out 512 T 6 hash a3b3857190a3bc1b
+PARITY n_in 2560 n_out 512 T 7 hash cd63c2304154e679
+PARITY n_in 2560 n_out 512 T 8 hash 37b798e41b98fae9
+SHAPE n_in 2560 n_out 512 T 1 :   2.77 us per call
+SHAPE n_in 2560 n_out 512 T 2 :   3.03 us per call
+SHAPE n_in 2560 n_out 512 T 3 :   3.35 us per call
+SHAPE n_in 2560 n_out 512 T 4 :   3.93 us per call
+SHAPE n_in 2560 n_out 512 T 6 :   4.98 us per call
+T 8 mmvf                 :   7.81 us per layer (median of 50 graphs of 48 layers)
+T 8 route_db host        :   5.42 us per layer (median of 50 graphs of 48 layers; rings 2640 of 2640, rows ok)
+T 8 mmvf+route_db host   :  13.15 us per layer (median of 50 graphs of 48 layers; rings 2640 of 2640, rows ok)
+== EXACT78=1
+PARITY n_in 2560 n_out 512 T 1 hash 5487e2fce0e3f774
+PARITY n_in 2560 n_out 512 T 2 hash c5c215a8d4a20756
+PARITY n_in 2560 n_out 512 T 3 hash 87fe8c372cc253e2
+PARITY n_in 2560 n_out 512 T 4 hash 4bc546f99fc3865f
+PARITY n_in 2560 n_out 512 T 5 hash 5bdba7799a5ace1b
+PARITY n_in 2560 n_out 512 T 6 hash a3b3857190a3bc1b
+PARITY n_in 2560 n_out 512 T 7 hash cd63c2304154e679
+PARITY n_in 2560 n_out 512 T 8 hash 37b798e41b98fae9
+SHAPE n_in 2560 n_out 512 T 1 :   2.76 us per call
+SHAPE n_in 2560 n_out 512 T 2 :   3.04 us per call
+SHAPE n_in 2560 n_out 512 T 3 :   3.37 us per call
+SHAPE n_in 2560 n_out 512 T 4 :   3.95 us per call
+SHAPE n_in 2560 n_out 512 T 6 :   4.99 us per call
+T 8 mmvf                 :   6.02 us per layer (median of 50 graphs of 48 layers)
+T 8 route_db host        :   5.42 us per layer (median of 50 graphs of 48 layers; rings 2640 of 2640, rows ok)
+T 8 mmvf+route_db host   :  11.35 us per layer (median of 50 graphs of 48 layers; rings 2640 of 2640, rows ok)
+== T=3 BLOCKS=1
+T 3 route_db host        :   4.60 us per layer (median of 50 graphs of 48 layers; rings 2640 of 2640, rows ok)
+T 3 mmvf+route_db host   :   7.83 us per layer (median of 50 graphs of 48 layers; rings 2640 of 2640, rows ok)
+== T=3 BLOCKS=4
+T 3 route_db host        :   4.81 us per layer (median of 50 graphs of 48 layers; rings 2640 of 2640, rows ok)
+T 3 mmvf+route_db host   :   8.03 us per layer (median of 50 graphs of 48 layers; rings 2640 of 2640, rows ok)
+== T=3 BLOCKS=8
+T 3 route_db host        :   4.65 us per layer (median of 50 graphs of 48 layers; rings 2640 of 2640, rows ok)
+T 3 mmvf+route_db host   :   7.90 us per layer (median of 50 graphs of 48 layers; rings 2640 of 2640, rows ok)
+== T=3 BLOCKS=16
+T 3 route_db host        :   4.66 us per layer (median of 50 graphs of 48 layers; rings 2640 of 2640, rows ok)
+T 3 mmvf+route_db host   :   7.90 us per layer (median of 50 graphs of 48 layers; rings 2640 of 2640, rows ok)
+== T=8 BLOCKS=1
+T 8 route_db host        :   5.44 us per layer (median of 50 graphs of 48 layers; rings 2640 of 2640, rows ok)
+T 8 mmvf+route_db host   :  11.37 us per layer (median of 50 graphs of 48 layers; rings 2640 of 2640, rows ok)
+== T=8 BLOCKS=4
+T 8 route_db host        :   5.32 us per layer (median of 50 graphs of 48 layers; rings 2640 of 2640, rows ok)
+T 8 mmvf+route_db host   :  11.29 us per layer (median of 50 graphs of 48 layers; rings 2640 of 2640, rows ok)
+== T=8 BLOCKS=8
+T 8 route_db host        :   5.15 us per layer (median of 50 graphs of 48 layers; rings 2640 of 2640, rows ok)
+T 8 mmvf+route_db host   :  11.08 us per layer (median of 50 graphs of 48 layers; rings 2640 of 2640, rows ok)
+== T=8 BLOCKS=16
+T 8 route_db host        :   5.02 us per layer (median of 50 graphs of 48 layers; rings 2640 of 2640, rows ok)
+T 8 mmvf+route_db host   :  10.97 us per layer (median of 50 graphs of 48 layers; rings 2640 of 2640, rows ok)
+PARITY all shapes T 1..8: EXACT78=0 == 1 (72 hashes)

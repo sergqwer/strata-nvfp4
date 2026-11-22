@@ -1,0 +1,11 @@
+# ab d1p 2026-11-21 01:26:41 A=D:/Projects/strata-dec3/bench-d3/base/strata.exe [] B=D:/Projects/strata-dec3/bench-d3/d1/strata.exe []
+# 01:26:41 600.00 W, 7001 MHz, 14001 MHz
+A prose 1 | 1200 generated in 4583 ms (261.8 tok/s) | 525 windows, avg T 2.83, 2.29 tokens/window, 8.73 ms/window = adapt wait 0.02 + verify 8.04 (GPU-reach wait 4.78 + per-layer host 2.88 [plan 0.07 actq 0.04 jobs 0.01 CPU 2.74] + stage 0.02) draft 0.63 + adapt join 0.00 + other 0.00
+B prose 1 | 1164 generated in 4640 ms (250.9 tok/s) | 521 windows, avg T 2.86, 2.23 tokens/window, 8.91 ms/window = adapt wait 0.02 + verify 8.22 (GPU-reach wait 4.71 + per-layer host 3.13 [plan 0.07 actq 0.04 jobs 0.01 CPU 2.98] + stage 0.02) draft 0.63 + adapt join 0.00 + other 0.00
+B prose 2 | 1200 generated in 4575 ms (262.3 tok/s) | 524 windows, avg T 2.84, 2.29 tokens/window, 8.73 ms/window = adapt wait 0.02 + verify 8.05 (GPU-reach wait 4.77 + per-layer host 2.90 [plan 0.07 actq 0.04 jobs 0.01 CPU 2.75] + stage 0.03) draft 0.62 + adapt join 0.00 + other 0.00
+A prose 2 | 1200 generated in 4597 ms (261.0 tok/s) | 522 windows, avg T 2.87, 2.30 tokens/window, 8.81 ms/window = adapt wait 0.02 + verify 8.12 (GPU-reach wait 4.77 + per-layer host 2.98 [plan 0.07 actq 0.04 jobs 0.01 CPU 2.83] + stage 0.03) draft 0.63 + adapt join 0.00 + other 0.00
+# 01:30:10 600.00 W, 14507 MHz, 14001 MHz
+summary d1p (mean of the runs; B vs A on ms/window and tok/s)
+  prose  A n=2  ms/window 8.77 (8.73..8.81)  tok/s 261.4  T 2.85  tok/window 2.29  verify 8.08  reach 4.78  host 2.93
+  prose  B n=2  ms/window 8.82 (8.73..8.91)  tok/s 256.6  T 2.85  tok/window 2.26  verify 8.14  reach 4.74  host 3.01
+  prose  B vs A: ms/window +0.050 (+0.57%), tok/s -1.84%

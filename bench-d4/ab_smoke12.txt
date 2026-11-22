@@ -1,0 +1,11 @@
+# ab smoke12 2026-11-21 05:32:41 A=/d/Projects/strata-dec3/bench-d3/d6/strata.exe [] [] B=/d/Projects/strata-dec3/bench-d4/w12/strata.exe [] [--spec 12]
+# 05:32:41 600.00 W, 405 MHz, 14001 MHz
+A struct 1 | 1500 generated in 3475 ms (431.7 tok/s) | 199 windows, avg T 7.89, 7.54 tokens/window, 17.46 ms/window = adapt wait 0.02 + verify 16.17 (GPU-reach wait 6.11 + per-layer host 9.66 [plan 0.24 actq 0.12 jobs 0.03 CPU 9.22] + stage 0.04) draft 1.20 + adapt join 0.00 + other 0.00 | slots 8323 | window up to 8 tokens, 91.2 MiB | free 572
+B struct 1 | 1500 generated in 4093 ms (366.5 tok/s) | 144 windows, avg T 11.10, 10.42 tokens/window, 28.43 ms/window = adapt wait 0.02 + verify 26.02 (GPU-reach wait 10.69 + per-layer host 14.46 [plan 0.42 actq 0.17 jobs 0.03 CPU 13.80] + stage 0.03) draft 2.28 + adapt join 0.00 + other 0.01 | slots 8320 | window up to 12 tokens, 115.6 MiB | free 516
+B struct 2 | 1500 generated in 4001 ms (374.9 tok/s) | 140 windows, avg T 11.17, 10.71 tokens/window, 28.58 ms/window = adapt wait 0.02 + verify 26.27 (GPU-reach wait 10.84 + per-layer host 14.55 [plan 0.42 actq 0.17 jobs 0.04 CPU 13.89] + stage 0.01) draft 2.19 + adapt join 0.00 + other 0.01 | slots 8320 | window up to 12 tokens, 115.6 MiB | free 516
+A struct 2 | 1500 generated in 3432 ms (437.1 tok/s) | 198 windows, avg T 7.87, 7.58 tokens/window, 17.33 ms/window = adapt wait 0.02 + verify 15.99 (GPU-reach wait 6.11 + per-layer host 9.47 [plan 0.24 actq 0.12 jobs 0.03 CPU 9.03] + stage 0.05) draft 1.20 + adapt join 0.06 + other 0.00 | slots 8323 | window up to 8 tokens, 91.2 MiB | free 572
+# 05:34:16 600.00 W, 7001 MHz, 14001 MHz
+summary smoke12 (mean of the runs; B vs A on ms/token and tok/s)
+  struct A n=2  ms/tok 2.301 (2.286..2.316)  tok/s 434.4  ms/window 17.39  T 7.88  tok/window 7.56  verify 16.08  reach 6.11  host 9.57  CPU 9.12  draft 1.20  slots 8323
+  struct B n=2  ms/tok 2.698 (2.669..2.728)  tok/s 370.7  ms/window 28.50  T 11.13  tok/window 10.57  verify 26.14  reach 10.77  host 14.51  CPU 13.85  draft 2.23  slots 8320
+  struct B vs A: ms/token +0.3975 (+17.28%), tok/s -14.66%

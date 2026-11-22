@@ -1,0 +1,11 @@
+regacc vs acc[]: random blocks + 48 real experts (48 layers), 1..9 tokens, 7056000 output rows: bit-identical (0 differing token vectors)
+
+tokens     acc[] us    regacc us  speedup   (one expert, gate/up + down, one core, cached; best of 50)
+1             192.8        104.0    1.85x
+2             220.7        146.4    1.51x
+3             247.5        193.2    1.28x
+4             271.0        239.0    1.13x
+7             401.2        372.0    1.08x
+8             545.0        479.9    1.14x
+
+RESULT: regacc bit-identical

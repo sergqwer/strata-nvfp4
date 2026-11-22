@@ -1,0 +1,23 @@
+strata: STRATA_HC_Q8=1: the 8-bit hyper-connection read hc8 (int8 rows + fp16 scales, fp32 sums), programmatic dependent launch
+strata: the hyper-connection read v4 (programmatic dependent launch)
+strata early read: the combine's gate timed out (block 87, 0 of 10): results invalid
+gr_hc8_check on NVIDIA GeForce RTX 5090 (170 SMs)
+  q8_1 image vs native_quantize_q8_1 (apply=0 inject=0): 0 of 640 blocks differ, 0 codes
+  q8_1 image vs native_quantize_q8_1 (apply=0 inject=1): 0 of 640 blocks differ, 0 codes
+  q8_1 image vs native_quantize_q8_1 (apply=1 inject=0): 0 of 640 blocks differ, 0 codes
+  q8_1 image vs native_quantize_q8_1 (apply=1 inject=1): 0 of 640 blocks differ, 0 codes
+  window invariance (T 1..8, early and late columns), graph replays, q8_1 image: 124 of 124 cases pass
+  accuracy, max |err| / RMS over 8 tokens (pending write + inject):
+    read             R_out      rs         lo         inject     mixed
+    hc8 (Q8_0)       2.06e-06   1.04e-07   8.70e-07   6.88e-07   2.57e-06
+    v4 (bf16)        2.06e-06   1.29e-07          -   8.97e-07   3.42e-06
+  early read (gated on the combine), 24 layers a graph, 6 small nodes before each combine, us a layer (medians of 15):
+    T   flag 0    flag 1    flag 2    flag 3    3 - 0   bitwise
+    2     47.23     46.61     46.56     48.41    +1.18   yes
+    3     49.11     48.93     48.55     48.44    -0.67   yes
+    4     49.91     50.91     48.55     49.28    -0.63   yes
+    5     51.03     51.49     51.51     51.24    +0.21   yes
+    6     49.94     50.81     49.90     50.35    +0.40   yes
+    7     55.85     56.33     56.08     54.97    -0.89   yes
+    8     54.87     55.81     54.83     55.23    +0.37   yes
+gr_hc8_check: 0 failures

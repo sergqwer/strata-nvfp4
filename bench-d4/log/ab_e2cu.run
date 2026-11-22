@@ -1,0 +1,20 @@
+# ab e2cu 2026-11-21 06:04:49 A=D:/Projects/strata-dec3/bench-d4/e1/strata.exe [] [] B=D:/Projects/strata-dec3/bench-d4/e2/strata.exe [] []
+# 06:04:49 600.00 W, 7001 MHz, 14001 MHz
+A conv 1 | 1153 generated in 4355 ms (264.8 tok/s) | 387 windows, avg T 3.62, 2.98 tokens/window, 11.25 ms/window = adapt wait 0.02 + verify 10.51 (GPU-reach wait 4.62 + per-layer host 5.50 [plan 0.11 actq 0.05 jobs 0.02 CPU 5.29] + stage 0.03) draft 0.68 + adapt join 0.01 + other 0.00 | slots 8323 | window up to 8 tokens, 91.2 MiB | free 572
+B conv 1 | 1077 generated in 4164 ms (258.6 tok/s) | 391 windows, avg T 3.44, 2.75 tokens/window, 10.65 ms/window = adapt wait 0.02 + verify 9.91 (GPU-reach wait 4.63 + per-layer host 4.90 [plan 0.10 actq 0.05 jobs 0.01 CPU 4.70] + stage 0.02) draft 0.65 + adapt join 0.00 + other 0.00 | slots 8643 | window up to 8 tokens, 91.2 MiB | free 572
+B conv 2 | 1066 generated in 4078 ms (261.4 tok/s) | 385 windows, avg T 3.39, 2.77 tokens/window, 10.59 ms/window = adapt wait 0.02 + verify 9.88 (GPU-reach wait 4.63 + per-layer host 4.86 [plan 0.10 actq 0.05 jobs 0.01 CPU 4.63] + stage 0.06) draft 0.64 + adapt join 0.01 + other 0.00 | slots 8643 | window up to 8 tokens, 91.2 MiB | free 572
+A conv 2 | 936 generated in 3629 ms (258.0 tok/s) | 347 windows, avg T 3.26, 2.70 tokens/window, 10.46 ms/window = adapt wait 0.02 + verify 9.73 (GPU-reach wait 4.61 + per-layer host 4.74 [plan 0.09 actq 0.05 jobs 0.01 CPU 4.55] + stage 0.02) draft 0.65 + adapt join 0.01 + other 0.00 | slots 8323 | window up to 8 tokens, 91.2 MiB | free 572
+# 06:06:25 600.00 W, 7001 MHz, 14001 MHz
+A uk 1 | 1200 generated in 5020 ms (239.1 tok/s) | 663 windows, avg T 2.14, 1.81 tokens/window, 7.57 ms/window = adapt wait 0.02 + verify 7.05 (GPU-reach wait 4.70 + per-layer host 1.97 [plan 0.04 actq 0.02 jobs 0.01 CPU 1.86] + stage 0.03) draft 0.47 + adapt join 0.00 + other 0.00 | slots 8323 | window up to 8 tokens, 91.2 MiB | free 572
+B uk 1 | 1168 generated in 4840 ms (241.3 tok/s) | 633 windows, avg T 2.18, 1.85 tokens/window, 7.65 ms/window = adapt wait 0.02 + verify 7.12 (GPU-reach wait 4.69 + per-layer host 2.06 [plan 0.05 actq 0.02 jobs 0.01 CPU 1.94] + stage 0.03) draft 0.47 + adapt join 0.00 + other 0.00 | slots 8643 | window up to 8 tokens, 91.2 MiB | free 572
+B uk 2 | 1200 generated in 5046 ms (237.8 tok/s) | 673 windows, avg T 2.10, 1.78 tokens/window, 7.50 ms/window = adapt wait 0.02 + verify 6.99 (GPU-reach wait 4.73 + per-layer host 1.90 [plan 0.04 actq 0.02 jobs 0.01 CPU 1.77] + stage 0.05) draft 0.46 + adapt join 0.00 + other 0.00 | slots 8643 | window up to 8 tokens, 91.2 MiB | free 572
+A uk 2 | 1200 generated in 5067 ms (236.8 tok/s) | 664 windows, avg T 2.15, 1.81 tokens/window, 7.63 ms/window = adapt wait 0.02 + verify 7.11 (GPU-reach wait 4.68 + per-layer host 2.05 [plan 0.04 actq 0.02 jobs 0.01 CPU 1.95] + stage 0.02) draft 0.46 + adapt join 0.01 + other 0.00 | slots 8323 | window up to 8 tokens, 91.2 MiB | free 572
+# 06:08:05 600.00 W, 7001 MHz, 14001 MHz
+summary e2cu (mean of the runs; B vs A on ms/token and tok/s)
+  conv   A n=2  ms/tok 3.825 (3.775..3.874)  tok/s 261.4  ms/window 10.86  T 3.44  tok/window 2.84  verify 10.12  reach 4.62  host 5.12  CPU 4.92  draft 0.67  slots 8323
+  conv   B n=2  ms/tok 3.848 (3.823..3.873)  tok/s 260.0  ms/window 10.62  T 3.42  tok/window 2.76  verify 9.89  reach 4.63  host 4.88  CPU 4.67  draft 0.65  slots 8643
+  conv   B vs A: ms/token +0.0233 (+0.61%), tok/s -0.54%
+  uk     A n=2  ms/tok 4.199 (4.182..4.215)  tok/s 237.9  ms/window 7.60  T 2.15  tok/window 1.81  verify 7.08  reach 4.69  host 2.01  CPU 1.91  draft 0.46  slots 8323
+  uk     B n=2  ms/tok 4.174 (4.135..4.213)  tok/s 239.6  ms/window 7.58  T 2.14  tok/window 1.81  verify 7.05  reach 4.71  host 1.98  CPU 1.85  draft 0.46  slots 8643
+  uk     B vs A: ms/token -0.0246 (-0.59%), tok/s +0.67%
+AB-DONE

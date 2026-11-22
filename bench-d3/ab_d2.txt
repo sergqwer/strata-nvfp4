@@ -1,0 +1,23 @@
+# ab d2 2026-11-21 01:58:21 A=D:/Projects/strata-dec3/bench-d3/d1/strata.exe [] B=D:/Projects/strata-dec3/bench-d3/d2/strata.exe []
+# 01:58:21 600.00 W, 405 MHz, 14001 MHz
+A struct 1 | 1500 generated in 3396 ms (441.7 tok/s) | 196 windows, avg T 7.84, 7.65 tokens/window, 17.33 ms/window = adapt wait 0.02 + verify 16.04 (GPU-reach wait 6.35 + per-layer host 9.28 [plan 0.26 actq 0.12 jobs 0.02 CPU 8.83] + stage 0.04) draft 1.20 + adapt join 0.00 + other 0.00
+B struct 1 | 1500 generated in 3454 ms (434.2 tok/s) | 197 windows, avg T 7.86, 7.61 tokens/window, 17.53 ms/window = adapt wait 0.02 + verify 16.23 (GPU-reach wait 6.28 + per-layer host 9.54 [plan 0.27 actq 0.12 jobs 0.02 CPU 9.08] + stage 0.04) draft 1.21 + adapt join 0.00 + other 0.00
+B struct 2 | 1500 generated in 3455 ms (434.2 tok/s) | 200 windows, avg T 7.80, 7.50 tokens/window, 17.27 ms/window = adapt wait 0.02 + verify 15.96 (GPU-reach wait 6.19 + per-layer host 9.36 [plan 0.26 actq 0.12 jobs 0.02 CPU 8.91] + stage 0.04) draft 1.21 + adapt join 0.00 + other 0.00
+A struct 2 | 1500 generated in 3439 ms (436.1 tok/s) | 199 windows, avg T 7.82, 7.54 tokens/window, 17.28 ms/window = adapt wait 0.02 + verify 16.00 (GPU-reach wait 6.31 + per-layer host 9.29 [plan 0.26 actq 0.12 jobs 0.02 CPU 8.82] + stage 0.06) draft 1.19 + adapt join 0.00 + other 0.00
+A struct 3 | 1500 generated in 3545 ms (423.1 tok/s) | 199 windows, avg T 7.86, 7.54 tokens/window, 17.81 ms/window = adapt wait 0.02 + verify 16.48 (GPU-reach wait 6.25 + per-layer host 9.82 [plan 0.27 actq 0.12 jobs 0.02 CPU 9.36] + stage 0.04) draft 1.22 + adapt join 0.00 + other 0.01
+B struct 3 | 1500 generated in 3430 ms (437.4 tok/s) | 196 windows, avg T 7.90, 7.65 tokens/window, 17.50 ms/window = adapt wait 0.02 + verify 16.16 (GPU-reach wait 6.25 + per-layer host 9.50 [plan 0.27 actq 0.12 jobs 0.03 CPU 9.04] + stage 0.04) draft 1.23 + adapt join 0.00 + other 0.00
+# 02:00:36 600.00 W, 7001 MHz, 14001 MHz
+A prose 1 | 1200 generated in 4642 ms (258.5 tok/s) | 515 windows, avg T 2.94, 2.33 tokens/window, 9.01 ms/window = adapt wait 0.02 + verify 8.33 (GPU-reach wait 4.76 + per-layer host 3.18 [plan 0.07 actq 0.04 jobs 0.01 CPU 3.03] + stage 0.02) draft 0.63 + adapt join 0.00 + other 0.00
+B prose 1 | 1200 generated in 4577 ms (262.2 tok/s) | 514 windows, avg T 2.94, 2.33 tokens/window, 8.90 ms/window = adapt wait 0.02 + verify 8.19 (GPU-reach wait 4.76 + per-layer host 3.05 [plan 0.07 actq 0.04 jobs 0.01 CPU 2.90] + stage 0.02) draft 0.65 + adapt join 0.01 + other 0.00
+B prose 2 | 1200 generated in 4566 ms (262.8 tok/s) | 508 windows, avg T 2.98, 2.36 tokens/window, 8.99 ms/window = adapt wait 0.02 + verify 8.28 (GPU-reach wait 4.76 + per-layer host 3.14 [plan 0.07 actq 0.04 jobs 0.01 CPU 2.99] + stage 0.02) draft 0.65 + adapt join 0.00 + other 0.00
+A prose 2 | 1200 generated in 4625 ms (259.5 tok/s) | 514 windows, avg T 2.94, 2.33 tokens/window, 9.00 ms/window = adapt wait 0.02 + verify 8.28 (GPU-reach wait 4.77 + per-layer host 3.13 [plan 0.07 actq 0.04 jobs 0.01 CPU 2.98] + stage 0.02) draft 0.66 + adapt join 0.00 + other 0.00
+A prose 3 | 1200 generated in 4628 ms (259.3 tok/s) | 515 windows, avg T 2.94, 2.33 tokens/window, 8.99 ms/window = adapt wait 0.02 + verify 8.27 (GPU-reach wait 4.79 + per-layer host 3.10 [plan 0.07 actq 0.04 jobs 0.01 CPU 2.95] + stage 0.02) draft 0.66 + adapt join 0.00 + other 0.00
+B prose 3 | 1200 generated in 4740 ms (253.2 tok/s) | 530 windows, avg T 2.84, 2.26 tokens/window, 8.94 ms/window = adapt wait 0.02 + verify 8.22 (GPU-reach wait 4.76 + per-layer host 3.08 [plan 0.08 actq 0.04 jobs 0.01 CPU 2.92] + stage 0.03) draft 0.66 + adapt join 0.00 + other 0.00
+# 02:02:58 600.00 W, 810 MHz, 14001 MHz
+summary d2 (mean of the runs; B vs A on ms/window and tok/s)
+  struct A n=3  ms/window 17.47 (17.28..17.81)  tok/s 433.6  T 7.84  tok/window 7.58  verify 16.17  reach 6.30  host 9.46
+  struct B n=3  ms/window 17.43 (17.27..17.53)  tok/s 435.3  T 7.85  tok/window 7.59  verify 16.12  reach 6.24  host 9.47
+  struct B vs A: ms/window -0.040 (-0.23%), tok/s +0.38%
+  prose  A n=3  ms/window 9.00 (8.99..9.01)  tok/s 259.1  T 2.94  tok/window 2.33  verify 8.29  reach 4.77  host 3.14
+  prose  B n=3  ms/window 8.94 (8.90..8.99)  tok/s 259.4  T 2.92  tok/window 2.32  verify 8.23  reach 4.76  host 3.09
+  prose  B vs A: ms/window -0.057 (-0.63%), tok/s +0.12%

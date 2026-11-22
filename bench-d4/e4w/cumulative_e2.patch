@@ -1,0 +1,2163 @@
+diff --git a/cmake/strata_gpu_engine.cmake b/cmake/strata_gpu_engine.cmake
+index 99b7ee5e0..ac2e0c037 100644
+--- a/cmake/strata_gpu_engine.cmake
++++ b/cmake/strata_gpu_engine.cmake
+@@ -992,6 +992,10 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
+   add_executable(router_chain_bench src/kernels/router_chain_bench.cpp)
+   target_include_directories(router_chain_bench PRIVATE ${_strata_gpu_include_directories})
+   target_link_libraries(router_chain_bench PRIVATE strata_kernels ${_strata_gpu_runtime_target})
++  # dec3 D5: the QSA indexer chain (window append, resolve) old vs new, bitwise, and its time per layer
++  add_executable(qsa_front_bench src/kernels/qsa_front_bench.cpp)
++  target_include_directories(qsa_front_bench PRIVATE ${_strata_gpu_include_directories})
++  target_link_libraries(qsa_front_bench PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+   # B6: the dense projections' time per verify row at the model's shapes, default vs STRATA_B6_MMVQ_ROWS, bitwise
+   if(STRATA_ENABLE_CUDA)
+     add_executable(b6_mmvq_bench src/kernels/b6_mmvq_bench.cpp)
+diff --git a/include/strata/core/emulate.hpp b/include/strata/core/emulate.hpp
+index 6f28b97f7..2e15f9f41 100644
+--- a/include/strata/core/emulate.hpp
++++ b/include/strata/core/emulate.hpp
+@@ -22,6 +22,16 @@ inline int emulated_cc() {
+ }
+ inline int cc_major_of(int real_major) { return emulated_cc() ? emulated_cc() / 10 : real_major; }
+ inline int cc_minor_of(int real_minor) { return emulated_cc() ? emulated_cc() % 10 : real_minor; }
++/// STRATA_EMULATE_SMS=N (tests only, CUDA): a smaller card of this generation - the engine holds the other multiprocessors with an
++/// idle kernel (kernels::sm_hog_start) and the checks of co-resident grids read sms_of; every other query still sees the real count
++inline int emulated_sms() {
++    static const int n = [] {
++        const char* e = std::getenv("STRATA_EMULATE_SMS");
++        return e ? std::atoi(e) : 0;
++    }();
++    return n > 0 ? n : 0;
++}
++inline int sms_of(int real) { return emulated_sms() > 0 && emulated_sms() < real ? emulated_sms() : real; }
+ /// cudaDevAttrMaxSharedMemoryPerBlockOptin as the emulated card reports it: 64 KB on Turing, 163 KB on the A100,
+ /// 99 KB on the other Ampere and Ada cards
+ inline int smem_optin_of(int real) {
+diff --git a/include/strata/core/layer.hpp b/include/strata/core/layer.hpp
+index a1f3df1f4..d607b8d85 100644
+--- a/include/strata/core/layer.hpp
++++ b/include/strata/core/layer.hpp
+@@ -288,6 +288,15 @@ void qsa_set_kv_resident(int64_t cells);
+ /// captured graphs stay valid.  Set before sizing and initializing the session and the drafter.
+ void qsa_set_kv_elastic(bool enabled, int64_t init_cells);
+ bool qsa_kv_elastic();
++/// E2: a streamed (KV streaming, mode 1) state's indexer pooled keys and the primary's RoPE table get the same
++/// treatment: addresses for the whole context, physical memory for the first cells (qsa_set_kv_elastic's init_cells),
++/// grown / shrunk by the calls below with the K/V pools.  Set before sizing and initializing the session.
++void qsa_set_session_elastic(bool enabled);
++/// Whether any such table pool was made (the session then grows like an elastic K/V does: kvg_ensure).
++bool qsa_session_elastic();
++/// A whole new table for an elastic table array at `dev` (`floats` of them): its host copy takes `src`, its mapped
++/// rows are uploaded (synchronous).  -1: `dev` is no elastic table (copy it yourself); 0: failed; 1: done.
++int qsa_elastic_table_store(const float* dev, const float* src, size_t floats);
+ /// batch-vram: the states made from now on belong to this owner (0: the main session and its drafter, the default;
+ /// 1 + b: --batch slot b, which grows on its own).  Every call below takes the owner its pools were made under.
+ void qsa_set_kv_elastic_owner(int owner);
+diff --git a/include/strata/core/verify.hpp b/include/strata/core/verify.hpp
+index a2d2cd337..5bdaa6955 100644
+--- a/include/strata/core/verify.hpp
++++ b/include/strata/core/verify.hpp
+@@ -686,6 +686,9 @@ private:
+     // mixer's projections, joined before the recurrence / the attention
+     cudaStream_t side_ = nullptr;
+     cudaEvent_t mfork_ = nullptr, mjoin_ = nullptr;
++    // dec3 D5 STRATA_IDX_FORK: the indexer's key append on a branch off side_ beside its query projection
++    cudaStream_t side3_ = nullptr;
++    cudaEvent_t afork_ = nullptr, ajoin_ = nullptr;
+     // fork b063c13 (STRATA_SIDE_MIXER=2): a second branch for the GDN gate projection and the QSA queries' chain
+     cudaStream_t side2_ = nullptr;
+     cudaEvent_t pfork_ = nullptr, pjoin_ = nullptr;
+diff --git a/include/strata/kernels/fused_gr.hpp b/include/strata/kernels/fused_gr.hpp
+index 14b0c51e3..0f212d691 100644
+--- a/include/strata/kernels/fused_gr.hpp
++++ b/include/strata/kernels/fused_gr.hpp
+@@ -97,6 +97,10 @@ void fused_gr_v3_print_resources();
+ /// The bench and tests only: the hyper-connection read v4 (0 = v3, 1 = v4, 2 = v4 with programmatic dependent launch
+ /// on sm_90+); -1 = STRATA_GR_V4 (unset: 2, the fork's default).
+ void fused_gr_set_v4(int mode);
++/// The bench and tests only (dec-round3 D3; 1 = on, the default, 0 = the old path, -1 = the env): hc8 `up` stages lo with
++/// every load in flight at once (STRATA_HC8_LOSTAGE); the early read counts its gate pass after the dots (STRATA_ER_LATE_PASS).
++void fused_gr_set_hc8_lostage(int on);
++void fused_gr_set_er_late_pass(int on);
+ /// The bench and tests only: the hyper-connection read v5 on top of v4's dispatch (1) or off (0, the default);
+ /// -1 = STRATA_GR_V5 (=1: on).  The same bits as v4 (gr_v4_check); used only where v4 runs (STRATA_GR_V4 1 or 2).
+ void fused_gr_set_v5(int on);
+diff --git a/include/strata/kernels/kv_stream.hpp b/include/strata/kernels/kv_stream.hpp
+index 8108795b8..7e875a858 100644
+--- a/include/strata/kernels/kv_stream.hpp
++++ b/include/strata/kernels/kv_stream.hpp
+@@ -108,6 +108,8 @@ void kv_stage_from_host(const QsaAttnPools& stage, const KvHostPools& host, int
+ void kv_unstage_to_host(const QsaAttnPools& stage, const KvHostPools& host, int fmt, int64_t b0, int64_t b1,
+                         const QsaShapes& s, void* stream);
+ 
++/// Test hook (dec3 D5): 1 / 0 forces the resolve's batched lookups on / off, -1 = STRATA_KV_RESOLVE_ILP (default on).
++void kv_stream_set_resolve_ilp(int on);
+ struct KvStreamCounters {
+     uint64_t misses = 0, lookups = 0, calls = 0;
+     bool overflow = false;
+diff --git a/include/strata/kernels/native_qsa_indexer.hpp b/include/strata/kernels/native_qsa_indexer.hpp
+index be2ae65fc..5064479e2 100644
+--- a/include/strata/kernels/native_qsa_indexer.hpp
++++ b/include/strata/kernels/native_qsa_indexer.hpp
+@@ -8,6 +8,8 @@ namespace strata::kernels {
+ // native QSA norm/gate switch; existing captures retain their selected kernels.
+ void native_qsa_indexer_set_enabled(bool enabled);
+ bool native_qsa_indexer_enabled();
++// Test hook (dec3 D5): 1 / 0 forces the parallel window append on / off, -1 = STRATA_IDX_APPEND_PAR (default on).
++void native_qsa_indexer_set_append_par(int on);
+ 
+ // Pinned F16 raw-key cache / F32 pooling / weighted RMSNorm / text IMRoPE.
+ // Fixed single-sequence geometry: idx_dim=128, idx_block=4, n_rot=64.
+diff --git a/include/strata/kernels/qsa_select.hpp b/include/strata/kernels/qsa_select.hpp
+index d5bdc7307..ef80088a2 100644
+--- a/include/strata/kernels/qsa_select.hpp
++++ b/include/strata/kernels/qsa_select.hpp
+@@ -34,6 +34,8 @@ struct QsaScoreRows {
+ /// keys; the same arithmetic in the same order: bit-identical scores).
+ void qsa_block_scores_rows(const QsaScoreRows& rows, const float* q_idx, const int32_t* steps, int64_t nq,
+                            int64_t max_blocks, const QsaShapes& s, float* scores, void* stream);
++/// Test hook (dec3 D5): 1 / 0 forces the decode call's pair-parallel scorer on / off, -1 = STRATA_SCORES_PAIRS.
++void qsa_set_scores_pairs(int on);
+ void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx, const int32_t* steps, int64_t nq,
+                       int64_t max_blocks, const QsaShapes& s, float* scores, void* stream,
+                       int64_t active_blocks = -1);   ///< perf-review C-1: > 0 launches only this many blocks (the
+diff --git a/include/strata/kernels/verify_kernels.hpp b/include/strata/kernels/verify_kernels.hpp
+index b463201ae..b378c4823 100644
+--- a/include/strata/kernels/verify_kernels.hpp
++++ b/include/strata/kernels/verify_kernels.hpp
+@@ -102,6 +102,9 @@ void wait_flag_ge_stamped(const uint32_t* flag, uint32_t value, unsigned long lo
+ /// the GPU's %globaltimer (ns) into buf[i] (a one-thread kernel: the verify window's stage profiler).  Inside a PDL
+ /// stretch (pdl.hpp) the stamp passes the early launch on, so a profiled window keeps the chain it measures.
+ void gpu_stamp(unsigned long long* buf, int i, void* stream);
++/// multiarch tests (STRATA_EMULATE_SMS=N): hold every multiprocessor past the first keep_sms with an idle kernel for the life of the
++/// process (CUDA only); returns how many it holds (0: not started)
++int sm_hog_start(int keep_sms);
+ /// an empty one-thread kernel (a graph node that does nothing: STRATA_DUMMY_NODES measures what a node costs in a window)
+ void gpu_noop(void* stream);
+ /// dst[r][0, w) = src[r][0, w) for `rows` rows of source stride `src_w` floats (the query half of each q/gate head
+diff --git a/src/core/layer.cpp b/src/core/layer.cpp
+index 9ae880f12..214893a33 100644
+--- a/src/core/layer.cpp
++++ b/src/core/layer.cpp
+@@ -629,16 +629,22 @@ struct ElasticPool {
+     strata::core::VmmRange range;
+     std::vector<uint64_t> off, per_slot;   // each array's offset in the range (whole chunks) and bytes per page slot
+     int64_t n_slots = 0, page_size = 0;
++    int64_t extra = 0;   // slots past ceil(cells / page_size) the cells need (the pooled keys' 2 spare rows)
+     int owner = 0;
++    // E2 (session buffers): a table's host copy, one per array (the RoPE table): a fresh chunk gets its rows from it
++    std::vector<std::vector<float>> host;
+ };
+ std::vector<std::unique_ptr<ElasticPool>> g_pools;
++// E2: under KV streaming the indexer's pooled keys and the RoPE table are elastic too (STRATA_SESSION_GROW=0: off)
++bool g_sess_elastic = false;
++bool g_sess_made = false;   // at least one such pool was made
+ 
+ int64_t pool_chunks(const ElasticPool& p, size_t a, int64_t slots) {
+     const uint64_t G = strata::core::vmm_granularity();
+     return (int64_t) (((uint64_t) slots * p.per_slot[a] + G - 1) / G);
+ }
+ int64_t pool_slots(const ElasticPool& p, int64_t cells) {
+-    return std::min<int64_t>(p.n_slots, std::max<int64_t>((cells + p.page_size - 1) / p.page_size, 1));
++    return std::min<int64_t>(p.n_slots, std::max<int64_t>((cells + p.page_size - 1) / p.page_size + p.extra, 1));
+ }
+ /// Whole page slots every array of the pool has mapped.
+ int64_t pool_slots_mapped(const ElasticPool& p) {
+@@ -685,6 +691,19 @@ bool pool_grow(ElasticPool& p, int64_t cells, const std::function<strata::core::
+                              cudaGetErrorString(cudaGetLastError()));
+                 return false;
+             }
++        if (a < p.host.size()) {   // E2: a table's chunk gets the table's values (the caller syncs before anything reads them)
++            const uint64_t len = (uint64_t) p.n_slots * p.per_slot[a];
++            for (const int64_t c : fresh) {
++                const uint64_t at = (uint64_t) (c - c0) * G;
++                if (at >= len) continue;
++                if (cudaMemcpy(p.range.base() + (uint64_t) c * G, (const uint8_t*) p.host[a].data() + at,
++                               (size_t) std::min<uint64_t>(G, len - at), cudaMemcpyHostToDevice) != cudaSuccess) {
++                    std::fprintf(stderr, "strata: an elastic table could not be filled: %s\n",
++                                 cudaGetErrorString(cudaGetLastError()));
++                    return false;
++                }
++            }
++        }
+     }
+     return true;
+ }
+@@ -696,10 +715,28 @@ void qsa_set_kv_elastic(bool enabled, int64_t init_cells) {
+ }
+ bool qsa_kv_elastic() { return g_kv_elastic; }
+ void qsa_set_kv_elastic_owner(int owner) { g_kv_elastic_owner = owner; }
++void qsa_set_session_elastic(bool enabled) { g_sess_elastic = enabled && strata::core::vmm_available(); }
++int qsa_elastic_table_store(const float* dev, const float* src, size_t floats) {
++    const uint64_t G = strata::core::vmm_granularity();
++    for (auto& p : g_pools)
++        for (size_t a = 0; a < p->host.size(); ++a) {
++            if ((const float*) (p->range.base() + p->off[a]) != dev) continue;
++            if (floats * 4 != p->host[a].size() * 4) return 0;
++            std::copy(src, src + floats, p->host[a].begin());   // what a chunk mapped later gets
++            const int64_t c0 = (int64_t) (p->off[a] / G);
++            int64_t c = 0;
++            while (p->range.mapped(c0 + c) && (uint64_t) c * G < floats * 4) ++c;
++            const size_t n = (size_t) std::min<uint64_t>(floats * 4, (uint64_t) c * G);
++            return n == 0 || cudaMemcpy((void*) dev, src, n, cudaMemcpyHostToDevice) == cudaSuccess ? 1 : 0;
++        }
++    return -1;
++}
++bool qsa_session_elastic() { return g_sess_made; }
+ int64_t qsa_kv_elastic_cells(int owner) {
+     int64_t cells = std::numeric_limits<int64_t>::max();
+     for (const auto& p : g_pools)
+-        if (p->owner == owner) cells = std::min<int64_t>(cells, pool_slots_mapped(*p) * p->page_size);
++        if (p->owner == owner)
++            cells = std::min<int64_t>(cells, std::max<int64_t>(0, pool_slots_mapped(*p) - p->extra) * p->page_size);
+     return cells;
+ }
+ int64_t qsa_kv_elastic_need(int64_t cells, int owner) {
+@@ -731,7 +768,25 @@ bool qsa_kv_elastic_grow(int64_t cells, const std::function<strata::core::VmmChu
+         ok = cudaSetDevice(d) == cudaSuccess && cudaDeviceSynchronize() == cudaSuccess && ok;
+         cudaSetDevice(cur);
+     }
+-    return cudaDeviceSynchronize() == cudaSuccess && ok;
++    ok = cudaDeviceSynchronize() == cudaSuccess && ok;
++    // debug (STRATA_SESSION_GROW_CHECK=1): every mapped row of an elastic table read back against its host copy
++    if (static const bool chk = std::getenv("STRATA_SESSION_GROW_CHECK") != nullptr; chk && ok) {
++        const uint64_t G = strata::core::vmm_granularity();
++        for (auto& p : g_pools)
++            for (size_t a = 0; p->owner == owner && a < p->host.size(); ++a) {
++                const uint64_t len = (uint64_t) p->n_slots * p->per_slot[a];
++                const int64_t c0 = (int64_t) (p->off[a] / G);
++                int64_t c = 0;
++                while (p->range.mapped(c0 + c) && (uint64_t) c * G < len) ++c;
++                const size_t n = (size_t) std::min<uint64_t>(len, (uint64_t) c * G);
++                std::vector<uint8_t> back(n);
++                const bool same = cudaMemcpy(back.data(), p->range.base() + p->off[a], n, cudaMemcpyDeviceToHost) == cudaSuccess &&
++                                  std::memcmp(back.data(), p->host[a].data(), n) == 0;
++                std::fprintf(stderr, "strata: STRATA_SESSION_GROW_CHECK: table array %zu, %zu bytes mapped: %s\n", a, n,
++                             same ? "equal to its host copy" : "DIFFERENT");
++            }
++    }
++    return ok;
+ }
+ int64_t qsa_kv_elastic_shrink(int64_t cells, const std::function<void(strata::core::VmmChunk)>& give, int owner) {
+     const uint64_t G = strata::core::vmm_granularity();
+@@ -803,6 +858,46 @@ uint64_t kv_pool_bytes(const QsaShapes& s, int64_t pages, bool hybrid, bool int8
+     return int8 ? (uint64_t) pages * s.page_size * strata::kernels::kv_q8_bytes_per_cell(s) + 64
+                 : (uint64_t) pages * s.n_head_kv * s.page_size * s.head_dim * 2 * 2;
+ }
++/// E2: a streamed main layer's pooled keys (and the primary's RoPE table) live in VMM ranges sized for the context
++bool sess_elastic_state(const KvPlan& p) { return g_sess_elastic && p.mode == 1; }
++/// One elastic table pool: `arrays` arrays of `n_slots` rows of `per_slot` bytes, a row per `page` cells, `extra`
++/// rows past the cells' own; the first `init_cells` cells mapped (zeroed, or from `fill`). nullptr: no VMM room.
++ElasticPool* make_table_pool(size_t arrays, int64_t n_slots, uint64_t per_slot, int64_t page, int64_t extra,
++                             std::vector<std::vector<float>> host) {
++    auto pool = std::make_unique<ElasticPool>();
++    const uint64_t G = strata::core::vmm_granularity();
++    uint64_t at = 0;
++    for (size_t a = 0; a < arrays; ++a) {
++        pool->off.push_back(at);
++        pool->per_slot.push_back(per_slot);
++        at += ((uint64_t) n_slots * per_slot + G - 1) / G * G;
++    }
++    pool->n_slots = n_slots;
++    pool->page_size = page;
++    pool->extra = extra;
++    pool->owner = g_kv_elastic_owner;
++    pool->host = std::move(host);
++    if (!pool->range.reserve(at) || !pool_grow(*pool, g_kv_elastic_init, [] { return (strata::core::VmmChunk) 0; })) {
++        std::fprintf(stderr, "strata: an elastic session table could not reserve or map its range\n");
++        return nullptr;
++    }
++    g_pools.push_back(std::move(pool));
++    g_sess_made = true;
++    return g_pools.back().get();
++}
++/// Bytes of `array` at its start that are mapped in an elastic pool (`full` when `p` is no elastic array).
++uint64_t elastic_live_bytes(const void* ptr, uint64_t full) {
++    const uint64_t G = strata::core::vmm_granularity();
++    for (const auto& p : g_pools)
++        for (size_t a = 0; a < p->off.size(); ++a) {
++            if (p->range.base() + p->off[a] != (const uint8_t*) ptr) continue;
++            const int64_t c0 = (int64_t) (p->off[a] / G);
++            int64_t c = 0;
++            while (p->range.mapped(c0 + c)) ++c;
++            return std::min<uint64_t>(full, (uint64_t) c * G);
++        }
++    return full;
++}
+ }  // namespace
+ 
+ void qsa_set_kv_resident(int64_t cells) { g_kv_resident = cells > 0 ? cells : 0; }
+@@ -835,9 +930,10 @@ uint64_t qsa_state_bytes(const ModelGeometry& g, int64_t max_cells, bool with_ro
+     if (p.mode == 1) n += strata::kernels::kv_stream_map_bytes(p.slots) + 6 * 16;   // the residency map
+     n += (uint64_t) (s.idx_block - 1) * s.idx_dim * 4;                         // tail
+     n += (uint64_t) s.idx_dim * 4;                                             // dead
+-    n += (uint64_t) p.pooled_rows * s.idx_dim * 4;                             // pooled
++    const bool el = sess_elastic_state(p);   // E2: pooled keys / RoPE table in their own VMM ranges
++    if (!el) n += (uint64_t) p.pooled_rows * s.idx_dim * 4;                    // pooled
+     n += 16;                                                                   // block_pos
+-    if (with_rope) n += (uint64_t) max_cells * (s.n_rot / 2) * 4 * 2;          // cos + sin tables
++    if (with_rope && !el) n += (uint64_t) max_cells * (s.n_rot / 2) * 4 * 2;   // cos + sin tables
+     n += strata::kernels::qsa_step_bytes() + 16;                               // counts and aligned attention status
+     n += (uint64_t) s.n_head * 4;                                              // pos_dev
+     return align_up16(n) + 256;
+@@ -934,11 +1030,27 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
+     st.idx_tail = c.take<float>((uint64_t) (s.idx_block - 1) * s.idx_dim);
+     st.idx_dead = c.take<float>((uint64_t) s.idx_dim);
+     st.idx_pooled_rows = p.pooled_rows;
+-    st.idx_pooled = c.take<float>((uint64_t) p.pooled_rows * s.idx_dim);
++    const bool el = sess_elastic_state(p);
++    if (el) {   // E2: one row per idx_block cells (+2), mapped as the context grows, zeroed when mapped
++        ElasticPool* ep = make_table_pool(1, p.pooled_rows, (uint64_t) s.idx_dim * 4, s.idx_block, 2, {});
++        if (ep == nullptr) return 0;
++        st.idx_pooled = (float*) ep->range.base();
++    } else
++        st.idx_pooled = c.take<float>((uint64_t) p.pooled_rows * s.idx_dim);
+     st.idx_block_pos = c.take<int32_t>(1);
+     if (share_rope != nullptr) {
+         st.cos_tab = share_rope->cos_tab;
+         st.sin_tab = share_rope->sin_tab;
++    } else if (el) {
++        // the whole table built once on the host, as below; a chunk mapped later gets its rows from this copy
++        const size_t half = (size_t) (s.n_rot / 2);
++        std::vector<std::vector<float>> host(2, std::vector<float>((size_t) max_cells * half));
++        strata::kernels::build_rope_table((int) s.n_rot, strata::kernels::rope_scaling(), (int) max_cells,
++                                          host[0].data(), host[1].data());
++        ElasticPool* ep = make_table_pool(2, max_cells, (uint64_t) half * 4, 1, 0, std::move(host));
++        if (ep == nullptr) return 0;
++        st.cos_tab = (float*) (ep->range.base() + ep->off[0]);
++        st.sin_tab = (float*) (ep->range.base() + ep->off[1]);
+     } else {
+         st.cos_tab = c.take<float>((uint64_t) max_cells * (s.n_rot / 2));
+         st.sin_tab = c.take<float>((uint64_t) max_cells * (s.n_rot / 2));
+@@ -993,7 +1105,11 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
+     // frequencies in float64 and reproducing that on device means double-precision `pow`/`cos` that need not
+     // agree with the host's libm.  A table shorter than the sequence would have the rotation read past it.
+     // The process's rope scaling (none by default) is INSIDE the table - the rotation kernels cannot tell.
+-    if (share_rope == nullptr) {
++    if (share_rope == nullptr && el) {   // E2: the mapped rows are filled already (make_table_pool)
++        st.owns_rope = true;
++        if (s.n_rot == 64)
++            strata::kernels::rope_table_set(st.cos_tab, st.sin_tab, (int) max_cells, strata::kernels::rope_scaling());
++    } else if (share_rope == nullptr) {
+         std::vector<float> hc((size_t) max_cells * (s.n_rot / 2)), hs((size_t) max_cells * (s.n_rot / 2));
+         strata::kernels::build_rope_table((int) s.n_rot, strata::kernels::rope_scaling(), (int) max_cells,
+                                           hc.data(), hs.data());
+@@ -1046,7 +1162,8 @@ void qsa_state_zero(const QsaState& st, const ModelGeometry& g, void* stream) {
+     if (st.kv_mode == 1) strata::kernels::kv_stream_reset(st.map, stream);
+     cudaMemsetAsync(st.idx_tail, 0, (size_t) (s.idx_block - 1) * s.idx_dim * 4, cs);
+     cudaMemsetAsync(st.idx_dead, 0, (size_t) s.idx_dim * 4, cs);
+-    cudaMemsetAsync(st.idx_pooled, 0, (size_t) st.idx_pooled_rows * s.idx_dim * 4, cs);
++    // (an elastic pooled array: what is mapped; a chunk mapped later is zeroed then)
++    cudaMemsetAsync(st.idx_pooled, 0, (size_t) elastic_live_bytes(st.idx_pooled, (uint64_t) st.idx_pooled_rows * s.idx_dim * 4), cs);
+ }
+ 
+ strata::kernels::QsaAttnPools qsa_attn_pools(const QsaState& st) {
+diff --git a/src/core/nv_defaults.cpp b/src/core/nv_defaults.cpp
+index c1fca99f6..a58fca1ea 100644
+--- a/src/core/nv_defaults.cpp
++++ b/src/core/nv_defaults.cpp
+@@ -148,6 +148,9 @@ std::vector<std::pair<std::string, std::string>> nv_default_env(int major, int m
+             // its grid wait (their flood held the read up); route + doorbell in one launch, the rows first.  All bitwise;
+             // nsys prose front GDN 77.6 -> ~72, attention 79.1 -> ~75 us.
+             {"STRATA_EARLY_READ", "1"},
++            // decode round 3 D6: PDL edges in the MTP draft graphs (their kernels read only weights before the wait): the same drafts
++            // (dumps identical), CLI fixed struct: chain steps 0.791 -> 0.774 ms a round (6 runs each), round graph 0.309 -> 0.305 (bench-d3 NOTES-d3.md D6).
++            {"STRATA_MTP_PDL", "1"},
+             {"STRATA_GDN_MID_HEAD", "2"},
+             {"STRATA_ROUTE_DB", "2"},
+             // dec/pf-num (NOTES-pfnum.md): the prompt path's QSA block scores on int8 tensor cores (i8x6, ~2x the 3xTF32 kernel,
+diff --git a/src/core/nv_defaults_test.cpp b/src/core/nv_defaults_test.cpp
+index 2bdfb3bd9..431fac72d 100644
+--- a/src/core/nv_defaults_test.cpp
++++ b/src/core/nv_defaults_test.cpp
+@@ -57,7 +57,7 @@ int main() {
+     CHECK(nv_default_env(12, 1, false).size() == 6);
+     unset("STRATA_SM121_PERF");
+     // sm_120 (RTX 50): strata-nvfp4's table (hc8, equal chunks, GDN TC: 5 switches), none with STRATA_DEFAULTS=026; sm_100 gets nothing
+-    CHECK(nv_default_env(12, 0, false).size() == 29);
++    CHECK(nv_default_env(12, 0, false).size() == 30);
+     CHECK(nv_default_env(12, 0, true).empty());
+     CHECK(nv_default_env(10, 0, false).empty());
+     CHECK(nv_default_env(8, 9, false).empty());
+@@ -137,7 +137,7 @@ int main() {
+         unset("STRATA_PF_FUSED_SM86");
+     }
+     // the other tables are unchanged by it
+-    CHECK(nv_default_env(12, 0, false).size() == 29);
++    CHECK(nv_default_env(12, 0, false).size() == 30);
+     // round 0212: the NVIDIA prompt-chunk ceiling of a bare `--prefill auto` (nv_chunk.hpp)
+     CHECK(nv_chunk_ceiling(nullptr, false) == 32768);
+     CHECK(nv_chunk_ceiling("1", false) == 32768);
+diff --git a/src/core/rope_dynamic.cpp b/src/core/rope_dynamic.cpp
+index 1173478d8..be2a24992 100644
+--- a/src/core/rope_dynamic.cpp
++++ b/src/core/rope_dynamic.cpp
+@@ -75,9 +75,12 @@ bool rope_table_rebuild(const QsaState& owner, const strata::kernels::RopeScalin
+     std::vector<float> hc(n), hs(n);
+     const int threads = (int) std::max(1u, std::min(16u, std::thread::hardware_concurrency()));
+     build_rope_table_mt((int) s.n_rot, to, (int) owner.max_cells, hc.data(), hs.data(), threads);
+-    if (cudaDeviceSynchronize() != cudaSuccess ||
+-        cudaMemcpy(owner.cos_tab, hc.data(), n * 4, cudaMemcpyHostToDevice) != cudaSuccess ||
+-        cudaMemcpy(owner.sin_tab, hs.data(), n * 4, cudaMemcpyHostToDevice) != cudaSuccess) {
++    // E2: an elastic table (KV streaming) keeps the new rows in its host copy and uploads what is mapped
++    auto put = [&](float* dev, const std::vector<float>& h) {
++        const int r = qsa_elastic_table_store(dev, h.data(), n);
++        return r < 0 ? cudaMemcpy(dev, h.data(), n * 4, cudaMemcpyHostToDevice) == cudaSuccess : r == 1;
++    };
++    if (cudaDeviceSynchronize() != cudaSuccess || !put(owner.cos_tab, hc) || !put(owner.sin_tab, hs)) {
+         error = "dynamic rope: the table upload failed";
+         return false;
+     }
+diff --git a/src/core/verify.cpp b/src/core/verify.cpp
+index 68e39f54b..b1ff3c8f6 100644
+--- a/src/core/verify.cpp
++++ b/src/core/verify.cpp
+@@ -820,6 +820,9 @@ Verifier::~Verifier() {
+     if (copy_) { cudaStreamSynchronize(copy_); cudaStreamDestroy(copy_); }
+     if (side_) cudaStreamDestroy(side_);
+     if (side2_) cudaStreamDestroy(side2_);
++    if (side3_) cudaStreamDestroy(side3_);
++    for (cudaEvent_t e : {afork_, ajoin_})
++        if (e) cudaEventDestroy(e);
+     if (l2pf_s_) cudaStreamDestroy(l2pf_s_);
+     if (pcb_s_) cudaStreamDestroy(pcb_s_);
+     for (cudaEvent_t e : {pcb_fork_, pcb_join_, pcb_plan_})
+@@ -1386,6 +1389,19 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
+         err = "verify: the mixer branch's stream / events could not be created";
+         return false;
+     }
++    // dec3 D5 STRATA_IDX_FORK (default on with the side mixer, =0 in line): the indexer's append beside its query
++    // projection (the same kernels and inputs; the block scores join both).  qsa_front_bench: -0.9..-2.0 us a layer
++    {
++        const char* v = std::getenv("STRATA_IDX_FORK");
++        if (g_side_mixer() > 0 && side3_ == nullptr && (v == nullptr || std::atoi(v) != 0) &&
++            ((gprio ? make_stream(&side3_, gp_hi) : cudaStreamCreateWithFlags(&side3_, cudaStreamNonBlocking)) != cudaSuccess ||
++             cudaEventCreateWithFlags(&afork_, cudaEventDisableTiming) != cudaSuccess ||
++             cudaEventCreateWithFlags(&ajoin_, cudaEventDisableTiming) != cudaSuccess)) {
++            (void) cudaGetLastError();
++            if (side3_) cudaStreamDestroy(side3_);
++            side3_ = nullptr;   // in line
++        }
++    }
+     if (g_l2pf_mb() > 0 &&
+         (cudaStreamCreateWithFlags(&l2pf_s_, cudaStreamNonBlocking) != cudaSuccess ||
+          cudaEventCreateWithFlags(&l2pf_fork_, cudaEventDisableTiming) != cudaSuccess ||
+@@ -2214,8 +2230,20 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
+                     if (!branch(mfork_, cs, side_, "fork")) return false;
+                     idx_key(side_);
+                     idx_snap(side_);
+-                    idx_append(side_);
++                    // dec3 D5 STRATA_IDX_FORK: the append (after the key and the tail's snapshot) beside the query
++                    const bool afork = side3_ != nullptr && afork_ != nullptr && ajoin_ != nullptr;
++                    if (afork) {
++                        strata::dispatch::note("qsa layer: indexer append forked beside the query (STRATA_IDX_FORK)");
++                        if (!branch(afork_, side_, side3_, "fork")) return false;
++                        idx_append(side3_);
++                        if (cudaEventRecord(ajoin_, side3_) != cudaSuccess) { err = "verify: the indexer append's branch could not join"; return false; }
++                    } else
++                        idx_append(side_);
+                     idx_query(side_);
++                    if (afork && cudaStreamWaitEvent(side_, ajoin_, 0) != cudaSuccess) {
++                        err = "verify: the indexer append's branch could not join";
++                        return false;
++                    }
+                     idx_select(side_);
+                     note_prio_tail(side_, 1);
+                     if (cudaEventRecord(mjoin_, side_) != cudaSuccess) { err = "verify: the indexer's branch could not join"; return false; }
+diff --git a/src/kernels/cuda/fused_gr.cu b/src/kernels/cuda/fused_gr.cu
+index 33b2a8463..d38e1fb52 100644
+--- a/src/kernels/cuda/fused_gr.cu
++++ b/src/kernels/cuda/fused_gr.cu
+@@ -251,6 +251,7 @@ struct GrMulti {
+     const unsigned* gate = nullptr;
+     unsigned gate_n = 0;
+     unsigned* gate_pass = nullptr;
++    unsigned char hc_flag = 0;   // dec-round3 D3 (hc8 only, set by its launcher): 2 STRATA_ER_LATE_PASS, 4 STRATA_HC8_LOSTAGE
+ };
+ 
+ 
+@@ -3422,6 +3423,20 @@ int g_gr_fast = -1;
+ #endif
+ void fused_gr_set_fast(int on) { g_gr_fast = on; }
+ void fused_gr_set_v4(int mode) { g_gr_v4 = mode < 0 ? -2 : mode; }
++void fused_gr_set_hc8_lostage(int on) {
++#if !defined(__HIPCC__)
++    hc8::hc8_lostage_ref() = on < 0 ? -2 : (on != 0);
++#else
++    (void) on;
++#endif
++}
++void fused_gr_set_er_late_pass(int on) {
++#if !defined(__HIPCC__)
++    hc8::er_late_pass_ref() = on < 0 ? -2 : (on != 0);
++#else
++    (void) on;
++#endif
++}
+ void fused_gr_set_v5(int on) { g_gr_v5 = on < 0 ? -2 : (on == 1 ? 1 : 0); }
+ 
+ // STRATA_GR_V3: the stream-split hyper-connection read (gr_down_v3_kernel / gr_up_v3_kernel).  Another summation order than the default
+@@ -3997,6 +4012,31 @@ void fused_gr_v3_print_resources() {
+     one("up T4 pf3", (const void*) gr_up_v3_kernel<1, 4, true, 3>, 0);
+ #endif
+ }
++#if !defined(__HIPCC__)
++// multiarch: the gated read's down blocks are placed before the combine they wait for and spin there (2 a multiprocessor,
++// 128 registers x 256 threads: every register of the SM).  On a card whose SMs they fill - 220 blocks against 2 x 110
++// (RTX 5080, 5070, 5060, RTX PRO 5000) - the combine finds no room, the gate times out after 2 s and every later read
++// takes stale inputs.  Taken only where they leave half an SM's worth of room per SM for the combine (the 5090: 340 - 220).
++static bool gated_read_fits() {
++    static int fit[64];   // 0 unknown, 1 yes, 2 no
++    int dev = 0;
++    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { cudaGetLastError(); return false; }
++    if (fit[dev] == 0) {
++        int sms = 0, occ = 0;
++        const int grid = (hc8::NRG + 1) * hc8::NS;
++        const bool ok = cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev) == cudaSuccess &&
++                        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, hc8::hc8_down_kernel<kFusedGrMaxT, 2>, THREADS, 0) == cudaSuccess;
++        if (!ok) cudaGetLastError();
++        sms = strata::sms_of(sms);   // STRATA_EMULATE_SMS (tests only)
++        const char* force = std::getenv("STRATA_EARLY_READ_FIT");   // =0: skip this check (tests: the failure it prevents)
++        fit[dev] = (ok && occ * sms >= grid + sms / 2) || (force != nullptr && force[0] == '0') ? 1 : 2;
++        if (fit[dev] == 2 && std::getenv("STRATA_EARLY_READ") != nullptr && std::atoi(std::getenv("STRATA_EARLY_READ")) != 0)
++            std::fprintf(stderr, "strata: STRATA_EARLY_READ: off on this card (%d SMs x %d blocks of its read against %d: they would fill "
++                                 "every SM before the combine they wait for)\n", sms, occ, grid);
++    }
++    return fit[dev] == 1;
++}
++#endif
+ bool fused_gr_read_gated_ok(const FusedGrArgs* a, int n_tok) {
+ #if defined(__HIPCC__)
+     (void) a; (void) n_tok;
+@@ -4004,7 +4044,7 @@ bool fused_gr_read_gated_ok(const FusedGrArgs* a, int n_tok) {
+ #else
+     return a != nullptr && n_tok >= 1 && n_tok <= kFusedGrMaxT && a[0].q8_down != nullptr && a[0].q8_up != nullptr &&
+            hc8_is_split(a[0].q8_down) && hc8_is_split(a[0].q8_up) && a[0].w_inject != nullptr &&
+-           hc8::hc8_down_variant() != 1 && hc8::hc8_up_variant() == 1;
++           hc8::hc8_down_variant() != 1 && hc8::hc8_up_variant() == 1 && gated_read_fits();
+ #endif
+ }
+ bool fused_gr_read_multi_gated(const FusedGrArgs* a, int n_tok, float* xn_scratch, const unsigned* gate, unsigned gate_n,
+diff --git a/src/kernels/cuda/gdn_mid.cu b/src/kernels/cuda/gdn_mid.cu
+index 85b49208a..183d41eea 100644
+--- a/src/kernels/cuda/gdn_mid.cu
++++ b/src/kernels/cuda/gdn_mid.cu
+@@ -16,6 +16,7 @@
+ #undef FZ_DEV_ONLY
+ 
+ #include "strata/kernels/gdn_mid.hpp"
++#include "strata/core/emulate.hpp"
+ 
+ #include <cuda_fp16.h>
+ #include <cuda_runtime.h>
+@@ -44,9 +45,12 @@ constexpr int OFF_PRED = 2 * PTILE, OFF_REC = 70144, OFF_ORED = 95232, OFF_BAR =
+ constexpr int OFF_OX = 70016, OFF_OX4 = 35200, OXB = (ONIN / 32) * 36;   // the out phase's staged q8_1 rows (och 8 / 4), a row's bytes
+ static_assert(16 * ORS4 <= OFF_OX4 && OFF_OX4 + MAXT * OXB <= OFF_ORED && 3 * OXB <= OFF_ORED - OFF_OX, "out x layout");
+ enum { C_PAIR, C_PZ, C_AB, C_REC, C_DONE, NCTR = 8 };
++// dec/round3 D2 (STRATA_GDN_MID_DEPTH): the pair ring's tiles copied in NP pieces, at most `depth` pieces in flight per CTA
++// (the CTA's tiles in order); a piece's mbarrier at OFF_BAR + 8 (4 + slot * NPMAX + piece), then a slot's armed-piece count
++constexpr int NPMAX = 8, OFF_ARM = OFF_BAR + 8 * (4 + 2 * NPMAX);
+ constexpr int kLayers = 64;
+ static_assert(16 * ORS <= OFF_REC && OFF_PRED + 2 * 8 * 16 * kMaxCols * 4 <= OFF_ORED, "layout");
+-static_assert(OFF_ORED + 8 * 16 * kMaxCols * 4 <= OFF_BAR && OFF_BAR + 64 <= SMEM, "layout");
++static_assert(OFF_ORED + 8 * 16 * kMaxCols * 4 <= OFF_BAR && OFF_ARM + 8 <= SMEM, "layout");
+ 
+ struct RecSm {
+     float sq[MAXT][S], sk[MAXT][S], sv[MAXT][S], oc[MAXT][S];
+@@ -70,6 +74,8 @@ struct MidP {
+     int ef;      // evict-first weight copies
+     int head;    // dec/front STRATA_GDN_MID_HEAD: before the grid wait (else after it) bit 0 the first tile copy, bit 1 the L2 prefetches, bit 2 the second tile copy
+     int split;   // 1: the rec CTAs take RQ qkv tiles each (the last ones), the others the rest of qkv, then z; 0: round robin
++    int depth;   // D2: pieces in flight per CTA (0: the two-tile ring, each tile one copy)
++    int np;      // D2: pieces per tile (1, 2, 4, 5 or 8)
+     float eps;
+     int T;
+ };
+@@ -176,11 +182,32 @@ __global__ void __launch_bounds__(gm::CT, 1) gdn_mid_kernel(const gm::MidP p) {
+         const int i = b + k * nn;
+         return i < QS ? i : i + HV * RQ;
+     };
+-    auto fill = [&](int k) {   // tile k into slot k & 1
++    auto tsrc = [&](int k) {
+         const int tile = tile_of(k);
+-        const uint8_t* src = tile < NTQ ? p.wq + (size_t) tile * PTILE : p.wz + (size_t) (tile - NTQ) * PTILE;
++        return tile < NTQ ? p.wq + (size_t) tile * PTILE : p.wz + (size_t) (tile - NTQ) * PTILE;
++    };
++    auto fill = [&](int k) {   // tile k into slot k & 1
+         gm_mb_expect(bar + (k & 1), (uint32_t) PTILE);
+-        gm_bulk_w(smem + (size_t) (k & 1) * PTILE, src, (uint32_t) PTILE, bar + (k & 1), p.ef != 0);
++        gm_bulk_w(smem + (size_t) (k & 1) * PTILE, tsrc(k), (uint32_t) PTILE, bar + (k & 1), p.ef != 0);
++    };
++    // D2, the bounded stream: piece n = tile n / np, part n % np; piece n is copied once piece n - depth has landed
++    const int dep = p.depth, np = p.np, pb = PTILE / np;
++    const int p0 = dep > 0 ? (dep < mine * np ? dep : mine * np) : 0;   // the pieces copied up front (no wait)
++    auto pbar = [&](int s, int j) { return bar + 4 + s * NPMAX + j; };
++    volatile int* armed = reinterpret_cast<volatile int*>(smem + OFF_ARM);   // [slot]: pieces armed in it so far
++    auto piece = [&](int n) {
++        const int k = n / np, j = n % np, s = k & 1;
++        gm_mb_expect(pbar(s, j), (uint32_t) pb);
++        gm_bulk_w(smem + (size_t) s * PTILE + (size_t) j * pb, tsrc(k) + (size_t) j * pb, (uint32_t) pb, pbar(s, j), p.ef != 0);
++        __threadfence_block();
++        armed[s] = (k >> 1) * np + j + 1;
++    };
++    // piece n has landed; the other slot's piece is waited for only once armed (else its barrier may still be on the phase
++    // before, two tiles back)
++    auto landed = [&](int n) {
++        const int k = n / np, j = n % np, s = k & 1;
++        while (armed[s] <= (k >> 1) * np + j) {}
++        gm_mb_wait(pbar(s, j), (uint32_t) ((k >> 1) & 1));
+     };
+     // the weights and the state do not depend on the kernel before: requested before the grid dependency wait
+     // dec/front: each part before the grid wait (the head start) or after it (p.head; the tile copies flood the memory
+@@ -192,16 +219,31 @@ __global__ void __launch_bounds__(gm::CT, 1) gdn_mid_kernel(const gm::MidP p) {
+     };
+     if (tid == 0) {
+         gm_mb_init(bar); gm_mb_init(bar + 1); gm_mb_init(bar + 2); gm_mb_init(bar + 3);
++        if (dep > 0) {
++            for (int i = 0; i < 2 * NPMAX; ++i) gm_mb_init(bar + 4 + i);
++            armed[0] = armed[1] = 0;
++        }
+         asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+-        for (int k = 0; k < 2 && k < mine; ++k)
+-            if (p.head & (k == 0 ? 1 : 4)) fill(k);
++        if (dep > 0) {
++            if (p.head & 1)
++                for (int n = 0; n < p0; ++n) piece(n);
++        } else {
++            for (int k = 0; k < 2 && k < mine; ++k)
++                if (p.head & (k == 0 ? 1 : 4)) fill(k);
++        }
+     }
+     if (p.head & 2) pf();
+     __syncthreads();
+     pdl_wait();
+-    if (tid == 0)
+-        for (int k = 0; k < 2 && k < mine; ++k)
+-            if (!(p.head & (k == 0 ? 1 : 4))) fill(k);
++    if (tid == 0) {
++        if (dep > 0) {
++            if (!(p.head & 1))
++                for (int n = 0; n < p0; ++n) piece(n);
++        } else {
++            for (int k = 0; k < 2 && k < mine; ++k)
++                if (!(p.head & (k == 0 ? 1 : 4))) fill(k);
++        }
++    }
+     if (!(p.head & 2)) pf();
+     pdl_trigger();   // the next read's first kernel may take the SMs this launch's CTAs leave (it waits for the whole grid)
+     STAMP(1);
+@@ -225,7 +267,21 @@ __global__ void __launch_bounds__(gm::CT, 1) gdn_mid_kernel(const gm::MidP p) {
+             const bool isq = tile < NTQ;
+             float* y = isq ? p.qkv : p.z;
+             const int no = isq ? NQ : NZ, row0 = (isq ? tile : tile - NTQ) * 16;
+-            gm_mb_wait(bar + slot, (uint32_t) ((k >> 1) & 1));
++            if (dep > 0) {
++                // the group's own tile: its pieces not copied up front, each after piece n - depth (the slot is free: the
++                // group read tile k - 2 out of it before its last barrier)
++                if (ltid == 0) {
++                    const int n0 = p0 > k * np ? p0 : k * np;
++                    if (n0 < (k + 1) * np) gm_pfence();
++                    for (int n = n0; n < (k + 1) * np; ++n) {
++                        if (n >= dep) landed(n - dep);
++                        piece(n);
++                    }
++                }
++                for (int j = 0; j < np; ++j) gm_mb_wait(pbar(slot, j), (uint32_t) ((k >> 1) & 1));
++            } else {
++                gm_mb_wait(bar + slot, (uint32_t) ((k >> 1) & 1));
++            }
+             const uint8_t* sl = smem + (size_t) slot * PTILE;
+             float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+             pair_terms_xr<8>(acc, sl + g * PROW, sl + (g + 8) * PROW, lw, hb, n, t, nchunk, xs, nullptr);
+@@ -235,7 +291,7 @@ __global__ void __launch_bounds__(gm::CT, 1) gdn_mid_kernel(const gm::MidP p) {
+             rw[(g + 8) * kMaxCols + 2 * t] = acc[2];
+             rw[(g + 8) * kMaxCols + 2 * t + 1] = acc[3];
+             gm_barn(2 + gi, 256);   // the slot is read and the warp sums are in
+-            if (ltid == 0 && k + 2 < mine) {
++            if (dep == 0 && ltid == 0 && k + 2 < mine) {
+                 gm_pfence();
+                 fill(k + 2);
+             }
+@@ -522,6 +578,7 @@ int mid_grid() {
+         int dev = 0, sms = 0, optin = 0;
+         cudaGetDevice(&dev);
+         cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
++        sms = strata::sms_of(sms);   // STRATA_EMULATE_SMS (tests only): its grid waits for every CTA
+         cudaDeviceGetAttribute(&optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
+         int major = 0;
+         cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
+@@ -565,6 +622,21 @@ void gdn_mid(const GdnMidArgs& a, void* stream) {
+     p.stamps = a.stamps;
+     static const int split = [] { const char* v = std::getenv("STRATA_GDN_MID_SPLIT"); return v != nullptr ? std::atoi(v) : 1; }();
+     p.split = split;
++    // dec/round3 D2: STRATA_GDN_MID_DEPTH pieces in flight per CTA (0: the two-tile ring), STRATA_GDN_MID_PIECES pieces a tile.
++    // Default 1 x 10880 B (10.6 KiB in flight; gpu-probe lat1: 8-16 KiB/SM is full DRAM rate, more only slows every L2 hit):
++    // bitwise, cold-L2 gdn_parity T 1/3/8 47.1/49.5/59.4 -> 46.3/47.3/55.3 us (bench-d3 NOTES-d3.md D2)
++    static const int pieces = [] {
++        const char* v = std::getenv("STRATA_GDN_MID_PIECES");
++        const int n = v != nullptr ? std::atoi(v) : 4;
++        return n == 1 || n == 2 || n == 4 || n == 5 || n == 8 ? n : 4;
++    }();
++    static const int depth = [] {
++        const char* v = std::getenv("STRATA_GDN_MID_DEPTH");
++        const int d = v != nullptr ? std::atoi(v) : 1;
++        return d < 0 ? 0 : d > 2 * pieces ? 2 * pieces : d;
++    }();
++    p.depth = depth;
++    p.np = pieces;
+     static const int ef = [] { const char* v = std::getenv("STRATA_GDN_MID_EF"); return v != nullptr ? std::atoi(v) : 1; }();
+     p.ef = ef;
+     static const int head = [] { const char* v = std::getenv("STRATA_GDN_MID_HEAD"); return v != nullptr ? std::atoi(v) : 7; }();
+diff --git a/src/kernels/cuda/hc8_read.cuh b/src/kernels/cuda/hc8_read.cuh
+index a3d94143d..beda30877 100644
+--- a/src/kernels/cuda/hc8_read.cuh
++++ b/src/kernels/cuda/hc8_read.cuh
+@@ -104,7 +104,15 @@ __device__ __forceinline__ float sig_(float x) { return __fdiv_rn(1.0f, __fadd_r
+ // hang).  The last block to pass zeroes the gate and the pass count for the next use.  Activations the combine (or a kernel
+ // before it on another stream) wrote are then read through L2 (ld.cg), never a possibly stale L1 line.
+ __device__ unsigned g_er_abort;
+-__device__ __forceinline__ void er_gate(const GrMulti& m) {
++__device__ __forceinline__ void er_pass(const GrMulti& m) {
++    if (atomicAdd(m.gate_pass, 1u) == gridDim.x * gridDim.y - 1u) {
++        atomicExch(const_cast<unsigned*>(m.gate), 0u);
++        atomicExch(m.gate_pass, 0u);
++    }
++}
++// late (dec-round3 D3 STRATA_ER_LATE_PASS, default 1): the block counts its pass with er_pass after its dots, so thread 0
++// does not hold the block for that atomic's round trip right after the gate opens
++__device__ __forceinline__ void er_gate(const GrMulti& m, bool late = false) {
+     const unsigned* c = m.gate;
+     auto ldacq = [](const unsigned* p) {
+         unsigned v;
+@@ -126,11 +134,10 @@ __device__ __forceinline__ void er_gate(const GrMulti& m) {
+             }
+         }
+     }
+-    if (atomicAdd(m.gate_pass, 1u) == gridDim.x * gridDim.y - 1u) {
+-        atomicExch(const_cast<unsigned*>(c), 0u);
+-        atomicExch(m.gate_pass, 0u);
+-    }
++    if (!late) er_pass(m);
+ }
++__device__ __forceinline__ bool er_late_pass_on(const GrMulti& m) { return (m.hc_flag & 2) != 0; }
++__device__ __forceinline__ bool hc8_lostage_on(const GrMulti& m) { return (m.hc_flag & 4) != 0; }
+ 
+ // R rows a warp.  INJF = false: 10 row groups of 32 rows (R = 4) and an inject group (220 blocks, 2 a multiprocessor);
+ // INJF = true (STRATA_HC8_DOWN=1): R = 5, 8 row groups of 40 rows (160 blocks, one wave), inject row g in row group g's
+@@ -197,7 +204,7 @@ __global__ void __launch_bounds__(THREADS, INJF ? 1 : 2) hc8_down_kernel(GrMulti
+                 gw[p] = __ldcg(a.apply ? a.inj_prev + c : a.R);
+             }
+         }
+-        if (t == 0) er_gate(m);
++        if (t == 0) er_gate(m, er_late_pass_on(m));
+         __syncthreads();
+         gr_pdl_launch_dependents();
+ #pragma unroll
+@@ -336,6 +343,8 @@ __global__ void __launch_bounds__(THREADS, INJF ? 1 : 2) hc8_down_kernel(GrMulti
+             if ((lane & ((1 << SH) - 1)) == 0 && k < T) part[((size_t) k * NS + s) * PRS + LR + (inj ? warp : rg)] = tot;
+         }
+     }
++    if constexpr (PDL == 2)
++        if (t == 0 && er_late_pass_on(m)) er_pass(m);   // D3: the gate's pass count, after the dots
+     // the last block of the row group adds the slices
+     __threadfence();
+     __syncthreads();
+@@ -559,9 +568,30 @@ __global__ void __launch_bounds__(THREADS) hc8_upq_kernel(GrMulti m, const int8_
+             }
+         }
+     }
+-    for (int i = t; i < T * LR; i += THREADS) {
+-        const int k = i / LR, r = i - k * LR, qq = r / UQ;
+-        lo[k][qq * UQP + (r - qq * UQ)] = __ldg(m.a[k].lo + r);
++    if (hc8_lostage_on(m)) {   // D3 STRATA_HC8_LOSTAGE (default 1): every lo load in flight before the first store
++        constexpr int NLO = (T * LR + THREADS - 1) / THREADS;   // (the loop below waits a round trip per pass)
++        float lv[NLO];
++#pragma unroll
++        for (int j = 0; j < NLO; ++j) {
++            const int i = t + j * THREADS;
++            if (i < T * LR) {
++                const int k = i / LR;
++                lv[j] = __ldg(m.a[k].lo + (i - k * LR));
++            }
++        }
++#pragma unroll
++        for (int j = 0; j < NLO; ++j) {
++            const int i = t + j * THREADS;
++            if (i < T * LR) {
++                const int k = i / LR, r = i - k * LR, qq = r / UQ;
++                lo[k][qq * UQP + (r - qq * UQ)] = lv[j];
++            }
++        }
++    } else {
++        for (int i = t; i < T * LR; i += THREADS) {
++            const int k = i / LR, r = i - k * LR, qq = r / UQ;
++            lo[k][qq * UQP + (r - qq * UQ)] = __ldg(m.a[k].lo + r);
++        }
+     }
+     if (t < T * HC) {
+         const int k = t / HC, cc = t - k * HC;
+@@ -620,9 +650,20 @@ inline int hc8_up_variant() {
+     return v;
+ }
+ 
++// dec-round3 D3 switches (default 1, =0 the old path; the fused_gr_set_* test hooks override them): STRATA_HC8_LOSTAGE
++// upq stages lo with all its loads in flight; STRATA_ER_LATE_PASS the early read counts its gate pass after the dots.
++inline int& hc8_lostage_ref() { static int v = -2; return v; }
++inline int& er_late_pass_ref() { static int v = -2; return v; }
++inline bool hc8_switch(int& v, const char* name) {
++    if (v == -2) { const char* e = std::getenv(name); v = e != nullptr ? (std::atoi(e) != 0) : 1; }
++    return v != 0;
++}
+ template <int T>
+-cudaError_t launch_t(const GrMulti& m, const int8_t* qd, const int8_t* qu, float* scratch, unsigned* cnt, cudaStream_t st,
++cudaError_t launch_t(const GrMulti& m0, const int8_t* qd, const int8_t* qu, float* scratch, unsigned* cnt, cudaStream_t st,
+                      bool pdl, unsigned long long* stamp_buf, int stamp_i0, bool gated = false) {
++    GrMulti m = m0;
++    m.hc_flag = (unsigned char) ((gated && hc8_switch(er_late_pass_ref(), "STRATA_ER_LATE_PASS") ? 2 : 0) |
++                                 (hc8_switch(hc8_lostage_ref(), "STRATA_HC8_LOSTAGE") ? 4 : 0));
+     const unsigned short* sd = reinterpret_cast<const unsigned short*>(qd + (size_t) LR * D);
+     const unsigned short* su = reinterpret_cast<const unsigned short*>(qu + (size_t) LR * D);
+     float* part = scratch;
+diff --git a/src/kernels/cuda/kv_stream.cu b/src/kernels/cuda/kv_stream.cu
+index 209984b4f..b9fafd5a3 100644
+--- a/src/kernels/cuda/kv_stream.cu
++++ b/src/kernels/cuda/kv_stream.cu
+@@ -3,6 +3,8 @@
+ #include "strata/kernels/kv_q4.hpp"
+ #include "strata/kernels/kv_q8.hpp"
+ 
++#include "strata/core/dispatch_stats.hpp"
++
+ #include <cuda_runtime.h>
+ 
+ #include <algorithm>
+@@ -86,6 +88,11 @@ __device__ int block_scan(int v, int* warp_sums, int& total) {
+     return excl;
+ }
+ 
++// dec3 D5 STRATA_KV_RESOLVE_ILP (default on, =0 the old loop): step 1 for RQ queries at a time with every id load,
++// then every page-table load, then the stamps / claims - not one dependent ids -> table round trip per (query, pass).
++// The same lookups, stamps and claims (a claim is an atomicCAS either way; the miss list order was never fixed).
++constexpr int RK = 2;   // passes per query in a round (ids past RK * RT: the plain loop after it)
++template <int RQ>   // queries per round (4 or 8); 0 = the plain loop
+ __global__ void __launch_bounds__(RT) resolve_kernel(KvStreamMap m, const int32_t* __restrict__ ids,
+                                                      const int32_t* __restrict__ steps, int n_q, int cap, int page_size) {
+     __shared__ int s_nmiss, s_lookups, s_cut;
+@@ -95,21 +102,73 @@ __global__ void __launch_bounds__(RT) resolve_kernel(KvStreamMap m, const int32_
+     __syncthreads();
+     // 1. hits take this epoch and their reference bit; a missing block is claimed exactly once (-1 -> -2)
+     int lookups = 0;
++    auto look = [&](const int32_t* qi, int i) {   // one id of step 1 (the plain loop's body)
++        const int b = qi[i] / page_size;
++        if (i > 0 && qi[i - 1] / page_size == b) return;   // ids are ascending: one lookup per block
++        ++lookups;
++        const int sl = m.page_table[b];
++        if (sl >= 0) {
++            m.slot_stamp[sl] = epoch;
++            m.slot_ref[sl] = 1;
++        } else if (sl == -1 && atomicCAS(&m.page_table[b], -1, -2) == -1) {
++            m.miss_block[atomicAdd(&s_nmiss, 1)] = b;
++        }
++    };
++    if (RQ > 0) for (int q0 = 0; q0 < n_q; q0 += (RQ > 0 ? RQ : 1)) {
++        constexpr int Q = RQ > 0 ? RQ : 1;
++        int width[Q], cur[Q][RK], prv[Q][RK], bb[Q][RK], sl[Q][RK];
++        bool lk[Q][RK];
++#pragma unroll
++        for (int a = 0; a < Q; ++a) width[a] = 0;
++#pragma unroll
++        for (int a = 0; a < Q; ++a)
++            if (q0 + a < n_q) width[a] = steps[(q0 + a) * kStepCount + kStepWidth];
++#pragma unroll
++        for (int a = 0; a < Q; ++a) {   // the loads only, no use in between: all in flight at once
++            const int32_t* qi = ids + (long long) (q0 + a) * cap;
++#pragma unroll
++            for (int k = 0; k < RK; ++k) {
++                const int i = threadIdx.x + k * RT;
++                cur[a][k] = 0;
++                prv[a][k] = 0;
++                if (i < width[a]) cur[a][k] = qi[i];
++                if (i < width[a] && i > 0) prv[a][k] = qi[i - 1];
++            }
++        }
++#pragma unroll
++        for (int a = 0; a < Q; ++a)
++#pragma unroll
++            for (int k = 0; k < RK; ++k) {
++                const int i = threadIdx.x + k * RT;
++                const int b = cur[a][k] / page_size;
++                // ids are ascending: one lookup per block
++                bb[a][k] = b;
++                lk[a][k] = i < width[a] && !(i > 0 && prv[a][k] / page_size == b);
++            }
++#pragma unroll
++        for (int a = 0; a < Q; ++a)
++#pragma unroll
++            for (int k = 0; k < RK; ++k) sl[a][k] = lk[a][k] ? m.page_table[bb[a][k]] : 0;
++#pragma unroll
++        for (int a = 0; a < Q; ++a)
++#pragma unroll
++            for (int k = 0; k < RK; ++k) {
++                const int b = bb[a][k];
++                if (!lk[a][k]) continue;
++                ++lookups;
++                if (sl[a][k] >= 0) {
++                    m.slot_stamp[sl[a][k]] = epoch;
++                    m.slot_ref[sl[a][k]] = 1;
++                } else if (sl[a][k] == -1 && atomicCAS(&m.page_table[b], -1, -2) == -1) {
++                    m.miss_block[atomicAdd(&s_nmiss, 1)] = b;
++                }
++            }
++    }
++    // ILP: the ids past the round's RK passes (a long context: threads 0..2 at width 2,051); else every id
+     for (int q = 0; q < n_q; ++q) {
+         const int width = steps[q * kStepCount + kStepWidth];
+         const int32_t* qi = ids + (long long) q * cap;
+-        for (int i = threadIdx.x; i < width; i += RT) {
+-            const int b = qi[i] / page_size;
+-            if (i > 0 && qi[i - 1] / page_size == b) continue;   // ids are ascending: one lookup per block
+-            ++lookups;
+-            const int sl = m.page_table[b];
+-            if (sl >= 0) {
+-                m.slot_stamp[sl] = epoch;
+-                m.slot_ref[sl] = 1;
+-            } else if (sl == -1 && atomicCAS(&m.page_table[b], -1, -2) == -1) {
+-                m.miss_block[atomicAdd(&s_nmiss, 1)] = b;
+-            }
+-        }
++        for (int i = threadIdx.x + (RQ > 0 ? RK * RT : 0); i < width; i += RT) look(qi, i);
+     }
+     if (lookups > 0) atomicAdd(&s_lookups, lookups);   // (#783, stuchapin909) most threads see none: skip the shared atomic
+     __syncthreads();
+@@ -194,8 +253,17 @@ __global__ void ring_kernel(int32_t* table, long long n_blocks, long long n_slot
+         table[i] = (int32_t) (i % n_slots);
+ }
+ 
++int g_resolve_ilp = -1;   // kv_stream_set_resolve_ilp: -1 = STRATA_KV_RESOLVE_ILP (default on)
++bool resolve_ilp_on() {
++    if (g_resolve_ilp >= 0) return g_resolve_ilp != 0;
++    static const bool on = [] { const char* v = std::getenv("STRATA_KV_RESOLVE_ILP"); return v == nullptr || std::atoi(v) != 0; }();
++    return on;
++}
++
+ }  // namespace
+ 
++void kv_stream_set_resolve_ilp(int on) { g_resolve_ilp = on; }
++
+ uint64_t kv_block_bytes(const QsaShapes& s, int fmt) {
+     const uint64_t rows = (uint64_t) (s.n_head_kv * s.page_size);
+     if (fmt == kKvHybrid)
+@@ -227,7 +295,16 @@ void kv_stream_resolve(const KvStreamMap& m, const QsaAttnPools& slots, const Kv
+                              "slot twice\n", (long long) m.n_slots, RT);
+         std::exit(1);
+     }
+-    resolve_kernel<<<1, RT, 0, (cudaStream_t) stream>>>(m, ids, steps, (int) n_q, (int) cap, (int) s.page_size);
++    // dec3 D5: the batched lookups from 3 queries (bench: T 2 is 0.3 us slower with them), 4 a round up to 4, else 8
++    const cudaStream_t st = (cudaStream_t) stream;
++    if (resolve_ilp_on() && n_q >= 3 && n_q <= 4) {
++        strata::dispatch::note("kv stream: resolve, batched lookups 4 (STRATA_KV_RESOLVE_ILP)");
++        resolve_kernel<4><<<1, RT, 0, st>>>(m, ids, steps, (int) n_q, (int) cap, (int) s.page_size);
++    } else if (resolve_ilp_on() && n_q >= 5) {
++        strata::dispatch::note("kv stream: resolve, batched lookups 8 (STRATA_KV_RESOLVE_ILP)");
++        resolve_kernel<8><<<1, RT, 0, st>>>(m, ids, steps, (int) n_q, (int) cap, (int) s.page_size);
++    } else
++        resolve_kernel<0><<<1, RT, 0, st>>>(m, ids, steps, (int) n_q, (int) cap, (int) s.page_size);
+     check("resolve");
+     copy_kernel<<<96, 128, 0, (cudaStream_t) stream>>>(m, runs_of(slots, host, fmt, s));
+     check("copy");
+diff --git a/src/kernels/cuda/native_bf16.cu b/src/kernels/cuda/native_bf16.cu
+index 14fbaf648..c5e6f0167 100644
+--- a/src/kernels/cuda/native_bf16.cu
++++ b/src/kernels/cuda/native_bf16.cu
+@@ -435,8 +435,11 @@ void bf16_gemv_fp32_mmvf_multi(const float* x, int64_t ldx, const uint16_t* w, f
+             throw std::runtime_error(std::string("bf16_gemv_fp32_mmvf_multi launch: ") + cudaGetErrorString(result));
+         return;
+     }
+-    // 9..16 rows (wide builds only): one exact instantiation per row count, each row's dot independent of the others.  7 and 8
+-    // rows stay with the default case below, the instantiation they always had.
++    // 9..16 rows (wide builds only): one exact instantiation per row count, each row's dot independent of the others.
++    // dec/round3 D1 (STRATA_MMVF_EXACT78=0 turns it off): 7 and 8 rows get exact instantiations too instead of the default
++    // case's <N, 8, false> with its runtime row guards; the same per-row FMAs and reductions (bitwise), router at T = 8
++    // 8.02 -> 6.02 us in gpu-probe's router_poc.
++    static const bool exact78 = [] { const char* v = std::getenv("STRATA_MMVF_EXACT78"); return !(v != nullptr && v[0] == '0'); }();
+ #if STRATA_VERIFY_MAX_T > 8
+ #define STRATA_MMVF_W(N, T) case T: launch_pdl(bf16_f32_mmvf_multi_kernel<N, T, true>, dim3((unsigned) n_out), dim3(N), 0, st, x, ldx, w, y, ldy, (int) n_in, n_tok, mmvf_fast()); break;
+ #if STRATA_VERIFY_MAX_T > 12
+@@ -459,6 +462,13 @@ void bf16_gemv_fp32_mmvf_multi(const float* x, int64_t ldx, const uint16_t* w, f
+         case 4: launch_pdl(bf16_f32_mmvf_multi_kernel<N, 4, true>, dim3((unsigned) n_out), dim3(N), 0, st, x, ldx, w, y, ldy, (int) n_in, n_tok, mmvf_fast()); break; \
+         case 5: launch_pdl(bf16_f32_mmvf_multi_kernel<N, 5, true>, dim3((unsigned) n_out), dim3(N), 0, st, x, ldx, w, y, ldy, (int) n_in, n_tok, mmvf_fast()); break; \
+         case 6: launch_pdl(bf16_f32_mmvf_multi_kernel<N, 6, true>, dim3((unsigned) n_out), dim3(N), 0, st, x, ldx, w, y, ldy, (int) n_in, n_tok, mmvf_fast()); break; \
++        case 7: case 8: \
++            if (exact78) { \
++                if (n_tok == 7) launch_pdl(bf16_f32_mmvf_multi_kernel<N, 7, true>, dim3((unsigned) n_out), dim3(N), 0, st, x, ldx, w, y, ldy, (int) n_in, n_tok, mmvf_fast()); \
++                else launch_pdl(bf16_f32_mmvf_multi_kernel<N, 8, true>, dim3((unsigned) n_out), dim3(N), 0, st, x, ldx, w, y, ldy, (int) n_in, n_tok, mmvf_fast()); \
++                break; \
++            } \
++            [[fallthrough]]; \
+         default: launch_pdl(bf16_f32_mmvf_multi_kernel<N, 8, false>, dim3((unsigned) n_out), dim3(N), 0, st, x, ldx, w, y, ldy, (int) n_in, n_tok, mmvf_fast()); break; \
+     } break
+     switch (mmvf_block_size(n_in)) {
+diff --git a/src/kernels/cuda/native_qsa_indexer.cu b/src/kernels/cuda/native_qsa_indexer.cu
+index e3e11e254..5a549b753 100644
+--- a/src/kernels/cuda/native_qsa_indexer.cu
++++ b/src/kernels/cuda/native_qsa_indexer.cu
+@@ -20,6 +20,7 @@
+ 
+ #include "strata/kernels/native_qsa_indexer.hpp"
+ #include "strata/core/geometry.hpp"
++#include "strata/core/dispatch_stats.hpp"
+ #include "strata/kernels/mrope.hpp"
+ #include <cuda_runtime.h>
+ #include <cuda_fp16.h>
+@@ -27,6 +28,7 @@
+ #include <cmath>
+ #include <cstddef>
+ #include <cstdint>
++#include <cstdlib>
+ #include <limits>
+ #include <stdexcept>
+ 
+@@ -128,6 +130,114 @@ __global__ void append(const float* __restrict__ raw, const int32_t* __restrict_
+     append_body<TAB>(raw, pos_dev, pos_stride, n_steps, pos_base, gamma, epsilon, tail, dead, pooled, block_pos, max_cells,
+                      theta_scale, freq_scale, corr_low, corr_high, ext_factor, mscale, mtab, rt);
+ }
++// dec3 D5 STRATA_IDX_APPEND_PAR (default on, =0 the loop above): the window's n_steps <= PG steps at once, 128 threads a
++// step.  append_body's arithmetic per step, the tail a step reads being the latest earlier step's key in that slot (or
++// the window's incoming tail, all of it read before any write), the stores replayed in step order by one thread per
++// dim, so the buffers end exactly as the step loop leaves them.  A window with a cell-0 step (the spare is written
++// and then read) runs append_body itself.
++constexpr int PG = 8;
++template <bool TAB>
++__global__ void __launch_bounds__(PG * D) append_par(const float* __restrict__ raw, const int32_t* __restrict__ pos_dev,
++                        int pos_stride, int n_steps,
++                        int pos_base, const float* __restrict__ gamma, float epsilon,
++                        float* __restrict__ tail, float* __restrict__ dead,
++                        float* __restrict__ pooled, int32_t* __restrict__ block_pos,
++                        int max_cells, float theta_scale, float freq_scale, float corr_low,
++                        float corr_high, float ext_factor, float mscale,
++                        const int32_t* __restrict__ mtab, RopeTab rt) {
++    __shared__ float inc[PG][D];
++    __shared__ float vals[PG][D];
++    __shared__ float part[PG][4];
++    int pos[PG];
++    bool cell0 = false;
++#pragma unroll
++    for (int k = 0; k < PG; ++k) {
++        pos[k] = k < n_steps ? pos_dev[(std::size_t) k * pos_stride] : -1;
++        if (pos[k] < 0 || pos[k] >= max_cells) pos[k] = -1;   // skipped, as append_body skips it
++        cell0 = cell0 || pos[k] == 0;
++    }
++    if (cell0) {   // block-uniform
++        append_body<TAB>(raw, pos_dev, pos_stride, n_steps, pos_base, gamma, epsilon, tail, dead, pooled, block_pos,
++                         max_cells, theta_scale, freq_scale, corr_low, corr_high, ext_factor, mscale, mtab, rt);
++        return;
++    }
++    const int g = threadIdx.x / D, d = threadIdx.x % D;
++    int my = -1;
++#pragma unroll
++    for (int k = 0; k < PG; ++k) if (k == g) my = pos[k];
++    const bool done = my >= 0 && my % R == R - 1;   // this step completes block my / R
++    float incoming = 0.0f, t0 = 0.0f, t1 = 0.0f, t2 = 0.0f;
++    if (my >= 0) {
++        // SET_ROWS stores F16; GET_ROWS expands those exact values to F32.
++        incoming = __half2float(__float2half_rn(raw[(std::size_t) g * D + d]));
++        inc[g][d] = incoming;
++        if (done) { t0 = tail[d]; t1 = tail[D + d]; t2 = tail[2 * D + d]; }
++    }
++    __syncthreads();
++    float mean = 0.0f;
++    if (done) {
++        // tail[j] as step g sees it: the last earlier step in slot j, else the incoming tail
++        int s0 = -1, s1 = -1, s2 = -1;
++#pragma unroll
++        for (int k = 0; k < PG; ++k)
++            if (k < g && pos[k] >= 0) {
++                const int sl = pos[k] % R;
++                if (sl == 0) s0 = k; else if (sl == 1) s1 = k; else if (sl == 2) s2 = k;
++            }
++        const float a0 = s0 >= 0 ? inc[s0][d] : t0, a1 = s1 >= 0 ? inc[s1][d] : t1, a2 = s2 >= 0 ? inc[s2][d] : t2;
++        float sum = a0;
++        sum = __fadd_rn(sum, a1);
++        sum = __fadd_rn(sum, a2);
++        sum = __fadd_rn(sum, incoming);
++        mean = __fmaf_rn(0.25f, sum, 0.0f); // SCALE includes a zero bias.
++    }
++    float square_sum = 0.0f;
++    square_sum += mean * mean;
++    square_sum = warp_sum(square_sum);
++    const int lane = d % 32;
++    if (lane == 0) part[g][d / 32] = square_sum;
++    __syncthreads();
++    // append_body's second sum: lanes 0..3 its four warps' sums, lanes 4..7 its idle warps' zeros, the rest zero
++    square_sum = lane < 4 ? part[g][lane] : 0.0f;
++    square_sum = warp_sum(square_sum);
++    const float scale = rsqrtf(square_sum / D + epsilon);
++    if (done) vals[g][d] = scale * mean * gamma[d];
++    __syncthreads();
++    float y = 0.0f;
++    if (done) {
++        const int b = my / R;
++        const int rope_pos = pos_base + R * b;
++        y = vals[g][d];
++        if (d < ROT) {
++            const int pair = d % (ROT / 2);
++            float c, s;
++            if (!(TAB && rope_tab_cs(rt, mrope_pos(mtab, rope_pos, pair), pair, c, s))) {
++                const float theta_extrap = mrope_pos(mtab, rope_pos, pair) * powf(theta_scale, float(pair));
++                rope_scaled_angle(theta_extrap, freq_scale, corr_low, corr_high, ext_factor, mscale, pair, c, s);
++            }
++            const float a = vals[g][pair], z = vals[g][pair + ROT / 2];
++            y = d < ROT / 2 ? a * c - z * s : a * s + z * c;
++        }
++    }
++    __syncthreads();
++    if (done) inc[g][d] = y;   // a completing step's key is never another step's tail (slot 3 is not stored)
++    __syncthreads();
++    if (g != 0) return;
++    const float dv = dead[d];
++#pragma unroll
++    for (int k = 0; k < PG; ++k) {   // the step loop's stores, in its order
++        const int p = pos[k];
++        if (p < 0) continue;   // also every k >= n_steps
++        const int slot = p % R;
++        if (slot < R - 1) tail[slot * D + d] = inc[k][d];
++        else {
++            const int b = p / R;
++            pooled[std::size_t(b) * D + d] = inc[k][d];
++            pooled[std::size_t(b + 1) * D + d] = dv;
++            if (d == 0) *block_pos = pos_base + R * b;
++        }
++    }
++}
+ // engine-latency: the commit's appends of several QSA layers in one launch, one block per layer (blockIdx.x); each block
+ // first restores its layer's tail from the window's snapshot (the commit's copy_from_mapped), then runs append's body
+ template <bool TAB>
+@@ -264,6 +374,13 @@ bool overlaps(Span a, Span b) {
+ }
+ } // namespace
+ 
++int g_append_par = -1;   // native_qsa_indexer_set_append_par: -1 = STRATA_IDX_APPEND_PAR (default on)
++bool append_par_on() {
++    if (g_append_par >= 0) return g_append_par != 0;
++    static const bool on = [] { const char* v = std::getenv("STRATA_IDX_APPEND_PAR"); return v == nullptr || std::atoi(v) != 0; }();
++    return on;
++}
++void native_qsa_indexer_set_append_par(int on) { g_append_par = on; }
+ void native_qsa_indexer_set_enabled(bool value) { enabled.store(value, std::memory_order_relaxed); }
+ bool native_qsa_indexer_enabled() { return enabled.load(std::memory_order_relaxed); }
+ void native_qsa_indexer_append_steps(const float* raw, const int32_t* relative_pos_device,
+@@ -285,6 +402,18 @@ void native_qsa_indexer_append_steps(const float* raw, const int32_t* relative_p
+     const float theta_scale = powf((float) scaling.freq_base, -2.0f / ROT);
+     const RopeKernelArgs k = scaling.kernel_args(ROT);   // none: the identity constants
+     const RopeTab rt = rope_table_for(scaling);
++    // dec3 D5: the steps at once (the same buffers); from 4 steps (bench: 2-3 steps are 0.2-0.7 us slower so)
++    if (append_par_on() && n_steps >= 4 && n_steps <= PG) {
++        strata::dispatch::note("qsa indexer: window append, steps at once (STRATA_IDX_APPEND_PAR)");
++        if (rt.cos != nullptr)
++            append_par<true><<<1,PG*D,0,static_cast<cudaStream_t>(stream)>>>(raw,relative_pos_device,pos_stride,n_steps,pos_base,gamma,epsilon,
++                b.tail,b.dead,b.pooled,b.block_pos,int(max_cells),theta_scale,k.freq_scale,
++                k.corr_low,k.corr_high,k.ext_factor,k.attn_factor,mrope_table(),rt);
++        else
++            append_par<false><<<1,PG*D,0,static_cast<cudaStream_t>(stream)>>>(raw,relative_pos_device,pos_stride,n_steps,pos_base,gamma,epsilon,
++                b.tail,b.dead,b.pooled,b.block_pos,int(max_cells),theta_scale,k.freq_scale,
++                k.corr_low,k.corr_high,k.ext_factor,k.attn_factor,mrope_table(),rt);
++    } else
+     if (rt.cos != nullptr)
+         append<true><<<1,THREADS,0,static_cast<cudaStream_t>(stream)>>>(raw,relative_pos_device,pos_stride,n_steps,pos_base,gamma,epsilon,
+             b.tail,b.dead,b.pooled,b.block_pos,int(max_cells),theta_scale,k.freq_scale,
+diff --git a/src/kernels/cuda/qsa_select.cu b/src/kernels/cuda/qsa_select.cu
+index 089646211..bb8cddca1 100644
+--- a/src/kernels/cuda/qsa_select.cu
++++ b/src/kernels/cuda/qsa_select.cu
+@@ -2,6 +2,7 @@
+ #include "strata/core/emulate.hpp"
+ #include "strata/core/sm75_series.hpp"
+ #include "strata/core/geometry.hpp"
++#include "strata/core/dispatch_stats.hpp"
+ #include <cstdlib>
+ #include <cstring>
+ #include "strata/kernels/qsa_select.hpp"
+@@ -1242,6 +1243,62 @@ __global__ void __launch_bounds__(SCORE_WARPS * 32) block_scores_multi_kernel(co
+     block_scores_multi_body(pooled, dead, q_idx, steps, nq, max_blocks, out, early_exit, srow);
+ }
+ 
++// dec3 D5 STRATA_SCORES_PAIRS (default on for CUDA, =0 the multi kernel above): the decode call's (block, query) pairs
++// spread over the warps, one pair per warp pass, instead of each warp walking its block's queries one after another
++// (a dependent shuffle chain per query: ~0.85 us per window row at a short context).  Per pair the multi kernel's
++// arithmetic, expression for expression; each pair writes its own score.
++__global__ void __launch_bounds__(SCORE_WARPS * 32) block_scores_pairs_kernel(const float* __restrict__ pooled,
++                                                                              const float* __restrict__ dead,
++                                                                              const float* __restrict__ q_idx,
++                                                                              const int32_t* __restrict__ steps, int nq,
++                                                                              int64_t max_blocks, float* __restrict__ out) {
++    // no staging: every thread reads the steps, a warp its pair's key and query slices straight from L2 (one round trip)
++    int64_t top = 0;
++    for (int q = 0; q < nq; ++q) {
++        const int64_t v = steps[q * kStepCount + kStepNBid];
++        top = v > top ? v : top;
++    }
++    const int64_t nb = top + 1 < max_blocks ? top + 1 : max_blocks;   // b <= top && b < max_blocks
++    const int64_t pairs = nb * nq;
++    const int lane = threadIdx.x & 31;
++    const int64_t wstride = (int64_t) gridDim.x * SCORE_WARPS;
++    for (int64_t t = (int64_t) blockIdx.x * SCORE_WARPS + (threadIdx.x >> 5); t < pairs; t += wstride) {
++        const int64_t b = t / nq;
++        const int qi = (int) (t - b * nq);
++        const int64_t n_bid = steps[qi * kStepCount + kStepNBid];
++        if (b > n_bid) continue;
++        const float* q = q_idx + qi * IDX_HEADS * IDX_DIM + lane * 4;
++        float4 qv[IDX_HEADS];
++#pragma unroll
++        for (int h = 0; h < IDX_HEADS; ++h) qv[h] = *reinterpret_cast<const float4*>(q + h * IDX_DIM);
++        const float4 k4 = (b == n_bid) ? *reinterpret_cast<const float4*>(dead + lane * 4)
++                                       : *reinterpret_cast<const float4*>(pooled + b * IDX_DIM + lane * 4);
++        float score = 0.0f;
++#pragma unroll
++        for (int h = 0; h < IDX_HEADS; ++h) {
++            const float4 q4 = qv[h];
++            float d = k4.x * q4.x + k4.y * q4.y + k4.z * q4.z + k4.w * q4.w;
++#pragma unroll
++            for (int o = 16; o > 0; o >>= 1) d += __shfl_xor_sync(0xffffffffu, d, o);
++            score += d > 0.0f ? d : 0.0f;
++        }
++        if (lane == 0) {
++            if (b == n_bid && (int64_t) steps[qi * kStepCount + kStepNKv] % R != 0) score += 1e9f;
++            out[qi * max_blocks + b] = score;
++        }
++    }
++}
++int g_scores_pairs = -1;   // qsa_set_scores_pairs: -1 = STRATA_SCORES_PAIRS (default on for CUDA)
++bool scores_pairs_on() {
++    if (g_scores_pairs >= 0) return g_scores_pairs != 0;
++#if defined(__HIPCC__)
++    static const bool on = [] { const char* v = std::getenv("STRATA_SCORES_PAIRS"); return v != nullptr && std::atoi(v) != 0; }();
++#else
++    static const bool on = [] { const char* v = std::getenv("STRATA_SCORES_PAIRS"); return v == nullptr || std::atoi(v) != 0; }();
++#endif
++    return on;
++}
++
+ // Queries of different slots, each with its own indexer keys: blockIdx.y is the query, and its CTAs run exactly the
+ // single-query call of block_scores_multi_kernel (qsa_block_scores_slots).
+ struct ScoreSlotKeys {
+@@ -2274,6 +2331,8 @@ bool scores_thread_on() {
+     return ok[dev] == 1;
+ }
+ 
++void qsa_set_scores_pairs(int on) { g_scores_pairs = on; }
++
+ bool scores_halve_on() {
+     static const int env = [] { const char* v = std::getenv("STRATA_SCORES_HALVE"); return v ? (std::atoi(v) != 0 ? 1 : 0) : -1; }();
+     if (env >= 0) return env != 0;
+@@ -2320,6 +2379,12 @@ void qsa_block_scores(const float* pooled, const float* dead, const float* q_idx
+             if (e != cudaSuccess) { std::fprintf(stderr, "qsa_block_scores halve: %s\n", cudaGetErrorString(e)); std::exit(1); }
+             return;
+         }
++        const bool pairs = scores_pairs_on() && scores_early_exit();
++        if (pairs) strata::dispatch::note("qsa scores: decode pairs kernel (STRATA_SCORES_PAIRS)");
++        if (pairs)   // dec3 D5: the (block, query) pairs over the warps, the same bits
++            block_scores_pairs_kernel<<<256, SCORE_WARPS * 32, 0, (cudaStream_t) stream>>>(pooled, dead, q_idx, steps, (int) nq,
++                                                                                         max_blocks, scores);
++        else
+         block_scores_multi_kernel<<<256, SCORE_WARPS * 32, 0, (cudaStream_t) stream>>>(pooled, dead, q_idx, steps, (int) nq,
+                                                                                      max_blocks, scores, scores_early_exit());
+         const cudaError_t e = cudaGetLastError();
+diff --git a/src/kernels/cuda/verify_kernels.cu b/src/kernels/cuda/verify_kernels.cu
+index 678f58e2c..57919a3c6 100644
+--- a/src/kernels/cuda/verify_kernels.cu
++++ b/src/kernels/cuda/verify_kernels.cu
+@@ -3,6 +3,8 @@
+ // The per-token arithmetic of every kernel here is transcribed from its single-token original (fused_gdn.cu,
+ // elementwise.cu) with the same operation order, so a verify window reproduces plain decode bit for bit.
+ #include "strata/kernels/verify_kernels.hpp"
++
++#include <thread>
+ #include "strata/core/bw_dense_defaults.hpp"
+ #include "strata/core/geometry.hpp"
+ #include "strata/core/emulate.hpp"
+@@ -1920,4 +1922,62 @@ bool pdl_launch_ok(const void* kernel, cudaStream_t stream) {
+ }
+ #endif
+ 
++// ---- multiarch tests (STRATA_EMULATE_SMS=N, emulate.hpp): a smaller card of the same generation.  One block a multiprocessor
++// holds every register (1024 threads x 64) and nearly all shared memory of the SMs past the first N, in 50 ms launches
++// relaunched by a host thread for the life of the process (a device-wide sync in the engine waits at most one launch).
++// Speeds mean nothing then; what it shows is whether co-resident waits (a gated read beside its combine) still finish.
++#if !defined(__HIPCC__)
++namespace {
++__global__ void __launch_bounds__(1024, 1) sm_hog_kernel(unsigned* out, unsigned long long ns) {
++    extern __shared__ unsigned hog_smem[];
++    unsigned long long t0, t1;
++    asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t0));
++    unsigned r[48];
++#pragma unroll
++    for (int i = 0; i < 48; ++i) r[i] = threadIdx.x * (i + 1);
++    do {
++#pragma unroll
++        for (int i = 0; i < 48; i += 8)
++            asm volatile("" : "+r"(r[i]), "+r"(r[i + 1]), "+r"(r[i + 2]), "+r"(r[i + 3]), "+r"(r[i + 4]), "+r"(r[i + 5]),
++                         "+r"(r[i + 6]), "+r"(r[i + 7]));
++        __nanosleep(10000);
++        asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t1));
++    } while (t1 - t0 < ns);
++    unsigned s = 0;
++#pragma unroll
++    for (int i = 0; i < 48; ++i) s += r[i];
++    if (s == 0xfffffffeu) { hog_smem[threadIdx.x] = s; out[threadIdx.x] = hog_smem[threadIdx.x ^ 1]; }
++}
++}  // namespace
++
++int sm_hog_start(int keep_sms) {
++    int dev = 0, sms = 0, smem = 0;
++    if (cudaGetDevice(&dev) != cudaSuccess || cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev) != cudaSuccess ||
++        cudaDeviceGetAttribute(&smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev) != cudaSuccess) { cudaGetLastError(); return 0; }
++    const int n = sms - keep_sms;
++    if (keep_sms < 1 || n < 1) return 0;
++    cudaFuncAttributes fa{};
++    int occ = 0;
++    unsigned* out = nullptr;
++    cudaStream_t s = nullptr;
++    if (cudaFuncSetAttribute(sm_hog_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem) != cudaSuccess ||
++        cudaFuncGetAttributes(&fa, sm_hog_kernel) != cudaSuccess ||
++        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, sm_hog_kernel, 1024, (size_t) smem) != cudaSuccess || occ != 1 ||
++        cudaMalloc((void**) &out, 1024 * sizeof(unsigned)) != cudaSuccess ||
++        cudaStreamCreateWithPriority(&s, cudaStreamNonBlocking, 0) != cudaSuccess) { cudaGetLastError(); return 0; }
++    std::fprintf(stderr, "strata: STRATA_EMULATE_SMS=%d (a test mode): %d of %d multiprocessors held by an idle kernel (%d registers a thread, "
++                         "%d B of shared memory a block, 50 ms launches)\n", keep_sms, n, sms, fa.numRegs, smem);
++    std::thread([=] {
++        cudaSetDevice(dev);
++        cudaStreamCaptureMode mode = cudaStreamCaptureModeRelaxed;   // the engine's captures never forbid this thread's calls
++        cudaThreadExchangeStreamCaptureMode(&mode);
++        for (;;) {
++            sm_hog_kernel<<<(unsigned) n, 1024, (size_t) smem, s>>>(out, 50000000ull);
++            if (cudaStreamSynchronize(s) != cudaSuccess) { cudaGetLastError(); return; }
++        }
++    }).detach();
++    return n;
++}
++#endif
++
+ }  // namespace strata::kernels
+diff --git a/src/kernels/gdn_parity.cpp b/src/kernels/gdn_parity.cpp
+index cfbbbebf8..d70733f55 100644
+--- a/src/kernels/gdn_parity.cpp
++++ b/src/kernels/gdn_parity.cpp
+@@ -697,7 +697,8 @@ int main(int argc, char** argv) {
+                 ma.qkv = d_qkv; ma.h = d_h; ma.gate = d_g; ma.beta = d_b; ma.z = d_z; ma.y = d_y; ma.yq = d_yq; ma.bo = d_bo;
+                 ma.T = T; ma.layer = 5;
+                 double us_chain = 0, us_mid = 0;
+-                const int reps = 10;
++                // dec/round3 D2: STRATA_GDN_PARITY_REPS timed launches (default 10)
++                const int reps = std::getenv("STRATA_GDN_PARITY_REPS") ? std::atoi(std::getenv("STRATA_GDN_PARITY_REPS")) : 10;
+                 for (int i = 0; i < reps + 1; ++i) {
+                     float ms = 0;
+                     strata::kernels::dense_tc(8, d_flush, d_xq, d_fly, n_embd, fl_rows, 1, st8);
+diff --git a/src/kernels/gr_hc8_check.cpp b/src/kernels/gr_hc8_check.cpp
+index a224f2c56..b19c3cc7d 100644
+--- a/src/kernels/gr_hc8_check.cpp
++++ b/src/kernels/gr_hc8_check.cpp
+@@ -7,8 +7,13 @@
+ //     against the fp64 reference on its bf16 weights); the q8_1 image of mixed (STRATA_QFUSE) against the host's.
+ // --bench: the time per read (down + up) of hc8 and the bf16 v4 read (the default), the weights from DRAM (24 sets in
+ // rotation), medians of 15 replays.
++// dec-round3 D3: the solo reads run on the old path (STRATA_HC8_LOSTAGE=0) and the windows on the default, so every window
++// case is also old-vs-new bitwise.  --bench adds the LOSTAGE arm; --bench-gated times the early read
++// (fused_gr_read_multi_gated) released by a real combine_sig, as the verifier chains it (old / LOSTAGE / + ER_LATE_PASS),
++// and checks its outputs bitwise against the ungated read on the old path.
+ #include "strata/kernels/fused_gr.hpp"
+ #include "strata/kernels/native_mmvq.hpp"
++#include "strata/kernels/native_moe.hpp"
+ 
+ #include <cuda_fp16.h>
+ #include <cuda_runtime.h>
+@@ -208,11 +213,146 @@ double err(const std::vector<float>& g, const std::vector<double>& r) {
+ 
+ }  // namespace
+ 
++// D3: the early read as the verifier chains it: per layer the read forked onto a branch (its weights loaded, its down
++// blocks waiting on the gate), a few small nodes standing in for the CPU-row wait, then the combine that writes bo_prev
++// and counts its blocks into the gate; the branch joins back.  Per layer = the fork + delay + combine + the read's tail
++// after the combine.  Arms: old, STRATA_HC8_LOSTAGE, + STRATA_ER_LATE_PASS.  The read's outputs against an ungated read
++// (old path) of the combine's bo_prev: bitwise.
++int bench_gated_read(std::vector<Tok>& tok, float* xn, unsigned* qcnt, cudaStream_t st, const WSet& w0) {
++    constexpr int K = 10, NL = NSETS;
++    std::vector<WSet> sets;
++    sets.push_back(w0);
++    for (int i = 1; i < NL; ++i) sets.push_back(make_set(false));
++    float* parts = dalloc<float>((size_t) MAXT * K * N);
++    float* wts = dalloc<float>((size_t) MAXT * K);
++    float* shared = dalloc<float>((size_t) MAXT * N);
++    float* bo = dalloc<float>((size_t) MAXT * N);   // the combine's output = every token's bo_prev
++    float* xn2 = dalloc<float>((size_t) MAXT * D);
++    float* dummy = dalloc<float>((size_t) MAXT * N);
++    unsigned* gate = dalloc<unsigned>((size_t) 2 * NL);
++    unsigned* small = dalloc<unsigned>(64);
++    up(parts, gauss((size_t) MAXT * K * N, 0.3f));
++    up(wts, gauss((size_t) MAXT * K, 0.2f, 0.1f));
++    up(shared, gauss((size_t) MAXT * N, 0.3f));
++    ck(cudaMemset(gate, 0, sizeof(unsigned) * 2 * NL), "gate");
++    cudaStream_t st2 = nullptr;
++    ck(cudaStreamCreateWithFlags(&st2, cudaStreamNonBlocking), "stream2");
++    cudaEvent_t evf[NL], evj[NL];
++    for (int i = 0; i < NL; ++i) {
++        cudaEventCreateWithFlags(&evf[i], cudaEventDisableTiming);
++        cudaEventCreateWithFlags(&evj[i], cudaEventDisableTiming);
++    }
++    const int delay = std::getenv("GR_HC8_DELAY") != nullptr ? std::atoi(std::getenv("GR_HC8_DELAY")) : 4;
++    // every kernel once before a gated read spins (lazy module loading would wait for the spinning grid: the gate times out)
++    for (int T = 1; T <= MAXT; ++T) {
++        native_moe_combine_multi_sig(parts, wts, shared, bo, N, K, T, small + 63, st);
++        native_moe_combine_multi(parts, wts, shared, bo, N, K, T, st);
++    }
++    ck(cudaMemsetAsync(small, 0, 64 * 4, st), "warm");
++    ck(cudaStreamSynchronize(st), "warm combine");
++    int bad = 0;
++    const int reps = std::getenv("GR_HC8_REPS") != nullptr ? std::atoi(std::getenv("GR_HC8_REPS")) : 31;
++    std::printf("  early read (gated on the combine), %d layers a graph, %d small kernels before each combine, us a layer (medians of %d):\n", NL, delay, reps);
++    std::printf("    T   old       lostage   +late     l - old  l+l - old  bitwise\n");
++    for (int T = 2; T <= MAXT; ++T) {
++        std::vector<Tok*> tp;
++        for (int k = 0; k < T; ++k) tp.push_back(&tok[(size_t) k]);
++        const unsigned nb = native_moe_combine_multi_sig_blocks(parts, shared, bo, N, K, T);
++        constexpr int NV = 3;
++        cudaGraphExec_t gx[NV] = {};
++        for (int v = 0; v < NV; ++v) {
++            fused_gr_set_hc8_lostage(v >= 1 ? 1 : 0);   // arms: old, LOSTAGE, LOSTAGE + ER_LATE_PASS
++            fused_gr_set_er_late_pass(v == 2 ? 1 : 0);
++            cudaGraph_t g = nullptr;
++            ck(cudaStreamBeginCapture(st, cudaStreamCaptureModeThreadLocal), "gated capture");
++            for (int s = 0; s < NL; ++s) {
++                auto a = args_for(sets[(size_t) s], tp, true, true, true, qcnt);
++                for (int k = 0; k < T; ++k) a[(size_t) k].bo_prev = bo + (size_t) k * N;
++                cudaEventRecord(evf[s], st);
++                cudaStreamWaitEvent(st2, evf[s], 0);
++                if (!fused_gr_read_gated_ok(a.data(), T)) { std::printf("  gated read not available here\n"); std::exit(1); }
++                fused_gr_read_multi_gated(a.data(), T, xn2, gate + 2 * s, nb, gate + 2 * s + 1, st2);
++                cudaEventRecord(evj[s], st2);
++                for (int d = 0; d < delay; ++d) native_moe_combine_multi(parts, wts, shared, dummy, N, K, T, st);   // the CPU-row wait
++                native_moe_combine_multi_sig(parts, wts, shared, bo, N, K, T, gate + 2 * s, st);
++                cudaStreamWaitEvent(st, evj[s], 0);
++            }
++            ck(cudaStreamEndCapture(st, &g), "gated capture end");
++            ck(cudaGraphInstantiate(&gx[v], g, nullptr, nullptr, 0), "gated instantiate");
++            cudaGraphDestroy(g);
++        }
++        // a graph's first launch may run its branches in order (the gated read before the combine it waits for: the gate
++        // would time out, and its abort is sticky): each graph runs once with every gate already open, then the gates are
++        // zeroed
++        {
++            std::vector<unsigned> open((size_t) 2 * NL, 0u);
++            for (int s = 0; s < NL; ++s) open[(size_t) 2 * s] = nb;
++            for (int v = 0; v < NV; ++v) {
++                ck(cudaMemcpy(gate, open.data(), open.size() * 4, cudaMemcpyHostToDevice), "gates open");
++                ck(cudaGraphLaunch(gx[v], st), "gated warm");
++                ck(cudaStreamSynchronize(st), "gated warm sync");
++            }
++            ck(cudaMemset(gate, 0, sizeof(unsigned) * 2 * NL), "gates shut");
++        }
++        // bitwise: each arm's outputs (the last layer's set) against the ungated read with the old hand-off
++        std::vector<Out> ref((size_t) T);
++        {
++            fused_gr_set_er_late_pass(0);
++            fused_gr_set_hc8_lostage(0);
++            auto a = args_for(sets[(size_t) NL - 1], tp, true, true, true, qcnt);
++            for (int k = 0; k < T; ++k) a[(size_t) k].bo_prev = bo + (size_t) k * N;
++            native_moe_combine_multi(parts, wts, shared, bo, N, K, T, st);
++            for (auto* x : tp) clear(*x, st);
++            fused_gr_read_multi(a.data(), T, xn, st);
++            ck(cudaStreamSynchronize(st), "gated ref");
++            for (int k = 0; k < T; ++k) ref[(size_t) k] = snap(*tp[(size_t) k], true);
++        }
++        bool okv[NV];
++        for (int v = 0; v < NV; ++v) {
++            for (auto* x : tp) clear(*x, st);
++            if (std::getenv("GR_HC8_TRACE")) { std::printf("  [T=%d flag %d first run]\n", T, v); std::fflush(stdout); }
++            ck(cudaGraphLaunch(gx[v], st), "gated run");
++            ck(cudaStreamSynchronize(st), "gated sync");
++            okv[v] = true;
++            for (int k = 0; k < T; ++k) okv[v] = okv[v] && same(snap(*tp[(size_t) k], true), ref[(size_t) k], true, true);
++            if (!okv[v]) { ++bad; std::printf("  FAIL gated T=%d arm %d differs from the ungated read\n", T, v); }
++        }
++        cudaEvent_t e0, e1;
++        cudaEventCreate(&e0);
++        cudaEventCreate(&e1);
++        std::vector<float> ms[NV];
++        for (int r = 0; r < reps; ++r)
++            for (int j = 0; j < NV; ++j) {
++                const int v = (r + j) % NV;
++                cudaEventRecord(e0, st);
++                cudaGraphLaunch(gx[v], st);
++                cudaEventRecord(e1, st);
++                cudaEventSynchronize(e1);
++                float x = 0;
++                cudaEventElapsedTime(&x, e0, e1);
++                ms[v].push_back(x);
++            }
++        double us[NV];
++        for (int v = 0; v < NV; ++v) {
++            std::sort(ms[v].begin(), ms[v].end());
++            us[v] = 1000.0 * ms[v][ms[v].size() / 2] / NL;
++            cudaGraphExecDestroy(gx[v]);
++        }
++        std::printf("    %d   %7.2f   %7.2f   %7.2f   %+6.2f   %+6.2f    %s\n", T, us[0], us[1], us[2], us[1] - us[0], us[2] - us[0],
++                    okv[0] && okv[1] && okv[2] ? "yes" : "NO");
++        cudaEventDestroy(e0);
++        cudaEventDestroy(e1);
++    }
++    ck(cudaDeviceSynchronize(), "gated end");
++    return bad;
++}
++
+ int main(int argc, char** argv) {
+-    bool bench = false;
++    bool bench = false, bench_gated = false;
+     for (int i = 1; i < argc; ++i) {
+         if (std::string(argv[i]) == "--bench") bench = true;
+-        else if (std::string(argv[i]) != "--selftest") { std::fprintf(stderr, "usage: gr_hc8_check [--selftest] [--bench]\n"); return 2; }
++        else if (std::string(argv[i]) == "--bench-gated") bench_gated = true;
++        else if (std::string(argv[i]) != "--selftest") { std::fprintf(stderr, "usage: gr_hc8_check [--selftest] [--bench] [--bench-gated]\n"); return 2; }
+     }
+     cudaDeviceProp p{};
+     ck(cudaGetDeviceProperties(&p, 0), "device");
+@@ -240,6 +380,7 @@ int main(int argc, char** argv) {
+         for (int inject = 0; inject < 2; ++inject)
+             for (int qf = 0; qf < 2; ++qf) {
+                 std::vector<Out> solo((size_t) MAXT);
++                fused_gr_set_hc8_lostage(0);   // D3: the solo reads on the old path (strided lo staging)
+                 for (int t = 0; t < MAXT; ++t) {
+                     const auto a = args_for(w0, {&tok[(size_t) t]}, apply, inject, true, qf ? qcnt : nullptr);
+                     clear(tok[(size_t) t], st);
+@@ -247,6 +388,7 @@ int main(int argc, char** argv) {
+                     ck(cudaStreamSynchronize(st), "solo");
+                     solo[(size_t) t] = snap(tok[(size_t) t], qf != 0);
+                 }
++                fused_gr_set_hc8_lostage(-1);
+                 for (int T = 1; T <= MAXT; ++T)
+                     for (int rot = 0; rot < (T < MAXT ? 2 : 1); ++rot) {   // rot 1: the tokens from column 8 - T on
+                         std::vector<Tok*> tp;
+@@ -360,16 +502,18 @@ int main(int argc, char** argv) {
+         sets.push_back(w0);
+         for (int i = 1; i < NSETS; ++i) sets.push_back(make_set(false));
+         std::printf("  time per read (down + up), %d weight sets in rotation, medians of 15 replays of %d reads:\n", NSETS, NSETS);
+-        std::printf("    T   v4 bf16 us   hc8 us   speedup\n");
++        std::printf("    T   v4 bf16 us   hc8 old   lostage   lost - old\n");
+         for (int T = 1; T <= MAXT; ++T) {
+-            cudaGraphExec_t gx[2] = {};
+-            for (int v = 0; v < 2; ++v) {
++            constexpr int NV = 3;   // v4, hc8 old, hc8 + STRATA_HC8_LOSTAGE
++            cudaGraphExec_t gx[NV] = {};
++            for (int v = 0; v < NV; ++v) {
+                 cudaGraph_t g = nullptr;
++                fused_gr_set_hc8_lostage(v == 2 ? 1 : 0);
+                 ck(cudaStreamBeginCapture(st, cudaStreamCaptureModeThreadLocal), "bench capture");
+                 for (int s = 0; s < NSETS; ++s) {
+                     std::vector<Tok*> tp;
+                     for (int k = 0; k < T; ++k) tp.push_back(&tok[(size_t) k]);
+-                    const auto a = args_for(sets[(size_t) s], tp, true, true, v == 1, nullptr);
++                    const auto a = args_for(sets[(size_t) s], tp, true, true, v >= 1, v >= 1 ? qcnt : nullptr);
+                     fused_gr_read_multi(a.data(), T, xn, st);
+                 }
+                 ck(cudaStreamEndCapture(st, &g), "bench capture end");
+@@ -381,10 +525,10 @@ int main(int argc, char** argv) {
+             cudaEvent_t e0, e1;
+             cudaEventCreate(&e0);
+             cudaEventCreate(&e1);
+-            std::vector<float> ms[2];
++            std::vector<float> ms[NV];
+             for (int r = 0; r < 15; ++r)
+-                for (int j = 0; j < 2; ++j) {
+-                    const int v = (r + j) % 2;
++                for (int j = 0; j < NV; ++j) {
++                    const int v = (r + j) % NV;
+                     cudaEventRecord(e0, st);
+                     cudaGraphLaunch(gx[v], st);
+                     cudaEventRecord(e1, st);
+@@ -393,17 +537,20 @@ int main(int argc, char** argv) {
+                     cudaEventElapsedTime(&x, e0, e1);
+                     ms[v].push_back(x);
+                 }
+-            double us[2];
+-            for (int v = 0; v < 2; ++v) {
++            double us[NV];
++            for (int v = 0; v < NV; ++v) {
+                 std::sort(ms[v].begin(), ms[v].end());
+                 us[v] = 1000.0 * ms[v][ms[v].size() / 2] / NSETS;
+                 cudaGraphExecDestroy(gx[v]);
+             }
+-            std::printf("    %d   %8.2f   %8.2f   %5.2fx\n", T, us[0], us[1], us[0] / us[1]);
++            std::printf("    %d   %8.2f   %8.2f   %8.2f   %+8.2f\n", T, us[0], us[1], us[2], us[2] - us[1]);
+             cudaEventDestroy(e0);
+             cudaEventDestroy(e1);
+         }
+     }
++    if (bench_gated) bad += bench_gated_read(tok, xn, qcnt, st, w0);
++    fused_gr_set_er_late_pass(-1);
++    fused_gr_set_hc8_lostage(-1);
+     std::printf("gr_hc8_check: %d failures\n", bad);
+     return bad ? 1 : 0;
+ }
+diff --git a/src/kernels/router_chain_bench.cpp b/src/kernels/router_chain_bench.cpp
+index 588c60138..5a145145e 100644
+--- a/src/kernels/router_chain_bench.cpp
++++ b/src/kernels/router_chain_bench.cpp
+@@ -113,7 +113,7 @@ int main(int argc, char** argv) {
+                 CK(cudaMalloc((void**) &dws[l], (size_t) no * ni * 2));
+                 CK(cudaMemcpy(dws[l], w.data(), (size_t) no * ni * 2 < w.size() * 2 ? (size_t) no * ni * 2 : w.size() * 2, cudaMemcpyHostToDevice));
+             }
+-            for (int tk : {1, 2, 3, 4, 6}) {
++            for (int tk : {1, 2, 3, 4, 6, 7, 8}) {
+                 cudaGraph_t g;
+                 cudaGraphExec_t ge;
+                 CK(cudaStreamBeginCapture(s, cudaStreamCaptureModeThreadLocal));
+@@ -171,5 +171,48 @@ int main(int argc, char** argv) {
+         cudaGraphExecDestroy(ge);
+         cudaGraphDestroy(g);
+     }
++    {   // dec/round3 D1: mmvf + native_route_doorbell_res (the engine's STRATA_ROUTE_DB path) with the rows and ids to mapped host
++        // memory, as verify's m_x_ / m_ids_; STRATA_ROUTE_DB=2 (EARLY) and STRATA_ROUTE_DB_BLOCKS pick the kernel's shape
++        float* hxo;
++        int32_t* hio;
++        CK(cudaHostAlloc((void**) &hxo, xh.size() * 4, cudaHostAllocMapped | cudaHostAllocPortable));
++        CK(cudaHostAlloc((void**) &hio, (size_t) T * KK * 4, cudaHostAllocMapped | cudaHostAllocPortable));
++        float* dhxo;
++        int32_t* dhio;
++        CK(cudaHostGetDevicePointer((void**) &dhxo, hxo, 0));
++        CK(cudaHostGetDevicePointer((void**) &dhio, hio, 0));
++        for (int mode = 0; mode < 2; ++mode) {
++            cudaGraph_t g;
++            cudaGraphExec_t ge;
++            CK(cudaStreamBeginCapture(s, cudaStreamCaptureModeThreadLocal));
++            for (int l = 0; l < L; ++l) {
++                if (mode == 1) K::bf16_gemv_fp32_mmvf_multi(dx, N, dw[l], dlog, NE, N, NE, T, s);
++                K::native_route_doorbell_res(dlog, dids, dwt, T, dx, dres, NE, (int64_t) T * N, dhxo, dhio, dseq, s);
++            }
++            CK(cudaStreamEndCapture(s, &g));
++            CK(cudaGraphInstantiate(&ge, g, nullptr, nullptr, 0));
++            const uint32_t seq0 = *(volatile uint32_t*) hseq;
++            for (int i = 0; i < 5; ++i) CK(cudaGraphLaunch(ge, s));
++            CK(cudaStreamSynchronize(s));
++            std::vector<float> ms;
++            for (int r = 0; r < reps; ++r) {
++                CK(cudaEventRecord(e0, s));
++                CK(cudaGraphLaunch(ge, s));
++                CK(cudaEventRecord(e1, s));
++                CK(cudaEventSynchronize(e1));
++                float m = 0;
++                CK(cudaEventElapsedTime(&m, e0, e1));
++                ms.push_back(m);
++            }
++            const uint32_t rings = *(volatile uint32_t*) hseq - seq0;
++            const bool rows_ok = std::memcmp(hxo, xh.data(), xh.size() * 4) == 0;
++            std::sort(ms.begin(), ms.end());
++            std::printf("T %d %-20s : %6.2f us per layer (median of %d graphs of %d layers; rings %u of %d, rows %s)\n", T,
++                        mode ? "mmvf+route_db host" : "route_db host", 1e3 * ms[ms.size() / 2] / L, reps, L, rings, (5 + reps) * L,
++                        rows_ok ? "ok" : "DIFFER");
++            cudaGraphExecDestroy(ge);
++            cudaGraphDestroy(g);
++        }
++    }
+     return 0;
+ }
+diff --git a/src/program/generate.cpp b/src/program/generate.cpp
+index 4493465a6..c15884c5f 100644
+--- a/src/program/generate.cpp
++++ b/src/program/generate.cpp
+@@ -6108,6 +6108,9 @@ int main(int argc, char** argv) {
+         std::fprintf(stderr, "strata generate: GPU %d: %s, compute capability %d.%d%s\n", dev, name,
+                      strata::cc_major_of(p.major), strata::cc_minor_of(p.minor),
+                      strata::emulated_cc() ? " (STRATA_EMULATE_CC: a test mode, the card is emulated)" : "");
++#if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)
++        if (strata::emulated_sms() > 0 && dev == 0) strata::kernels::sm_hog_start(strata::emulated_sms());   // multiarch tests only
++#endif
+ #if !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)   // a CUDA toolkit mismatch; the gfx906 HIP build has no CUDART_VERSION
+         {   // #542: a build whose libcudart is older than its headers (a CUDA 13 kit with a dangling libcudart.so that
+             // CMake resolved to the system's CUDA 12 one) reads cudaDeviceProp shifted - silently, and slowly
+@@ -8094,6 +8097,16 @@ int main(int argc, char** argv) {
+                                      "every expert in RAM, no --vram-elastic, --peer-device or --prefill-head-alias)\n");
+             const char* iv = std::getenv("STRATA_KV_GROW_INIT");
+             strata::core::qsa_set_kv_elastic(on, iv != nullptr && std::atoll(iv) > 0 ? std::atoll(iv) : 16384);
++            // E2 (decode round 4): under KV streaming the indexer's pooled keys (768 MiB at 524288 cells) and the RoPE
++            // table (128 MiB) are mapped as the context grows, from the expert cache's slots, as the elastic K/V is
++            // (kvg_ensure); the values are the same, the cache holds more experts below the full context.
++            // STRATA_SESSION_GROW=0: allocated whole, as before. (--rope-scaling dynamic: its table rebuild keeps the
++            // new rows in the table's host copy and uploads what is mapped: qsa_elastic_table_store.)
++            {
++                const char* sg = std::getenv("STRATA_SESSION_GROW");
++                strata::core::qsa_set_session_elastic(!on && o.kv_resident > 0 && vmm_cache_ok && o.batch <= 1 &&
++                                                      (sg == nullptr || sg[0] != '0'));
++            }
+             // the cache in one VMM range with KV streaming too (0.2.15-nvfp4.3): the elastic K/V is off there, and
+             // the plain arena it fell back to made every GPU stage of a window 20-60% slower and erratic under WDDM
+             // (2K: 177 and 102 tok/s against 190 with it; --no-kv-grow alone shows the same). STRATA_CACHE_VMM=0 = the old arena
+@@ -8111,6 +8124,13 @@ int main(int argc, char** argv) {
+             std::fprintf(stderr, "strata generate: session_init failed\n");
+             return 1;
+         }
++        strata::core::qsa_set_session_elastic(false);   // E2: the main session only (the drafter shares its RoPE table)
++        if (strata::core::qsa_session_elastic())
++            std::fprintf(stderr, "strata generate: elastic session tables (indexer keys, RoPE): %.1f of %.1f MiB mapped "
++                                 "for %lld cells; they grow with the context\n",
++                         (double) strata::core::qsa_kv_elastic_mapped_bytes() / 1048576.0,
++                         (double) strata::core::qsa_kv_elastic_full_bytes() / 1048576.0,
++                         (long long) strata::core::qsa_kv_elastic_cells());
+         if (g.n_qsa_layers() > 0 && ss.qsa_states[ss.qsa_primary()].kv_mode == 1)
+             std::fprintf(stderr, "strata generate: KV streaming: %lld of %lld cells per QSA layer in VRAM, the K/V in "
+                                  "%.2f GiB of pinned RAM\n",
+@@ -11733,7 +11753,8 @@ int main(int argc, char** argv) {
+     // cells and a longer prompt wrote past them (an illegal memory access).
+     auto kvg_start = [&](int64_t top) {
+         const strata::core::KvGrowStart s = strata::core::kv_grow_start(
+-            strata::core::qsa_kv_elastic(), xcache.vmm_range() != nullptr, d_res != nullptr && !host_res.empty(),
++            strata::core::qsa_kv_elastic() || strata::core::qsa_session_elastic(), xcache.vmm_range() != nullptr,
++            d_res != nullptr && !host_res.empty(),
+             srcp != nullptr, top, kvg.floor);
+         kvg.on = s.on;
+         kvg.from_cache = s.from_cache;
+diff --git a/src/kernels/qsa_front_bench.cpp b/src/kernels/qsa_front_bench.cpp
+new file mode 100644
+index 000000000..2728ab290
+--- /dev/null
++++ b/src/kernels/qsa_front_bench.cpp
+@@ -0,0 +1,441 @@
++// src/kernels/qsa_front_bench.cpp - dec3 D5: the QSA indexer chain of a verify window on the engine's kernels and shapes.
++// Usage: qsa_front_bench [ctx=1400] [reps=60] [mode=all|parity|time]
++//   parity: the window append (STRATA_IDX_APPEND_PAR) and the KV-stream resolve (STRATA_KV_RESOLVE_ILP) against their
++//           old kernels, byte for byte on every buffer, T 1..8 at four cell offsets, a cell-0 window, a skipped step, and
++//           resolves with all hits, all misses and a mix.
++//   time:   graphs of 12 layers (own buffers each, L2 scrubbed before each replay), us per layer: each kernel alone and
++//           the chain wik -> append -> wiq -> norm+rope -> scores -> top-k -> resolve -> copy, old and new kernels,
++//           and with the append forked beside the query (FORK).
++#include "strata/core/geometry.hpp"
++#include "strata/kernels/bf16_gemv.hpp"
++#include "strata/kernels/kv_stream.hpp"
++#include "strata/kernels/native_qsa_indexer.hpp"
++#include "strata/kernels/native_rope.hpp"
++#include "strata/kernels/qsa.hpp"
++#include "strata/kernels/qsa_select.hpp"
++#include "strata/kernels/rope_scaling.hpp"
++
++#include <cuda_runtime.h>
++
++#include <algorithm>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <random>
++#include <stdexcept>
++#include <string>
++#include <vector>
++
++namespace k = strata::kernels;
++
++namespace {
++void ck(cudaError_t e, const char* w) {
++    if (e != cudaSuccess) { std::fprintf(stderr, "%s: %s\n", w, cudaGetErrorString(e)); std::exit(2); }
++}
++template <typename T> T* dalloc(size_t n) {
++    T* p = nullptr;
++    ck(cudaMalloc(&p, n * sizeof(T) + 256), "malloc");
++    ck(cudaMemset(p, 0, n * sizeof(T) + 256), "memset");
++    return p;
++}
++template <typename T> void up(T* d, const std::vector<T>& h) { ck(cudaMemcpy(d, h.data(), h.size() * sizeof(T), cudaMemcpyHostToDevice), "up"); }
++template <typename T> std::vector<T> down(const T* d, size_t n) {
++    std::vector<T> h(n);
++    ck(cudaMemcpy(h.data(), d, n * sizeof(T), cudaMemcpyDeviceToHost), "down");
++    return h;
++}
++uint16_t bf16(float f) { uint32_t u; std::memcpy(&u, &f, 4); return (uint16_t) ((u + 0x7fff + ((u >> 16) & 1)) >> 16); }
++
++constexpr int L = 12, TMAX = 8;
++const k::QsaShapes S = k::qsa_real_shapes();
++const int64_t N = strata::core::kCompiledGeometry.n_embd, ID = 128, IQ = 4;
++const float EPS = 1e-6f;
++const k::RopeScaling RS{};
++
++struct Layer {
++    float *tail, *dead, *pooled, *gamma, *gq, *raw, *qidx, *scores, *x;
++    int32_t *block_pos, *sel;
++    uint16_t *wik, *wiq;
++    k::KvStreamMap m;
++    k::QsaAttnPools slots;
++};
++int64_t g_max_cells, g_max_blocks, g_cap, g_n_blocks, g_n_slots;
++k::KvHostPools g_host;
++int32_t *g_steps, *g_posi;
++cudaStream_t g_s = nullptr;   // the indexer launchers want an explicit stream   // [TMAX][kStepCount]; per indexer-query-row positions [TMAX * IQ]
++
++uint64_t block_bytes() { return k::kv_block_bytes(S, k::kKvInt8); }
++
++Layer make_layer(std::mt19937& rng) {
++    std::normal_distribution<float> nd(0.f, 1.f);
++    Layer y{};
++    y.tail = dalloc<float>(3 * ID); y.dead = dalloc<float>(ID); y.pooled = dalloc<float>((g_max_cells / 4 + 1) * ID);
++    y.block_pos = dalloc<int32_t>(1);
++    std::vector<float> g(ID);
++    for (auto& v : g) v = 1.0f + 0.1f * nd(rng);
++    y.gamma = dalloc<float>(ID); up(y.gamma, g);
++    for (auto& v : g) v = 1.0f + 0.1f * nd(rng);
++    y.gq = dalloc<float>(ID); up(y.gq, g);
++    y.raw = dalloc<float>(TMAX * ID); y.qidx = dalloc<float>(TMAX * IQ * ID);
++    y.scores = dalloc<float>(TMAX * g_max_blocks); y.sel = dalloc<int32_t>(TMAX * g_cap);
++    std::vector<float> x(TMAX * N);
++    for (auto& v : x) v = nd(rng);
++    y.x = dalloc<float>(TMAX * N); up(y.x, x);
++    std::vector<uint16_t> w(ID * N);
++    for (auto& v : w) v = bf16(0.02f * nd(rng));
++    y.wik = dalloc<uint16_t>(ID * N); up(y.wik, w);
++    w.resize(IQ * ID * N);
++    for (auto& v : w) v = bf16(0.02f * nd(rng));
++    y.wiq = dalloc<uint16_t>(IQ * ID * N); up(y.wiq, w);
++    // the KV map (int8 K/V): slots in VRAM, the host copy shared by the layers
++    y.m.n_blocks = g_n_blocks; y.m.n_slots = g_n_slots;
++    y.m.page_table = dalloc<int32_t>(g_n_blocks); y.m.slot_block = dalloc<int32_t>(g_n_slots);
++    y.m.slot_stamp = dalloc<int32_t>(g_n_slots); y.m.slot_ref = dalloc<int32_t>(g_n_slots);
++    y.m.ctl = dalloc<int32_t>(k::kKvCtlInts); y.m.miss_block = dalloc<int32_t>(g_n_slots); y.m.miss_slot = dalloc<int32_t>(g_n_slots);
++    const int64_t rows = S.n_head_kv * S.page_size, codes = rows * S.head_dim, scales = rows * (S.head_dim / 64);
++    y.slots.k_q = dalloc<int8_t>(g_n_slots * codes); y.slots.v_q = dalloc<int8_t>(g_n_slots * codes);
++    y.slots.k_scale = dalloc<uint16_t>(g_n_slots * scales); y.slots.v_scale = dalloc<uint16_t>(g_n_slots * scales);
++    y.slots.page_table = y.m.page_table;
++    k::kv_stream_reset(y.m, g_s);
++    return y;
++}
++
++// the window's steps: T cells from p0 (a step at p0 + skip is pushed past max_cells: skipped)
++void set_steps(int64_t p0, int T, int skip = -1) {
++    std::vector<int32_t> st(TMAX * k::kStepCount, 0), pi(TMAX * IQ, 0);
++    for (int t = 0; t < TMAX; ++t) {
++        const int64_t pos = p0 + std::min(t, T - 1);
++        int32_t* s = st.data() + t * k::kStepCount;
++        s[k::kStepPos] = t == skip ? (int32_t) g_max_cells + 5 : (int32_t) pos;
++        s[k::kStepNKv] = (int32_t) (pos + 1);
++        s[k::kStepNBid] = (int32_t) ((pos + 1) / S.idx_block);
++        s[k::kStepWidth] = (int32_t) k::qsa_selection_width(pos + 1, S);
++        for (int h = 0; h < IQ; ++h) pi[t * IQ + h] = (int32_t) pos;
++    }
++    up(g_steps, st);
++    up(g_posi, pi);
++}
++k::QsaIndexerBuffers ib(const Layer& y) { return {y.tail, y.dead, y.pooled, y.block_pos}; }
++
++// the indexer state of a prompt of `ctx` cells (the prompt path's batched append, random raw keys)
++void prefill(Layer& y, int64_t ctx, std::mt19937& rng) {
++    std::normal_distribution<float> nd(0.f, 1.f);
++    ck(cudaMemset(y.tail, 0, 3 * ID * 4), "m"); ck(cudaMemset(y.dead, 0, ID * 4), "m");
++    ck(cudaMemset(y.pooled, 0, (g_max_cells / 4 + 1) * ID * 4), "m");
++    if (ctx <= 0) return;
++    std::vector<float> raw(ctx * ID);
++    for (auto& v : raw) v = nd(rng);
++    float* d = dalloc<float>(raw.size()); up(d, raw);
++    k::native_qsa_indexer_append_batch(d, ctx, 0, 0, y.gamma, EPS, ib(y), S, g_max_cells, RS, g_s);
++    ck(cudaStreamSynchronize(g_s), "prefill");
++    cudaFree(d);
++}
++void new_raw(Layer& y, std::mt19937& rng) {
++    std::normal_distribution<float> nd(0.f, 1.f);
++    std::vector<float> r(TMAX * ID);
++    for (auto& v : r) v = nd(rng);
++    up(y.raw, r);
++}
++
++// ---- the chain's pieces on stream s
++void k_wik(const Layer& y, int T, cudaStream_t s) { k::bf16_gemv_fp32_mmvf_multi(y.x, N, y.wik, y.raw, ID, N, ID, T, s); }
++void k_wiq(const Layer& y, int T, cudaStream_t s) {
++    k::bf16_gemv_fp32_mmvf_multi(y.x, N, y.wiq, y.qidx, IQ * ID, N, IQ * ID, T, s);
++}
++void k_nr(const Layer& y, int T, cudaStream_t s) {
++    k::native_qsa_rms_norm_rope(y.qidx, (int) ID, y.gq, y.qidx, (int) (T * IQ), (int) ID, (int) S.n_rot, EPS, RS, g_posi, s);
++}
++void k_app(const Layer& y, int T, cudaStream_t s) {
++    k::native_qsa_indexer_append_steps(y.raw, g_steps + k::kStepPos, k::kStepCount, T, 0, y.gamma, EPS, ib(y), S, g_max_cells, RS, s);
++}
++void k_sc(const Layer& y, int T, cudaStream_t s) {
++    k::qsa_block_scores(y.pooled, y.dead, y.qidx, g_steps, T, g_max_blocks, S, y.scores, s);
++}
++void k_tk(const Layer& y, int T, cudaStream_t s) { k::qsa_block_topk(y.scores, g_steps, T, g_max_blocks, g_cap, S, y.sel, s); }
++void k_res(const Layer& y, int T, cudaStream_t s) {
++    k::kv_stream_resolve(y.m, y.slots, g_host, k::kKvInt8, y.sel, g_steps, T, g_cap, S, s);
++}
++
++// ---- parity
++struct Snap { std::vector<float> tail, dead, pooled; std::vector<int32_t> bp; };
++Snap snap_idx(const Layer& y) {
++    return {down(y.tail, 3 * ID), down(y.dead, ID), down(y.pooled, (g_max_cells / 4 + 1) * ID), down(y.block_pos, 1)};
++}
++void restore_idx(Layer& y, const Snap& z) { up(y.tail, z.tail); up(y.dead, z.dead); up(y.pooled, z.pooled); up(y.block_pos, z.bp); }
++bool same(const Snap& a, const Snap& b) {
++    return std::memcmp(a.tail.data(), b.tail.data(), a.tail.size() * 4) == 0 &&
++           std::memcmp(a.dead.data(), b.dead.data(), a.dead.size() * 4) == 0 &&
++           std::memcmp(a.pooled.data(), b.pooled.data(), a.pooled.size() * 4) == 0 && a.bp == b.bp;
++}
++struct MapSnap { std::vector<int32_t> pt, sb, ss, sr, ctl; };
++MapSnap snap_map(const Layer& y) {
++    return {down(y.m.page_table, g_n_blocks), down(y.m.slot_block, g_n_slots), down(y.m.slot_stamp, g_n_slots),
++            down(y.m.slot_ref, g_n_slots), down(y.m.ctl, k::kKvCtlInts)};
++}
++void restore_map(Layer& y, const MapSnap& z) {
++    up(y.m.page_table, z.pt); up(y.m.slot_block, z.sb); up(y.m.slot_stamp, z.ss); up(y.m.slot_ref, z.sr); up(y.m.ctl, z.ctl);
++}
++// every resident block's slot holds the host copy's bytes
++bool slots_ok(const Layer& y, const MapSnap& z) {
++    const int64_t rows = S.n_head_kv * S.page_size, codes = rows * S.head_dim;
++    auto kq = down((const int8_t*) y.slots.k_q, g_n_slots * codes);
++    for (int64_t b = 0; b < g_n_blocks; ++b) {
++        const int sl = z.pt[b];
++        if (sl < -1) return false;
++        if (sl >= 0 && std::memcmp(kq.data() + sl * codes, g_host.k_q + b * codes, codes) != 0) return false;
++    }
++    return true;
++}
++
++int parity(std::vector<Layer>& Ls, int64_t ctx) {
++    std::mt19937 rng(11);
++    Layer& y = Ls[0];
++    int bad = 0, n = 0;
++    auto app_case = [&](int64_t c0, int T, int skip, const char* what) {
++        if (std::getenv("QFB_TRACE")) std::printf("case %s c0 %lld T %d\n", what, (long long) c0, T);
++        prefill(y, c0, rng);
++        new_raw(y, rng);
++        set_steps(c0, T, skip);
++        const Snap z = snap_idx(y);
++        k::native_qsa_indexer_set_append_par(0);
++        k_app(y, T, g_s);
++        ck(cudaStreamSynchronize(g_s), "old");
++        const Snap a = snap_idx(y);
++        restore_idx(y, z);
++        k::native_qsa_indexer_set_append_par(1);
++        k_app(y, T, g_s);
++        ck(cudaStreamSynchronize(g_s), "new");
++        const Snap b = snap_idx(y);
++        const bool ok = same(a, b) && !same(a, z);
++        ++n; bad += !ok;
++        if (!ok) std::printf("*** append %s c0 %lld T %d skip %d: differs\n", what, (long long) c0, T, skip);
++    };
++    for (int T = 1; T <= TMAX; ++T)
++        for (int off = 0; off < 4; ++off) app_case(ctx - (ctx % 4) + off, T, -1, "window");
++    for (int T = 1; T <= TMAX; ++T) app_case(0, T, -1, "cell0");
++    for (int T = 3; T <= TMAX; ++T) app_case(ctx + 1, T, 1, "skip");
++    for (int T = 2; T <= TMAX; ++T) app_case(4 * 37 + 2, T, -1, "short");
++    std::printf("append parity: %d / %d cases bitwise\n", n - bad, n);
++    // resolve: select on a real window, then old and new from the same map state
++    int rbad = 0, rn = 0;
++    prefill(y, ctx + TMAX, rng);
++    for (int T = 1; T <= TMAX; ++T) {
++        set_steps(ctx, T);
++        new_raw(y, rng);
++        k_wiq(y, T, g_s); k_nr(y, T, g_s); k_sc(y, T, g_s); k_tk(y, T, g_s);
++        for (int kind = 0; kind < 3; ++kind) {   // 0 all misses (reset), 1 all hits (after one resolve), 2 a mix
++            k::kv_stream_reset(y.m, g_s);
++            if (kind == 1) k_res(y, T, g_s);
++            if (kind == 2) {   // the blocks of a short earlier selection resident, the rest missing
++                set_steps(ctx / 3, 1);
++                k_sc(y, 1, g_s); k_tk(y, 1, g_s); k_res(y, 1, g_s);
++                set_steps(ctx, T);
++                k_sc(y, T, g_s); k_tk(y, T, g_s);
++            }
++            ck(cudaStreamSynchronize(g_s), "pre");
++            const MapSnap z = snap_map(y);
++            k::kv_stream_set_resolve_ilp(0);
++            k_res(y, T, g_s);
++            ck(cudaStreamSynchronize(g_s), "old");
++            const MapSnap a = snap_map(y);
++            const bool aok = slots_ok(y, a);
++            restore_map(y, z);
++            k::kv_stream_set_resolve_ilp(1);
++            k_res(y, T, g_s);
++            ck(cudaStreamSynchronize(g_s), "new");
++            const MapSnap b = snap_map(y);
++            const bool bok = slots_ok(y, b);
++            // all hits: every array equal.  With misses the slot a block lands in follows the miss list's order (an
++            // atomic, never fixed): the same resident set, counters and data
++            bool ok = aok && bok && a.ctl == b.ctl;
++            if (kind == 1) ok = ok && a.pt == b.pt && a.sb == b.sb && a.ss == b.ss && a.sr == b.sr;
++            else
++                for (int64_t i = 0; i < g_n_blocks && ok; ++i) ok = (a.pt[i] >= 0) == (b.pt[i] >= 0);
++            ++rn; rbad += !ok;
++            if (!ok) std::printf("*** resolve T %d kind %d differs (old data %d new data %d)\n", T, kind, aok, bok);
++            if (T == TMAX || T == 1)
++                std::printf("  resolve T %d kind %d: misses %d (old) %d (new)\n", T, kind, a.ctl[2], b.ctl[2]);
++        }
++    }
++    k::kv_stream_set_resolve_ilp(-1);
++    // scores: the pair kernel against the multi kernel, every row of the scores buffer, T 1..8 at four offsets
++    int sbad = 0, sn = 0;
++    for (int T = 1; T <= TMAX; ++T)
++        for (int off = 0; off < 4; ++off) {
++            set_steps(ctx - (ctx % 4) + off, T);
++            new_raw(y, rng);
++            k_wiq(y, T, g_s); k_nr(y, T, g_s);
++            std::vector<float> r[2];
++            for (int v = 0; v < 2; ++v) {
++                ck(cudaMemsetAsync(y.scores, 0x7f, TMAX * g_max_blocks * 4, g_s), "m");
++                k::qsa_set_scores_pairs(v);
++                k_sc(y, T, g_s);
++                ck(cudaStreamSynchronize(g_s), "sc");
++                r[v] = down(y.scores, TMAX * g_max_blocks);
++            }
++            const bool ok = std::memcmp(r[0].data(), r[1].data(), r[0].size() * 4) == 0;
++            ++sn; sbad += !ok;
++            if (!ok) std::printf("*** scores T %d off %d differ\n", T, off);
++        }
++    k::qsa_set_scores_pairs(-1);
++    std::printf("scores parity: %d / %d cases bitwise\n", sn - sbad, sn);
++    rbad += sbad;
++    k::native_qsa_indexer_set_append_par(-1);
++    std::printf("resolve parity: %d / %d cases\n", rn - rbad, rn);
++    return bad + rbad;
++}
++
++// ---- timing: a graph of the 12 layers, the L2 scrubbed before each replay; us per layer (median of reps)
++uint8_t* g_scrub = nullptr;
++const size_t kScrub = 256u << 20;
++template <typename F> double time_graph(F&& rec, int reps, cudaStream_t s) {
++    cudaGraph_t g;
++    cudaGraphExec_t ge;
++    ck(cudaStreamBeginCapture(s, cudaStreamCaptureModeThreadLocal), "capture");
++    rec(s);
++    ck(cudaStreamEndCapture(s, &g), "end capture");
++    ck(cudaGraphInstantiate(&ge, g, 0), "instantiate");
++    cudaEvent_t a, b;
++    cudaEventCreate(&a); cudaEventCreate(&b);
++    std::vector<float> v;
++    for (int r = 0; r < reps + 3; ++r) {
++        ck(cudaMemsetAsync(g_scrub, r & 0xff, kScrub, s), "scrub");
++        cudaEventRecord(a, s);
++        ck(cudaGraphLaunch(ge, s), "launch");
++        cudaEventRecord(b, s);
++        ck(cudaEventSynchronize(b), "sync");
++        float ms = 0;
++        cudaEventElapsedTime(&ms, a, b);
++        if (r >= 3) v.push_back(ms);
++    }
++    std::sort(v.begin(), v.end());
++    cudaGraphExecDestroy(ge); cudaGraphDestroy(g);
++    cudaEventDestroy(a); cudaEventDestroy(b);
++    return 1e3 * v[v.size() / 2] / L;
++}
++
++void timing(std::vector<Layer>& Ls, int64_t ctx, int reps) {
++    std::mt19937 rng(5);
++    cudaStream_t s, s2;
++    ck(cudaStreamCreate(&s), "stream");
++    ck(cudaStreamCreate(&s2), "stream");
++    cudaEvent_t ef[L], ej[L];
++    for (int i = 0; i < L; ++i) { cudaEventCreateWithFlags(&ef[i], cudaEventDisableTiming); cudaEventCreateWithFlags(&ej[i], cudaEventDisableTiming); }
++    ck(cudaMalloc(&g_scrub, kScrub), "scrub");
++    for (auto& y : Ls) prefill(y, ctx, rng), new_raw(y, rng);
++    std::printf("ctx %lld, us per layer (median of %d replays of 12 layers, L2 scrubbed)\n", (long long) ctx, reps);
++    std::printf("%-26s", "T");
++    for (int T = 1; T <= TMAX; ++T) std::printf("%8d", T);
++    std::printf("\n");
++    using Fn = void (*)(const Layer&, int, cudaStream_t);
++    struct Row { const char* name; Fn f; int par, ilp, pairs; };
++    const Row rows[] = {
++        {"wik gemv", k_wik, -1, -1, -1}, {"wiq gemv", k_wiq, -1, -1, -1}, {"norm+rope", k_nr, -1, -1, -1},
++        {"append old", k_app, 0, -1, -1}, {"append new", k_app, 1, -1, -1}, {"scores old", k_sc, -1, -1, 0},
++        {"scores new", k_sc, -1, -1, 1}, {"topk", k_tk, -1, -1, -1},
++        {"resolve+copy old", k_res, -1, 0, -1}, {"resolve+copy new", k_res, -1, 1, -1},
++    };
++    auto setsw = [](int par, int ilp, int pairs) {
++        k::native_qsa_indexer_set_append_par(par); k::kv_stream_set_resolve_ilp(ilp); k::qsa_set_scores_pairs(pairs);
++    };
++    // every timed resolve sees all hits (the engine's steady state): one resolve per layer and T first
++    auto warm = [&](int T) {
++        set_steps(ctx, T);
++        for (auto& y : Ls) { k_wiq(y, T, s); k_nr(y, T, s); k_sc(y, T, s); k_tk(y, T, s); k_res(y, T, s); }
++        ck(cudaStreamSynchronize(s), "warm");
++    };
++    std::vector<std::vector<double>> res(20);
++    for (int T = 1; T <= TMAX; ++T) {
++        warm(T);
++        int ri = 0;
++        for (const Row& r : rows) {
++            setsw(r.par, r.ilp, r.pairs);
++            res[ri++].push_back(time_graph([&](cudaStream_t st) { for (auto& y : Ls) r.f(y, T, st); }, reps, s));
++        }
++        // the chain: 0 old kernels, 1 new kernels, 2 new + the append forked beside wiq, 3 new + the key and its append
++        // on a branch beside the query (both GEMVs start at once), 4 = 3 with the old kernels
++        for (int v = 0; v < 5; ++v) {
++            const int nw = v == 0 || v == 4 ? 0 : 1;
++            setsw(nw, nw, nw);
++            res[ri++].push_back(time_graph([&](cudaStream_t st) {
++                for (int i = 0; i < L; ++i) {
++                    const Layer& y = Ls[i];
++                    if (v >= 3) {
++                        cudaEventRecord(ef[i], st); cudaStreamWaitEvent(s2, ef[i], 0);
++                        k_wik(y, T, s2); k_app(y, T, s2);
++                        cudaEventRecord(ej[i], s2);
++                        k_wiq(y, T, st); k_nr(y, T, st);
++                        cudaStreamWaitEvent(st, ej[i], 0);
++                        k_sc(y, T, st); k_tk(y, T, st); k_res(y, T, st);
++                        continue;
++                    }
++                    k_wik(y, T, st);
++                    if (v == 2) {
++                        cudaEventRecord(ef[i], st); cudaStreamWaitEvent(s2, ef[i], 0);
++                        k_app(y, T, s2);
++                        cudaEventRecord(ej[i], s2);
++                    } else k_app(y, T, st);
++                    k_wiq(y, T, st); k_nr(y, T, st);
++                    if (v == 2) cudaStreamWaitEvent(st, ej[i], 0);
++                    k_sc(y, T, st); k_tk(y, T, st); k_res(y, T, st);
++                }
++            }, reps, s));
++        }
++    }
++    setsw(-1, -1, -1);
++    const char* names[] = {"wik gemv", "wiq gemv", "norm+rope", "append old", "append new", "scores old", "scores new",
++                           "topk", "resolve+copy old", "resolve+copy new", "CHAIN old", "CHAIN new", "CHAIN new+fork",
++                           "CHAIN new+par", "CHAIN old+par"};
++    for (int i = 0; i < 15; ++i) {
++        std::printf("%-26s", names[i]);
++        for (double x : res[i]) std::printf("%8.2f", x);
++        std::printf("\n");
++    }
++}
++}  // namespace
++
++int main(int argc, char** argv) {
++    const int64_t ctx = argc > 1 ? std::atoll(argv[1]) : 1400;
++    const int reps = argc > 2 ? std::atoi(argv[2]) : 60;
++    const std::string mode = argc > 3 ? argv[3] : "all";
++    std::setvbuf(stdout, nullptr, _IONBF, 0);
++    g_max_cells = 32768;
++    g_max_blocks = g_max_cells / 4 + 2;
++    g_cap = k::qsa_selection_width(k::kTopkMaxCells, S);
++    g_n_blocks = g_max_cells / S.page_size;
++    g_n_slots = 5120;
++    if (ctx + 64 > g_max_cells) { std::fprintf(stderr, "ctx must be below %lld\n", (long long) (g_max_cells - 64)); return 2; }
++    // the host copy: pinned, device-mapped, random bytes
++    const uint64_t bb = block_bytes();
++    const int64_t rows = S.n_head_kv * S.page_size, codes = rows * S.head_dim, scales = rows * (S.head_dim / 64);
++    if ((uint64_t) (2 * codes + 2 * scales * 2) != bb) { std::fprintf(stderr, "block bytes %llu\n", (unsigned long long) bb); return 2; }
++    void* h = nullptr;
++    ck(cudaHostAlloc(&h, (size_t) (g_n_blocks * bb), cudaHostAllocMapped), "host");
++    {
++        std::mt19937 r(3);
++        uint32_t* p = (uint32_t*) h;
++        for (size_t i = 0; i < g_n_blocks * bb / 4; ++i) p[i] = r();
++    }
++    uint8_t* hp = (uint8_t*) h;
++    g_host.k_q = (int8_t*) hp; hp += g_n_blocks * codes;
++    g_host.v_q = (int8_t*) hp; hp += g_n_blocks * codes;
++    g_host.k_scale = (uint16_t*) hp; hp += g_n_blocks * scales * 2;
++    g_host.v_scale = (uint16_t*) hp;
++    ck(cudaStreamCreate(&g_s), "stream");
++    g_steps = dalloc<int32_t>(TMAX * k::kStepCount);
++    g_posi = dalloc<int32_t>(TMAX * IQ);
++    std::mt19937 rng(1);
++    std::vector<Layer> Ls;
++    for (int i = 0; i < L; ++i) Ls.push_back(make_layer(rng));
++    ck(cudaDeviceSynchronize(), "setup");
++    int bad = 0;
++    try {
++        if (mode == "all" || mode == "parity") bad = parity(Ls, ctx);
++        if (mode == "all" || mode == "time") timing(Ls, ctx, reps);
++    } catch (const std::exception& e) {
++        std::printf("exception: %s\n", e.what());
++        return 3;
++    }
++    std::printf("%s\n", bad ? "PARITY FAILED" : "done");
++    return bad ? 1 : 0;
++}

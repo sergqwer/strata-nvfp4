@@ -6108,6 +6108,9 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "strata generate: GPU %d: %s, compute capability %d.%d%s\n", dev, name,
                      strata::cc_major_of(p.major), strata::cc_minor_of(p.minor),
                      strata::emulated_cc() ? " (STRATA_EMULATE_CC: a test mode, the card is emulated)" : "");
+#if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)
+        if (strata::emulated_sms() > 0 && dev == 0) strata::kernels::sm_hog_start(strata::emulated_sms());   // multiarch tests only
+#endif
 #if !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)   // a CUDA toolkit mismatch; the gfx906 HIP build has no CUDART_VERSION
         {   // #542: a build whose libcudart is older than its headers (a CUDA 13 kit with a dangling libcudart.so that
             // CMake resolved to the system's CUDA 12 one) reads cudaDeviceProp shifted - silently, and slowly
@@ -8094,6 +8097,16 @@ int main(int argc, char** argv) {
                                      "every expert in RAM, no --vram-elastic, --peer-device or --prefill-head-alias)\n");
             const char* iv = std::getenv("STRATA_KV_GROW_INIT");
             strata::core::qsa_set_kv_elastic(on, iv != nullptr && std::atoll(iv) > 0 ? std::atoll(iv) : 16384);
+            // E2 (decode round 4): under KV streaming the indexer's pooled keys (768 MiB at 524288 cells) and the RoPE
+            // table (128 MiB) are mapped as the context grows, from the expert cache's slots, as the elastic K/V is
+            // (kvg_ensure); the values are the same, the cache holds more experts below the full context.
+            // STRATA_SESSION_GROW=0: allocated whole, as before. (--rope-scaling dynamic: its table rebuild keeps the
+            // new rows in the table's host copy and uploads what is mapped: qsa_elastic_table_store.)
+            {
+                const char* sg = std::getenv("STRATA_SESSION_GROW");
+                strata::core::qsa_set_session_elastic(!on && o.kv_resident > 0 && vmm_cache_ok && o.batch <= 1 &&
+                                                      (sg == nullptr || sg[0] != '0'));
+            }
             // the cache in one VMM range with KV streaming too (0.2.15-nvfp4.3): the elastic K/V is off there, and
             // the plain arena it fell back to made every GPU stage of a window 20-60% slower and erratic under WDDM
             // (2K: 177 and 102 tok/s against 190 with it; --no-kv-grow alone shows the same). STRATA_CACHE_VMM=0 = the old arena
@@ -8111,6 +8124,13 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "strata generate: session_init failed\n");
             return 1;
         }
+        strata::core::qsa_set_session_elastic(false);   // E2: the main session only (the drafter shares its RoPE table)
+        if (strata::core::qsa_session_elastic())
+            std::fprintf(stderr, "strata generate: elastic session tables (indexer keys, RoPE): %.1f of %.1f MiB mapped "
+                                 "for %lld cells; they grow with the context\n",
+                         (double) strata::core::qsa_kv_elastic_mapped_bytes() / 1048576.0,
+                         (double) strata::core::qsa_kv_elastic_full_bytes() / 1048576.0,
+                         (long long) strata::core::qsa_kv_elastic_cells());
         if (g.n_qsa_layers() > 0 && ss.qsa_states[ss.qsa_primary()].kv_mode == 1)
             std::fprintf(stderr, "strata generate: KV streaming: %lld of %lld cells per QSA layer in VRAM, the K/V in "
                                  "%.2f GiB of pinned RAM\n",
@@ -11733,7 +11753,8 @@ int main(int argc, char** argv) {
     // cells and a longer prompt wrote past them (an illegal memory access).
     auto kvg_start = [&](int64_t top) {
         const strata::core::KvGrowStart s = strata::core::kv_grow_start(
-            strata::core::qsa_kv_elastic(), xcache.vmm_range() != nullptr, d_res != nullptr && !host_res.empty(),
+            strata::core::qsa_kv_elastic() || strata::core::qsa_session_elastic(), xcache.vmm_range() != nullptr,
+            d_res != nullptr && !host_res.empty(),
             srcp != nullptr, top, kvg.floor);
         kvg.on = s.on;
         kvg.from_cache = s.from_cache;

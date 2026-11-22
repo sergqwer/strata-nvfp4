@@ -20,6 +20,7 @@
 
 #include "strata/kernels/native_qsa_indexer.hpp"
 #include "strata/core/geometry.hpp"
+#include "strata/core/dispatch_stats.hpp"
 #include "strata/kernels/mrope.hpp"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -27,6 +28,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 
@@ -127,6 +129,114 @@ __global__ void append(const float* __restrict__ raw, const int32_t* __restrict_
                         const int32_t* __restrict__ mtab, RopeTab rt) {
     append_body<TAB>(raw, pos_dev, pos_stride, n_steps, pos_base, gamma, epsilon, tail, dead, pooled, block_pos, max_cells,
                      theta_scale, freq_scale, corr_low, corr_high, ext_factor, mscale, mtab, rt);
+}
+// dec3 D5 STRATA_IDX_APPEND_PAR (default on, =0 the loop above): the window's n_steps <= PG steps at once, 128 threads a
+// step.  append_body's arithmetic per step, the tail a step reads being the latest earlier step's key in that slot (or
+// the window's incoming tail, all of it read before any write), the stores replayed in step order by one thread per
+// dim, so the buffers end exactly as the step loop leaves them.  A window with a cell-0 step (the spare is written
+// and then read) runs append_body itself.
+constexpr int PG = 8;
+template <bool TAB>
+__global__ void __launch_bounds__(PG * D) append_par(const float* __restrict__ raw, const int32_t* __restrict__ pos_dev,
+                        int pos_stride, int n_steps,
+                        int pos_base, const float* __restrict__ gamma, float epsilon,
+                        float* __restrict__ tail, float* __restrict__ dead,
+                        float* __restrict__ pooled, int32_t* __restrict__ block_pos,
+                        int max_cells, float theta_scale, float freq_scale, float corr_low,
+                        float corr_high, float ext_factor, float mscale,
+                        const int32_t* __restrict__ mtab, RopeTab rt) {
+    __shared__ float inc[PG][D];
+    __shared__ float vals[PG][D];
+    __shared__ float part[PG][4];
+    int pos[PG];
+    bool cell0 = false;
+#pragma unroll
+    for (int k = 0; k < PG; ++k) {
+        pos[k] = k < n_steps ? pos_dev[(std::size_t) k * pos_stride] : -1;
+        if (pos[k] < 0 || pos[k] >= max_cells) pos[k] = -1;   // skipped, as append_body skips it
+        cell0 = cell0 || pos[k] == 0;
+    }
+    if (cell0) {   // block-uniform
+        append_body<TAB>(raw, pos_dev, pos_stride, n_steps, pos_base, gamma, epsilon, tail, dead, pooled, block_pos,
+                         max_cells, theta_scale, freq_scale, corr_low, corr_high, ext_factor, mscale, mtab, rt);
+        return;
+    }
+    const int g = threadIdx.x / D, d = threadIdx.x % D;
+    int my = -1;
+#pragma unroll
+    for (int k = 0; k < PG; ++k) if (k == g) my = pos[k];
+    const bool done = my >= 0 && my % R == R - 1;   // this step completes block my / R
+    float incoming = 0.0f, t0 = 0.0f, t1 = 0.0f, t2 = 0.0f;
+    if (my >= 0) {
+        // SET_ROWS stores F16; GET_ROWS expands those exact values to F32.
+        incoming = __half2float(__float2half_rn(raw[(std::size_t) g * D + d]));
+        inc[g][d] = incoming;
+        if (done) { t0 = tail[d]; t1 = tail[D + d]; t2 = tail[2 * D + d]; }
+    }
+    __syncthreads();
+    float mean = 0.0f;
+    if (done) {
+        // tail[j] as step g sees it: the last earlier step in slot j, else the incoming tail
+        int s0 = -1, s1 = -1, s2 = -1;
+#pragma unroll
+        for (int k = 0; k < PG; ++k)
+            if (k < g && pos[k] >= 0) {
+                const int sl = pos[k] % R;
+                if (sl == 0) s0 = k; else if (sl == 1) s1 = k; else if (sl == 2) s2 = k;
+            }
+        const float a0 = s0 >= 0 ? inc[s0][d] : t0, a1 = s1 >= 0 ? inc[s1][d] : t1, a2 = s2 >= 0 ? inc[s2][d] : t2;
+        float sum = a0;
+        sum = __fadd_rn(sum, a1);
+        sum = __fadd_rn(sum, a2);
+        sum = __fadd_rn(sum, incoming);
+        mean = __fmaf_rn(0.25f, sum, 0.0f); // SCALE includes a zero bias.
+    }
+    float square_sum = 0.0f;
+    square_sum += mean * mean;
+    square_sum = warp_sum(square_sum);
+    const int lane = d % 32;
+    if (lane == 0) part[g][d / 32] = square_sum;
+    __syncthreads();
+    // append_body's second sum: lanes 0..3 its four warps' sums, lanes 4..7 its idle warps' zeros, the rest zero
+    square_sum = lane < 4 ? part[g][lane] : 0.0f;
+    square_sum = warp_sum(square_sum);
+    const float scale = rsqrtf(square_sum / D + epsilon);
+    if (done) vals[g][d] = scale * mean * gamma[d];
+    __syncthreads();
+    float y = 0.0f;
+    if (done) {
+        const int b = my / R;
+        const int rope_pos = pos_base + R * b;
+        y = vals[g][d];
+        if (d < ROT) {
+            const int pair = d % (ROT / 2);
+            float c, s;
+            if (!(TAB && rope_tab_cs(rt, mrope_pos(mtab, rope_pos, pair), pair, c, s))) {
+                const float theta_extrap = mrope_pos(mtab, rope_pos, pair) * powf(theta_scale, float(pair));
+                rope_scaled_angle(theta_extrap, freq_scale, corr_low, corr_high, ext_factor, mscale, pair, c, s);
+            }
+            const float a = vals[g][pair], z = vals[g][pair + ROT / 2];
+            y = d < ROT / 2 ? a * c - z * s : a * s + z * c;
+        }
+    }
+    __syncthreads();
+    if (done) inc[g][d] = y;   // a completing step's key is never another step's tail (slot 3 is not stored)
+    __syncthreads();
+    if (g != 0) return;
+    const float dv = dead[d];
+#pragma unroll
+    for (int k = 0; k < PG; ++k) {   // the step loop's stores, in its order
+        const int p = pos[k];
+        if (p < 0) continue;   // also every k >= n_steps
+        const int slot = p % R;
+        if (slot < R - 1) tail[slot * D + d] = inc[k][d];
+        else {
+            const int b = p / R;
+            pooled[std::size_t(b) * D + d] = inc[k][d];
+            pooled[std::size_t(b + 1) * D + d] = dv;
+            if (d == 0) *block_pos = pos_base + R * b;
+        }
+    }
 }
 // engine-latency: the commit's appends of several QSA layers in one launch, one block per layer (blockIdx.x); each block
 // first restores its layer's tail from the window's snapshot (the commit's copy_from_mapped), then runs append's body
@@ -264,6 +374,13 @@ bool overlaps(Span a, Span b) {
 }
 } // namespace
 
+int g_append_par = -1;   // native_qsa_indexer_set_append_par: -1 = STRATA_IDX_APPEND_PAR (default on)
+bool append_par_on() {
+    if (g_append_par >= 0) return g_append_par != 0;
+    static const bool on = [] { const char* v = std::getenv("STRATA_IDX_APPEND_PAR"); return v == nullptr || std::atoi(v) != 0; }();
+    return on;
+}
+void native_qsa_indexer_set_append_par(int on) { g_append_par = on; }
 void native_qsa_indexer_set_enabled(bool value) { enabled.store(value, std::memory_order_relaxed); }
 bool native_qsa_indexer_enabled() { return enabled.load(std::memory_order_relaxed); }
 void native_qsa_indexer_append_steps(const float* raw, const int32_t* relative_pos_device,
@@ -285,6 +402,18 @@ void native_qsa_indexer_append_steps(const float* raw, const int32_t* relative_p
     const float theta_scale = powf((float) scaling.freq_base, -2.0f / ROT);
     const RopeKernelArgs k = scaling.kernel_args(ROT);   // none: the identity constants
     const RopeTab rt = rope_table_for(scaling);
+    // dec3 D5: the steps at once (the same buffers); from 4 steps (bench: 2-3 steps are 0.2-0.7 us slower so)
+    if (append_par_on() && n_steps >= 4 && n_steps <= PG) {
+        strata::dispatch::note("qsa indexer: window append, steps at once (STRATA_IDX_APPEND_PAR)");
+        if (rt.cos != nullptr)
+            append_par<true><<<1,PG*D,0,static_cast<cudaStream_t>(stream)>>>(raw,relative_pos_device,pos_stride,n_steps,pos_base,gamma,epsilon,
+                b.tail,b.dead,b.pooled,b.block_pos,int(max_cells),theta_scale,k.freq_scale,
+                k.corr_low,k.corr_high,k.ext_factor,k.attn_factor,mrope_table(),rt);
+        else
+            append_par<false><<<1,PG*D,0,static_cast<cudaStream_t>(stream)>>>(raw,relative_pos_device,pos_stride,n_steps,pos_base,gamma,epsilon,
+                b.tail,b.dead,b.pooled,b.block_pos,int(max_cells),theta_scale,k.freq_scale,
+                k.corr_low,k.corr_high,k.ext_factor,k.attn_factor,mrope_table(),rt);
+    } else
     if (rt.cos != nullptr)
         append<true><<<1,THREADS,0,static_cast<cudaStream_t>(stream)>>>(raw,relative_pos_device,pos_stride,n_steps,pos_base,gamma,epsilon,
             b.tail,b.dead,b.pooled,b.block_pos,int(max_cells),theta_scale,k.freq_scale,

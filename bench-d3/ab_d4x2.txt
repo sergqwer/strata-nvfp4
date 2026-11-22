@@ -1,0 +1,9 @@
+# ab d4x2 2026-11-21 03:15:46 A=D:/Projects/strata-dec3/bench-d3/d3/strata.exe [] [] B=D:/Projects/strata-dec3/bench-d3/d4w/x1/strata.exe [] [--pcie-mode dma]
+# 03:15:46 600.00 W, 405 MHz, 14001 MHz
+A struct 1 | 1500 generated in 3441 ms (435.9 tok/s) | 197 windows, avg T 7.85, 7.61 tokens/window, 17.47 ms/window = adapt wait 0.02 + verify 16.16 (GPU-reach wait 6.15 + per-layer host 9.60 [plan 0.26 actq 0.12 jobs 0.03 CPU 9.15] + stage 0.04) draft 1.22 + adapt join 0.01 + other 0.00 | CPU experts 3.22 (3.28 entries), VRAM hits 73.17, PCIe 1.70; 14.7 swaps/window
+B struct 1 | 1500 generated in 3687 ms (406.8 tok/s) | 200 windows, avg T 7.78, 7.50 tokens/window, 18.43 ms/window = adapt wait 0.02 + verify 17.18 (GPU-reach wait 6.41 + per-layer host 10.35 [plan 0.68 actq 0.12 jobs 0.02 CPU 9.48] + stage 0.05) draft 1.18 + adapt join 0.00 + other 0.00 | CPU experts 3.29 (3.34 entries), VRAM hits 72.33, PCIe 1.76; 14.1 swaps/window
+# 03:16:32 600.00 W, 7001 MHz, 14001 MHz
+summary d4x2 (mean of the runs; B vs A on ms/window and tok/s)
+  struct A n=1  ms/window 17.47 (17.47..17.47)  tok/s 435.9  T 7.85  tok/window 7.61  verify 16.16  reach 6.15  host 9.60
+  struct B n=1  ms/window 18.43 (18.43..18.43)  tok/s 406.8  T 7.78  tok/window 7.50  verify 17.18  reach 6.41  host 10.35
+  struct B vs A: ms/window +0.960 (+5.50%), tok/s -6.68%

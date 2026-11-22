@@ -1,0 +1,1 @@
+d3_sm84_D_conv | speculation              166 rounds of 6, drafts accepted 236 of 337 (0.700), 2.42 tokens per round | 166 windows screened (166 screens ran, 12.3 exact rows a screen), 0 windows every row exac | 400 tokens in 3591.9 ms  ->  111.36 tok/s | out 26c5e96e8e

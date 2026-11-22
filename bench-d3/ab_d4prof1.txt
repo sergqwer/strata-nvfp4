@@ -1,0 +1,9 @@
+# ab d4prof1 2026-11-21 03:05:23 A=D:/Projects/strata-dec3/bench-d3/d3/strata.exe [STRATA_VERIFY_PROFILE=1 STRATA_ADAPT_FETCH=0] [] B=D:/Projects/strata-dec3/bench-d3/d3/strata.exe [STRATA_VERIFY_PROFILE=1 STRATA_ADAPT_FETCH=0 STRATA_DMA_BATCH=1] [--pcie-mode dma]
+# 03:05:23 600.00 W, 405 MHz, 14001 MHz
+A struct 1 | 1500 generated in 4647 ms (322.8 tok/s) | 199 windows, avg T 7.85, 7.54 tokens/window, 23.35 ms/window = adapt wait 0.02 + verify 22.02 (GPU-reach wait 7.05 + per-layer host 14.46 [plan 0.23 actq 0.13 jobs 0.03 CPU 14.03] + stage 0.03) draft 1.22 + adapt join 0.04 + other 0.01 | CPU experts 4.52 (5.51 entries), VRAM hits 69.99, PCIe 2.78; 47.2 swaps/window
+B struct 1 | 1500 generated in 4974 ms (301.5 tok/s) | 198 windows, avg T 7.84, 7.58 tokens/window, 25.12 ms/window = adapt wait 0.02 + verify 23.67 (GPU-reach wait 8.63 + per-layer host 14.56 [plan 0.54 actq 0.12 jobs 0.03 CPU 13.83] + stage 0.03) draft 1.26 + adapt join 0.10 + other 0.01 | CPU experts 4.54 (5.56 entries), VRAM hits 69.83, PCIe 2.78; 47.8 swaps/window
+# 03:06:12 600.00 W, 7001 MHz, 14001 MHz
+summary d4prof1 (mean of the runs; B vs A on ms/window and tok/s)
+  struct A n=1  ms/window 23.35 (23.35..23.35)  tok/s 322.8  T 7.85  tok/window 7.54  verify 22.02  reach 7.05  host 14.46
+  struct B n=1  ms/window 25.12 (25.12..25.12)  tok/s 301.5  T 7.84  tok/window 7.58  verify 23.67  reach 8.63  host 14.56
+  struct B vs A: ms/window +1.770 (+7.58%), tok/s -6.60%

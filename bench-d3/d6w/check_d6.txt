@@ -1,0 +1,25 @@
+== struct d5
+accepted 2093 of 2143 (0.977), 7.73 tokens per round | 311 windows  | out 603ec26167 | dump bb3b04f0d2 310
+5.95 steps/round: wall 1.154 ms = round graph 0.310 + steps 0.801 GPU (0.135 per step) + host gaps between graphs 0.025 + tail 0.005 (per round)
+== struct d6
+accepted 2093 of 2143 (0.977), 7.73 tokens per round | 311 windows  | out 603ec26167 | dump bb3b04f0d2 310
+5.95 steps/round: wall 1.113 ms = round graph 0.305 + steps 0.774 GPU (0.130 per step) + host gaps between graphs 0.013 + tail 0.007 (per round)
+== prose d5
+accepted 474 of 684 (0.693), 2.44 tokens per round | 330 windows  | out 09ab5fafa0 | dump ebe6bff144 329
+2.09 steps/round: wall 0.581 ms = round graph 0.248 + steps 0.283 GPU (0.135 per step) + host gaps between graphs 0.007 + tail 0.003 (per round)
+== prose d6
+accepted 474 of 684 (0.693), 2.44 tokens per round | 330 windows  | out 09ab5fafa0 | dump ebe6bff144 329
+2.09 steps/round: wall 0.572 ms = round graph 0.244 + steps 0.279 GPU (0.134 per step) + host gaps between graphs 0.006 + tail 0.003 (per round)
+== conv d5
+accepted 249 of 351 (0.709), 2.63 tokens per round | 153 windows  | out 4dee2b2da7 | dump e659ea0e3b 152
+== conv d6
+accepted 249 of 351 (0.709), 2.63 tokens per round | 153 windows  | out 4dee2b2da7 | dump e659ea0e3b 152
+== struct d6 (2)
+accepted 2093 of 2143 (0.977), 7.73 tokens per round | 311 windows  | out 603ec26167 | dump bb3b04f0d2 310
+5.95 steps/round: wall 1.109 ms = round graph 0.304 + steps 0.772 GPU (0.130 per step) + host gaps between graphs 0.013 + tail 0.005 (per round)
+== struct d5 (2)
+accepted 2093 of 2143 (0.977), 7.73 tokens per round | 311 windows  | out 603ec26167 | dump bb3b04f0d2 310
+5.95 steps/round: wall 1.192 ms = round graph 0.308 + steps 0.788 GPU (0.133 per step) + host gaps between graphs 0.064 + tail 0.006 (per round)
+MTP_PDL
+
+[exited with code 0]

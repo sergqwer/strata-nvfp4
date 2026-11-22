@@ -1,0 +1,15 @@
+req 0 prompt 16685 gen 400 md5 e4971e38b6 | DONE 400 16685 1313.0 1882.9 length 227 337 0 224788 238338 0 0 0.0 16685 6462 chunk=16684 experts_streamed=18325 | wall 3208 ms
+req 0 prompt 16685 gen 400 md5 3e7e0b7347 | DONE 400 16685 1297.7 1886.2 length 219 326 0 223869 237253 0 0 0.0 16685 6107 chunk=16684 experts_streamed=18310 | wall 3196 ms
+req 0 prompt 16685 gen 25 md5 ad35678b63 | DONE 25 16685 1300.0 256.8 stop 17 18 0 9560 11075 0 0 0.0 16685 1405 chunk=16684 experts_streamed=18628 | wall 1569 ms
+req 0 prompt 16685 gen 25 md5 ad35678b63 | DONE 25 16685 1299.9 264.3 stop 17 18 0 9560 11075 0 0 0.0 16685 1405 chunk=16684 experts_streamed=18628 | wall 1576 ms
+req 0 prompt 16685 gen 25 md5 ad35678b63 | DONE 25 16685 1344.6 259.5 stop 17 18 0 9560 11075 0 0 0.0 16685 1405 chunk=16684 experts_streamed=18628 | wall 1616 ms
+req 0 prompt 16685 gen 400 md5 63a4cd81f1 | DONE 400 16685 1433.2 4824.3 length 231 341 0 103858 244800 0 0 0.0 16685 0 chunk=16684 experts_streamed=18966 | wall 6266 ms
+req 0 prompt 16685 gen 400 md5 63a4cd81f1 | DONE 400 16685 1441.0 4848.9 length 231 334 0 102044 241440 0 0 0.0 16685 0 chunk=16684 experts_streamed=18966 | wall 6299 ms
+req 0 prompt 16685 gen 25 md5 dbbf02ddd7 | DONE 25 16685 1311.2 258.6 length 17 18 0 9554 11078 0 0 0.0 16685 1402 chunk=16684 experts_streamed=18643 | wall 1581 ms
+req 0 prompt 16685 gen 25 md5 ad35678b63 | DONE 25 16685 1298.3 259.2 stop 17 18 0 9560 11075 0 0 0.0 16685 1405 chunk=16684 experts_streamed=18628 | wall 1569 ms
+req 1 prompt 16685 gen 25 md5 ad35678b63 | DONE 25 16685 1285.2 206.3 stop 17 18 0 11741 12323 0 0 0.0 16685 157 chunk=16684 experts_streamed=18628 | wall 1498 ms
+req 0 prompt 16685 gen 25 md5 ad35678b63 | DONE 25 16685 1444.0 152.3 stop 17 18 0 8785 12480 0 0 0.0 16685 0 chunk=16684 experts_streamed=18628 | wall 1605 ms
+req 0 prompt 16685 gen 25 md5 ad35678b63 | DONE 25 16685 1430.2 152.1 stop 17 18 0 8785 12480 0 0 0.0 16685 0 chunk=16684 experts_streamed=18628 | wall 1591 ms
+req 0 prompt 16685 gen 400 md5 c1b669b25f | DONE 400 16685 1577.0 4757.4 length 231 337 0 109617 242880 0 0 0.0 16685 0 chunk=16684 experts_streamed=18323 | wall 6343 ms
+req 0 prompt 16685 gen 400 md5 c1b669b25f | DONE 400 16685 1569.7 4875.1 length 232 337 0 109464 242400 0 0 0.0 16685 0 chunk=16684 experts_streamed=18323 | wall 6454 ms
+req 0 prompt 16685 gen 25 md5 ad35678b63 | DONE 25 16685 1439.1 146.7 stop 17 18 0 9613 11107 0 0 0.0 16685 1373 chunk=16684 experts_streamed=18643 | wall 1600 ms
