@@ -3,6 +3,8 @@
 // The per-token arithmetic of every kernel here is transcribed from its single-token original (fused_gdn.cu,
 // elementwise.cu) with the same operation order, so a verify window reproduces plain decode bit for bit.
 #include "strata/kernels/verify_kernels.hpp"
+
+#include <thread>
 #include "strata/core/bw_dense_defaults.hpp"
 #include "strata/core/geometry.hpp"
 #include "strata/core/emulate.hpp"
@@ -1917,6 +1919,64 @@ bool pdl_launch_ok(const void* kernel, cudaStream_t stream) {
     }
     return true;
 #endif
+}
+#endif
+
+// ---- multiarch tests (STRATA_EMULATE_SMS=N, emulate.hpp): a smaller card of the same generation.  One block a multiprocessor
+// holds every register (1024 threads x 64) and nearly all shared memory of the SMs past the first N, in 50 ms launches
+// relaunched by a host thread for the life of the process (a device-wide sync in the engine waits at most one launch).
+// Speeds mean nothing then; what it shows is whether co-resident waits (a gated read beside its combine) still finish.
+#if !defined(__HIPCC__)
+namespace {
+__global__ void __launch_bounds__(1024, 1) sm_hog_kernel(unsigned* out, unsigned long long ns) {
+    extern __shared__ unsigned hog_smem[];
+    unsigned long long t0, t1;
+    asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t0));
+    unsigned r[48];
+#pragma unroll
+    for (int i = 0; i < 48; ++i) r[i] = threadIdx.x * (i + 1);
+    do {
+#pragma unroll
+        for (int i = 0; i < 48; i += 8)
+            asm volatile("" : "+r"(r[i]), "+r"(r[i + 1]), "+r"(r[i + 2]), "+r"(r[i + 3]), "+r"(r[i + 4]), "+r"(r[i + 5]),
+                         "+r"(r[i + 6]), "+r"(r[i + 7]));
+        __nanosleep(10000);
+        asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t1));
+    } while (t1 - t0 < ns);
+    unsigned s = 0;
+#pragma unroll
+    for (int i = 0; i < 48; ++i) s += r[i];
+    if (s == 0xfffffffeu) { hog_smem[threadIdx.x] = s; out[threadIdx.x] = hog_smem[threadIdx.x ^ 1]; }
+}
+}  // namespace
+
+int sm_hog_start(int keep_sms) {
+    int dev = 0, sms = 0, smem = 0;
+    if (cudaGetDevice(&dev) != cudaSuccess || cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev) != cudaSuccess ||
+        cudaDeviceGetAttribute(&smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev) != cudaSuccess) { cudaGetLastError(); return 0; }
+    const int n = sms - keep_sms;
+    if (keep_sms < 1 || n < 1) return 0;
+    cudaFuncAttributes fa{};
+    int occ = 0;
+    unsigned* out = nullptr;
+    cudaStream_t s = nullptr;
+    if (cudaFuncSetAttribute(sm_hog_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem) != cudaSuccess ||
+        cudaFuncGetAttributes(&fa, sm_hog_kernel) != cudaSuccess ||
+        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, sm_hog_kernel, 1024, (size_t) smem) != cudaSuccess || occ != 1 ||
+        cudaMalloc((void**) &out, 1024 * sizeof(unsigned)) != cudaSuccess ||
+        cudaStreamCreateWithPriority(&s, cudaStreamNonBlocking, 0) != cudaSuccess) { cudaGetLastError(); return 0; }
+    std::fprintf(stderr, "strata: STRATA_EMULATE_SMS=%d (a test mode): %d of %d multiprocessors held by an idle kernel (%d registers a thread, "
+                         "%d B of shared memory a block, 50 ms launches)\n", keep_sms, n, sms, fa.numRegs, smem);
+    std::thread([=] {
+        cudaSetDevice(dev);
+        cudaStreamCaptureMode mode = cudaStreamCaptureModeRelaxed;   // the engine's captures never forbid this thread's calls
+        cudaThreadExchangeStreamCaptureMode(&mode);
+        for (;;) {
+            sm_hog_kernel<<<(unsigned) n, 1024, (size_t) smem, s>>>(out, 50000000ull);
+            if (cudaStreamSynchronize(s) != cudaSuccess) { cudaGetLastError(); return; }
+        }
+    }).detach();
+    return n;
 }
 #endif
 

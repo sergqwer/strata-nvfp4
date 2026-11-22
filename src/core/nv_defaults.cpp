@@ -22,7 +22,9 @@ std::vector<std::pair<std::string, std::string>> nv_default_env(int major, int m
     return nv_default_env(major, minor, strata::qwen_defaults_026());
 }
 
-std::vector<std::pair<std::string, std::string>> nv_default_env(int major, int minor, bool defaults026) {
+namespace {
+// one card's own table (sm_86, sm_60, sm_121, sm_120); nv_default_env adds the fork's portable set to it
+std::vector<std::pair<std::string, std::string>> arch_table(int major, int minor, bool defaults026) {
     std::vector<std::pair<std::string, std::string>> t;
     const int mj = strata::cc_major_of(major), mn = strata::cc_minor_of(minor);
     if (mj == 8 && mn == 6) {
@@ -172,10 +174,65 @@ std::vector<std::pair<std::string, std::string>> nv_default_env(int major, int m
     }
     return t;
 }
+}  // namespace
+
+std::vector<std::pair<std::string, std::string>> nv_portable_env(int major, int minor, bool defaults026) {
+    // strata-nvfp4 multiarch (bench-ma, MULTIARCH-PLAN.md): the switches of the sm_120 table whose kernels and host paths run
+    // as they are on Turing, Ampere and Ada.  The 5090's numbers (docs/NVFP4.md) do not carry over; what carries over is
+    // checked on the 5090 with PTX builds for 75 / 86 / 89 and STRATA_EMULATE_CC: the exact ones leave the text and the
+    // first-token logits bit-identical, the rounding ones stay at the 5090's on/off distance.  Not here: the sm_90+ kernels
+    // (DENSE_TC and what needs it: GDN_MID, QPROJ_*; DF_PDL), the FP4 ones (sm_120a), EARLY_READ (its gated blocks spin
+    // beside the combine: not checked on a card with few SMs), and the tier/PCIe values tuned for this PC (ADAPT_*, PCIE_FIXED).
+    std::vector<std::pair<std::string, std::string>> t;
+    const int mj = strata::cc_major_of(major), mn = strata::cc_minor_of(minor), cc = 10 * mj + mn;
+    if (defaults026 || off("STRATA_NVFP4_PORTABLE") || cc < 75 || mj >= 12) return t;   // 12.x: sm_120's / sm_121's own tables
+    // exact (the same text and logits with and without them, every arch emulated)
+    t.push_back({"STRATA_ATTN_STAGED", "1"});        // the INT8 chunk pass staged (cp.async from sm_80, plain copies on Turing)
+    t.push_back({"STRATA_PF_GROUP_SCRATCH", "1"});   // smaller prompt buffers: fewer borrowed expert slots
+    t.push_back({"STRATA_PF_HC_REGION", "2"});
+    t.push_back({"STRATA_KV_PREFETCH", "1"});        // KV streaming's copies on their own stream
+    t.push_back({"STRATA_PF_GRAPH", "7"});           // the prompt's QSA indexer and expert-group chains as CUDA graphs
+    t.push_back({"STRATA_GRAPH_PRIO", "1"});         // stream priorities kept in the window graphs
+    t.push_back({"STRATA_ROUTE_DB", "2"});           // router + doorbell in one launch
+    if (cc == 75) t.push_back({"STRATA_SM75_PERF", "1"});   // upstream's bitwise Turing kernels (measured on a 2080 Ti by their author)
+    if (cc == 89) {   // Ada: the kernel switches of upstream's sm_86 table (bitwise there, the same code on 8.9; RTX 40 had no table)
+        t.push_back({"STRATA_SIDE_MIXER", "2"});
+        t.push_back({"STRATA_ATTN_DAILY", "1"});
+        t.push_back({"STRATA_GR_UP75", "1"});
+        t.push_back({"STRATA_GU_SWIGLU", "1"});
+        t.push_back({"STRATA_QSA_ROWS", "1"});
+        t.push_back({"STRATA_B6_MMVQ_ROWS", "1"});
+    }
+    // rounding (KL at the 5090's on/off level)
+    t.push_back({"STRATA_HC_Q8", "1"});              // the 8-bit hyper-connection read (int8 + fp32: any sm_75+)
+    t.push_back({"STRATA_PREFILL_EQUAL", "2"});
+    t.push_back({"STRATA_PF_HC_INJ", "1"});
+    if (cc >= 80) {
+        t.push_back({"STRATA_GDN_TC", "1"});         // the prompt's DeltaNet scan on tensor cores (99 KB plan on 8.6 / 8.9)
+        t.push_back({"STRATA_GDN_CONVL2", "2"});
+        t.push_back({"STRATA_GDN_TC_NP", "1"});
+        t.push_back({"STRATA_QSA_I8", "1"});         // int8 m16n8k32 block scores
+        // f16-accumulate GEMMs: twice the f32-accumulate rate on GeForce / RTX workstation parts only (8.6, 8.9); the same
+        // rate on A100 / H100 / B200, so no gain there for the rounding
+        if (cc == 86 || cc == 89) t.push_back({"STRATA_DENSE_F16C", "1"});
+    }
+    return t;
+}
+
+std::vector<std::pair<std::string, std::string>> nv_default_env(int major, int minor, bool defaults026) {
+    auto t = arch_table(major, minor, defaults026);
+    for (const auto& kv : nv_portable_env(major, minor, defaults026)) {
+        bool have = false;
+        for (const auto& o : t) have = have || o.first == kv.first;
+        if (!have) t.push_back(kv);
+    }
+    return t;
+}
 
 std::vector<std::string> apply_nv_defaults(int major, int minor) {
     const int mj = strata::cc_major_of(major), mn = strata::cc_minor_of(minor);
-    std::vector<std::string> set;
+    std::vector<std::string> set, port;
+    const auto pt = nv_portable_env(major, minor, strata::qwen_defaults_026());
     for (const auto& kv : nv_default_env(major, minor)) {
         if (std::getenv(kv.first.c_str()) != nullptr) continue;   // the user's setting wins, whatever it is
 #if defined(_WIN32)
@@ -183,7 +240,15 @@ std::vector<std::string> apply_nv_defaults(int major, int minor) {
 #else
         setenv(kv.first.c_str(), kv.second.c_str(), 0);
 #endif
-        set.push_back(kv.first);
+        bool p = false;
+        for (const auto& o : pt) p = p || o.first == kv.first;
+        (p ? port : set).push_back(kv.first);
+    }
+    if (!port.empty()) {
+        std::fprintf(stderr, "strata: sm_%d%d (strata-nvfp4): %zu switches of the RTX 50 set on by default (STRATA_NVFP4_PORTABLE=0 turns them off, "
+                             "as does STRATA_DEFAULTS=026; a switch you set is kept): ", mj, mn, port.size());
+        for (size_t i = 0; i < port.size(); ++i) std::fprintf(stderr, "%s%s", i ? " " : "", port[i].c_str() + 7);
+        std::fprintf(stderr, "\n");
     }
     if (!set.empty()) {
         const bool sm86 = mj == 8;

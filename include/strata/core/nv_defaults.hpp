@@ -28,8 +28,13 @@ std::vector<std::pair<std::string, std::string>> nv_default_env(int major, int m
 /// The same with the answer of STRATA_DEFAULTS=026 given (the sm_121 table is empty then), so a test can check both without the environment.
 std::vector<std::pair<std::string, std::string>> nv_default_env(int major, int minor, bool defaults026);
 
+/// strata-nvfp4 multiarch: the switches of the sm_120 table that run as they are on compute capability 7.5 - 11.x (Turing, Ampere,
+/// Ada, and the sm_90 / sm_10x parts by the same features), part of nv_default_env there; empty on 12.x, below 7.5, with
+/// STRATA_DEFAULTS=026 (defaults026) and with STRATA_NVFP4_PORTABLE=0.
+std::vector<std::pair<std::string, std::string>> nv_portable_env(int major, int minor, bool defaults026);
+
 /// Sets `nv_default_env(major, minor)` in this process's environment where the user has not set the variable, prints one line to
-/// stderr when it set anything, and returns the names it set.
+/// stderr when it set anything (two when a card has its own table and the portable set), and returns the names it set.
 std::vector<std::string> apply_nv_defaults(int major, int minor);
 
 }  // namespace strata::core

@@ -3,6 +3,7 @@
 #include "strata/core/nv_chunk.hpp"
 #include "strata/core/nv_defaults.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -59,12 +60,25 @@ int main() {
     // sm_120 (RTX 50): strata-nvfp4's table (hc8, equal chunks, GDN TC: 5 switches), none with STRATA_DEFAULTS=026; sm_100 gets nothing
     CHECK(nv_default_env(12, 0, false).size() == 29);
     CHECK(nv_default_env(12, 0, true).empty());
-    CHECK(nv_default_env(10, 0, false).empty());
-    CHECK(nv_default_env(8, 9, false).empty());
-    CHECK(nv_default_env(7, 5, false).empty());
+    // strata-nvfp4 multiarch: the portable part of the sm_120 set on 7.5 - 11.x, never on 12.x, below 7.5, under 026 or STRATA_NVFP4_PORTABLE=0
+    unset("STRATA_NVFP4_PORTABLE");
+    CHECK(nv_portable_env(12, 0, false).empty() && nv_portable_env(12, 1, false).empty() && nv_portable_env(6, 0, false).empty());
+    CHECK(nv_portable_env(7, 5, false).size() == 11 && find(nv_portable_env(7, 5, false), "STRATA_SM75_PERF"));
+    CHECK(nv_portable_env(8, 9, false).size() == 21 && find(nv_portable_env(8, 9, false), "STRATA_DENSE_F16C"));
+    CHECK(nv_portable_env(8, 0, false).size() == 14 && !find(nv_portable_env(8, 0, false), "STRATA_DENSE_F16C"));
+    CHECK(!find(nv_portable_env(7, 5, false), "STRATA_QSA_I8") && !find(nv_portable_env(9, 0, false), "STRATA_DENSE_TC"));
+    CHECK(nv_portable_env(8, 9, true).empty());
+    CHECK(nv_default_env(10, 0, false) == nv_portable_env(10, 0, false));
+    CHECK(nv_default_env(8, 9, false) == nv_portable_env(8, 9, false));
+    CHECK(nv_default_env(7, 5, false) == nv_portable_env(7, 5, false));
+    CHECK(nv_default_env(8, 9, true).empty() && nv_default_env(7, 5, true).empty());
+    put("STRATA_NVFP4_PORTABLE", "0");
+    CHECK(nv_default_env(8, 9, false).empty() && nv_portable_env(8, 6, false).empty());
+    unset("STRATA_NVFP4_PORTABLE");
     {
         const auto a = nv_default_env(8, 6, false), b = nv_default_env(8, 6, true);
-        CHECK(!a.empty() && a == b);               // STRATA_DEFAULTS=026 does not touch the 2026-10 sm_86 table
+        CHECK(b.size() == 8 && a.size() == 8 + 15);   // the sm_86 table, then the portable set (none of its names repeats)
+        CHECK(std::equal(b.begin(), b.end(), a.begin()));   // STRATA_DEFAULTS=026 does not touch the 2026-10 sm_86 table
         const auto p = nv_default_env(6, 0, false), q = nv_default_env(6, 0, true);
         CHECK(!p.empty() && p == q);
         CHECK(!find(a, "STRATA_PF_FUSED") && !find(p, "STRATA_PF_FUSED"));

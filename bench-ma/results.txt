@@ -1,0 +1,55 @@
+# 23:31:08 release check
+rel_def_pf16 |  out 93c4688100 | logits e9d907e164 | prefill                  16675 tokens in 1420.5 ms | 2 err-lines
+rel_off_pf16 |  out 93c4688100 | logits ef51ae71a4 | prefill                  16675 tokens in 1754.8 ms | 2 err-lines
+rel_off_mtp | ma_rel_off_mtp | speculation              84 rounds of 8, drafts accepted 116 of 162 (0.716), 2.38 tokens per round | 84 windows screened (84 screens ran, 9.5 exact rows a screen), 0 windows every row exact | 200 tokens in 1733.5 ms  ->  115.37 tok/s | out 82ebb3effa | 7 err-lines
+rel_off_dfl | ma_rel_off_dfl | speculation              83 rounds of 6, drafts accepted 119 of 185 (0.643), 2.43 tokens per round | 83 windows screened (83 screens ran, 11.8 exact rows a screen), 0 windows every row exact | 200 tokens in 1995.3 ms  ->  100.24 tok/s | out 82ebb3effa | 6 err-lines
+rel_offfp4_pf16 |  out 62205238cc | logits 7a10591be6 | prefill                  16675 tokens in 2000.4 ms | 2 err-lines
+e86_pf16 |  out 62205238cc | logits ddbb216eeb | prefill                  16675 tokens in 2141.4 ms | 2 err-lines
+e86_mtp | ma_e86_mtp | speculation              85 rounds of 8, drafts accepted 116 of 156 (0.744), 2.36 tokens per round | 85 windows screened (85 screens ran, 10.4 exact rows a screen), 0 windows every row exact | 200 tokens in 1759.9 ms  ->  113.64 tok/s | out 9e05d7249c | 7 err-lines
+e86_dfl | ma_e86_dfl | speculation              84 rounds of 6, drafts accepted 116 of 177 (0.655), 2.38 tokens per round | 84 windows screened (84 screens ran, 11.2 exact rows a screen), 0 windows every row exact | 200 tokens in 1797.7 ms  ->  111.25 tok/s | out 9e05d7249c | 6 err-lines
+e89_pf16 |  out 62205238cc | logits ddbb216eeb | prefill                  16675 tokens in 2056.5 ms | 2 err-lines
+e89_mtp | ma_e89_mtp | speculation              85 rounds of 8, drafts accepted 116 of 156 (0.744), 2.36 tokens per round | 85 windows screened (85 screens ran, 10.4 exact rows a screen), 0 windows every row exact | 200 tokens in 1770.7 ms  ->  112.95 tok/s | out 9e05d7249c | 7 err-lines
+e89_dfl | ma_e89_dfl | speculation              84 rounds of 6, drafts accepted 116 of 177 (0.655), 2.38 tokens per round | 84 windows screened (84 screens ran, 11.2 exact rows a screen), 0 windows every row exact | 200 tokens in 1907.2 ms  ->  104.87 tok/s | out 9e05d7249c | 6 err-lines
+e75_pf16 |  out d41d8cd98f | logits  |  | 1 err-lines
+e75_mtp | ma_e75_mtp |  | 1 windows screened (0 screens ran, 0.0 exact rows a screen), 0 windows every row exact |  | out d41d8cd98f | 1 err-lines
+e75_dfl | ma_e75_dfl |  | 1 windows screened (0 screens ran, 0.0 exact rows a screen), 0 windows every row exact |  | out d41d8cd98f | 1 err-lines
+# 00:00:45 CHECK-DONE
+# 00:00:47 e75 with STRATA_HEAD_PLANES=0 (the release, the planes probe kept off by hand)
+e75hp_pf16 |  out 62205238cc | logits d0bcbcb21d | prefill                  16675 tokens in 3270.9 ms | 2 err-lines
+e75hp_mtp | ma_e75hp_mtp | speculation              91 rounds of 8, drafts accepted 109 of 154 (0.708), 2.20 tokens per round |  | 200 tokens in 1968.4 ms  ->  101.61 tok/s | out 0a6a56bc1e | 7 err-lines
+e75hp_dfl | ma_e75hp_dfl | speculation              85 rounds of 6, drafts accepted 115 of 163 (0.706), 2.35 tokens per round |  | 200 tokens in 1977.3 ms  ->  101.15 tok/s | out 0a6a56bc1e | 6 err-lines
+# 00:31:50 5090 with the sm_86 portable set by hand (STRATA_NVFP4_SM120=0, FP4G=0): the on/off distance on sm_120
+rel_p86_pf16 |  out 0291291206 | logits e281d89039 | prefill                  16675 tokens in 1666.6 ms | 2 err-lines
+rel_def_mtp | ma_rel_def_mtp | speculation              85 rounds of 8, drafts accepted 115 of 155 (0.742), 2.35 tokens per round | 85 windows screened (85 screens ran, 10.0 exact rows a screen), 0 windows every row exact | 200 tokens in 1532.5 ms  ->  130.51 tok/s | out 3d13f77b08 | 6 err-lines
+# 00:40:17 patched sm_120 build, defaults: must be the release's bits
+# 01:00:23 patched e75 defaults (Turing fix check)
+p75d_pf16 |  out 93c4688100 | logits d58dcbe598 | prefill                  16675 tokens in 3016.8 ms | 2 err-lines
+p75d_mtp | ma_p75d_mtp | speculation              79 rounds of 8, drafts accepted 123 of 160 (0.769), 2.56 tokens per round | 79 windows screened (79 screens ran, 10.1 exact rows a screen), 0 windows every row exact | 200 tokens in 1590.8 ms  ->  125.73 tok/s | out e2a9ea0814 | 6 err-lines
+# 01:02:16 patched sm_120 build, defaults: must be the release's bits
+p120_pf16 |  out 93c4688100 | logits e9d907e164 | prefill                  16675 tokens in 1430.0 ms | 2 err-lines
+p120_mtp | ma_p120_mtp | speculation              85 rounds of 8, drafts accepted 115 of 155 (0.742), 2.35 tokens per round | 85 windows screened (85 screens ran, 10.0 exact rows a screen), 0 windows every row exact | 200 tokens in 1502.2 ms  ->  133.13 tok/s | out 3d13f77b08 | 6 err-lines
+# 01:02:47 EARLY_READ with 84 SMs (STRATA_EMULATE_SMS=84)
+h84force_mtp | ma_h84force_mtp | speculation              85 rounds of 8, drafts accepted 115 of 155 (0.742), 2.35 tokens per round | 85 windows screened (85 screens ran, 10.0 exact rows a screen), 0 windows every row exact | 200 tokens in 167042.1 ms  ->  1.20 tok/s | out 3d13f77b08 | 6 err-lines
+h84fix_mtp | ma_h84fix_mtp | speculation              85 rounds of 8, drafts accepted 115 of 155 (0.742), 2.35 tokens per round | 85 windows screened (85 screens ran, 10.0 exact rows a screen), 0 windows every row exact | 200 tokens in 1682.7 ms  ->  118.85 tok/s | out 3d13f77b08 | 6 err-lines
+   0.95  strata: STRATA_EMULATE_SMS=84 (a test mode): 86 of 170 multiprocessors held by an idle kernel (10 registers a thread, 101376 B of shared memory a block, 50 ms launches)
+  30.64  strata: STRATA_EARLY_READ: off on this card (84 SMs x 2 blocks of its read against 220: they would fill every SM before the combine they wait for)
+   0.95  strata: STRATA_EMULATE_SMS=84 (a test mode): 86 of 170 multiprocessors held by an idle kernel (10 registers a thread, 101376 B of shared memory a block, 50 ms launches)
+# 01:06:45 cheap wins e86
+p86x_pf16 |  out 62205238cc | logits ddbb216eeb | prefill                  16675 tokens in 2050.4 ms | 2 err-lines
+p86x_mtp | ma_p86x_mtp | speculation              85 rounds of 8, drafts accepted 116 of 156 (0.744), 2.36 tokens per round | 85 windows screened (85 screens ran, 10.4 exact rows a screen), 0 windows every row exact | 200 tokens in 1662.9 ms  ->  120.27 tok/s | out 9e05d7249c | 7 err-lines
+p86d_pf16 |  out 62205238cc | logits 7beaf7c98c | prefill                  16675 tokens in 1859.4 ms | 2 err-lines
+p86d_mtp | ma_p86d_mtp | speculation              87 rounds of 8, drafts accepted 115 of 153 (0.752), 2.32 tokens per round | 87 windows screened (87 screens ran, 9.6 exact rows a screen), 0 windows every row exact | 200 tokens in 1617.1 ms  ->  123.68 tok/s | out 8c2031d38d | 7 err-lines
+p86d_dfl | ma_p86d_dfl | speculation              89 rounds of 6, drafts accepted 113 of 186 (0.608), 2.27 tokens per round | 89 windows screened (89 screens ran, 11.6 exact rows a screen), 0 windows every row exact | 200 tokens in 1792.8 ms  ->  111.56 tok/s | out 8c2031d38d | 6 err-lines
+# 01:09:25 cheap wins e89
+p89x_pf16 |  out 62205238cc | logits ddbb216eeb | prefill                  16675 tokens in 1971.1 ms | 2 err-lines
+p89x_mtp | ma_p89x_mtp | speculation              85 rounds of 8, drafts accepted 116 of 156 (0.744), 2.36 tokens per round | 85 windows screened (85 screens ran, 10.4 exact rows a screen), 0 windows every row exact | 200 tokens in 1734.5 ms  ->  115.31 tok/s | out 9e05d7249c | 7 err-lines
+p89d_pf16 |  out 62205238cc | logits 7beaf7c98c | prefill                  16675 tokens in 1774.9 ms | 2 err-lines
+p89d_mtp | ma_p89d_mtp | speculation              87 rounds of 8, drafts accepted 115 of 153 (0.752), 2.32 tokens per round | 87 windows screened (87 screens ran, 9.6 exact rows a screen), 0 windows every row exact | 200 tokens in 1624.2 ms  ->  123.14 tok/s | out 8c2031d38d | 7 err-lines
+p89d_dfl | ma_p89d_dfl | speculation              89 rounds of 6, drafts accepted 113 of 186 (0.608), 2.27 tokens per round | 89 windows screened (89 screens ran, 11.6 exact rows a screen), 0 windows every row exact | 200 tokens in 1800.3 ms  ->  111.09 tok/s | out 8c2031d38d | 6 err-lines
+# 01:12:06 cheap wins e75
+p75x_pf16 |  out 62205238cc | logits d0bcbcb21d | prefill                  16675 tokens in 3029.2 ms | 2 err-lines
+p75x_mtp | ma_p75x_mtp | speculation              91 rounds of 8, drafts accepted 109 of 154 (0.708), 2.20 tokens per round | 91 windows screened (91 screens ran, 11.0 exact rows a screen), 0 windows every row exact | 200 tokens in 1773.8 ms  ->  112.75 tok/s | out 0a6a56bc1e | 7 err-lines
+p75d_pf16 |  out 93c4688100 | logits d58dcbe598 | prefill                  16675 tokens in 3017.4 ms | 2 err-lines
+p75d_mtp | ma_p75d_mtp | speculation              79 rounds of 8, drafts accepted 123 of 160 (0.769), 2.56 tokens per round | 79 windows screened (79 screens ran, 10.1 exact rows a screen), 0 windows every row exact | 200 tokens in 1576.3 ms  ->  126.88 tok/s | out e2a9ea0814 | 6 err-lines
+p75d_dfl | ma_p75d_dfl | speculation              77 rounds of 6, drafts accepted 128 of 185 (0.692), 2.66 tokens per round | 77 windows screened (77 screens ran, 11.8 exact rows a screen), 0 windows every row exact | 200 tokens in 1680.2 ms  ->  119.04 tok/s | out e2a9ea0814 | 6 err-lines
+# 01:13:37 PRI-DONE

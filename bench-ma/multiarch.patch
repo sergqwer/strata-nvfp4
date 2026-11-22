@@ -1,0 +1,410 @@
+diff --git a/include/strata/core/emulate.hpp b/include/strata/core/emulate.hpp
+index 6f28b97f7..2e15f9f41 100644
+--- a/include/strata/core/emulate.hpp
++++ b/include/strata/core/emulate.hpp
+@@ -22,6 +22,16 @@ inline int emulated_cc() {
+ }
+ inline int cc_major_of(int real_major) { return emulated_cc() ? emulated_cc() / 10 : real_major; }
+ inline int cc_minor_of(int real_minor) { return emulated_cc() ? emulated_cc() % 10 : real_minor; }
++/// STRATA_EMULATE_SMS=N (tests only, CUDA): a smaller card of this generation - the engine holds the other multiprocessors with an
++/// idle kernel (kernels::sm_hog_start) and the checks of co-resident grids read sms_of; every other query still sees the real count
++inline int emulated_sms() {
++    static const int n = [] {
++        const char* e = std::getenv("STRATA_EMULATE_SMS");
++        return e ? std::atoi(e) : 0;
++    }();
++    return n > 0 ? n : 0;
++}
++inline int sms_of(int real) { return emulated_sms() > 0 && emulated_sms() < real ? emulated_sms() : real; }
+ /// cudaDevAttrMaxSharedMemoryPerBlockOptin as the emulated card reports it: 64 KB on Turing, 163 KB on the A100,
+ /// 99 KB on the other Ampere and Ada cards
+ inline int smem_optin_of(int real) {
+diff --git a/include/strata/core/nv_defaults.hpp b/include/strata/core/nv_defaults.hpp
+index 781d7be0c..c7feee64a 100644
+--- a/include/strata/core/nv_defaults.hpp
++++ b/include/strata/core/nv_defaults.hpp
+@@ -28,8 +28,13 @@ std::vector<std::pair<std::string, std::string>> nv_default_env(int major, int m
+ /// The same with the answer of STRATA_DEFAULTS=026 given (the sm_121 table is empty then), so a test can check both without the environment.
+ std::vector<std::pair<std::string, std::string>> nv_default_env(int major, int minor, bool defaults026);
+ 
++/// strata-nvfp4 multiarch: the switches of the sm_120 table that run as they are on compute capability 7.5 - 11.x (Turing, Ampere,
++/// Ada, and the sm_90 / sm_10x parts by the same features), part of nv_default_env there; empty on 12.x, below 7.5, with
++/// STRATA_DEFAULTS=026 (defaults026) and with STRATA_NVFP4_PORTABLE=0.
++std::vector<std::pair<std::string, std::string>> nv_portable_env(int major, int minor, bool defaults026);
++
+ /// Sets `nv_default_env(major, minor)` in this process's environment where the user has not set the variable, prints one line to
+-/// stderr when it set anything, and returns the names it set.
++/// stderr when it set anything (two when a card has its own table and the portable set), and returns the names it set.
+ std::vector<std::string> apply_nv_defaults(int major, int minor);
+ 
+ }  // namespace strata::core
+diff --git a/include/strata/kernels/verify_kernels.hpp b/include/strata/kernels/verify_kernels.hpp
+index b463201ae..b378c4823 100644
+--- a/include/strata/kernels/verify_kernels.hpp
++++ b/include/strata/kernels/verify_kernels.hpp
+@@ -102,6 +102,9 @@ void wait_flag_ge_stamped(const uint32_t* flag, uint32_t value, unsigned long lo
+ /// the GPU's %globaltimer (ns) into buf[i] (a one-thread kernel: the verify window's stage profiler).  Inside a PDL
+ /// stretch (pdl.hpp) the stamp passes the early launch on, so a profiled window keeps the chain it measures.
+ void gpu_stamp(unsigned long long* buf, int i, void* stream);
++/// multiarch tests (STRATA_EMULATE_SMS=N): hold every multiprocessor past the first keep_sms with an idle kernel for the life of the
++/// process (CUDA only); returns how many it holds (0: not started)
++int sm_hog_start(int keep_sms);
+ /// an empty one-thread kernel (a graph node that does nothing: STRATA_DUMMY_NODES measures what a node costs in a window)
+ void gpu_noop(void* stream);
+ /// dst[r][0, w) = src[r][0, w) for `rows` rows of source stride `src_w` floats (the query half of each q/gate head
+diff --git a/src/core/nv_defaults.cpp b/src/core/nv_defaults.cpp
+index c1fca99f6..5e81afc59 100644
+--- a/src/core/nv_defaults.cpp
++++ b/src/core/nv_defaults.cpp
+@@ -22,7 +22,9 @@ std::vector<std::pair<std::string, std::string>> nv_default_env(int major, int m
+     return nv_default_env(major, minor, strata::qwen_defaults_026());
+ }
+ 
+-std::vector<std::pair<std::string, std::string>> nv_default_env(int major, int minor, bool defaults026) {
++namespace {
++// one card's own table (sm_86, sm_60, sm_121, sm_120); nv_default_env adds the fork's portable set to it
++std::vector<std::pair<std::string, std::string>> arch_table(int major, int minor, bool defaults026) {
+     std::vector<std::pair<std::string, std::string>> t;
+     const int mj = strata::cc_major_of(major), mn = strata::cc_minor_of(minor);
+     if (mj == 8 && mn == 6) {
+@@ -172,10 +174,65 @@ std::vector<std::pair<std::string, std::string>> nv_default_env(int major, int m
+     }
+     return t;
+ }
++}  // namespace
++
++std::vector<std::pair<std::string, std::string>> nv_portable_env(int major, int minor, bool defaults026) {
++    // strata-nvfp4 multiarch (bench-ma, MULTIARCH-PLAN.md): the switches of the sm_120 table whose kernels and host paths run
++    // as they are on Turing, Ampere and Ada.  The 5090's numbers (docs/NVFP4.md) do not carry over; what carries over is
++    // checked on the 5090 with PTX builds for 75 / 86 / 89 and STRATA_EMULATE_CC: the exact ones leave the text and the
++    // first-token logits bit-identical, the rounding ones stay at the 5090's on/off distance.  Not here: the sm_90+ kernels
++    // (DENSE_TC and what needs it: GDN_MID, QPROJ_*; DF_PDL), the FP4 ones (sm_120a), EARLY_READ (its gated blocks spin
++    // beside the combine: not checked on a card with few SMs), and the tier/PCIe values tuned for this PC (ADAPT_*, PCIE_FIXED).
++    std::vector<std::pair<std::string, std::string>> t;
++    const int mj = strata::cc_major_of(major), mn = strata::cc_minor_of(minor), cc = 10 * mj + mn;
++    if (defaults026 || off("STRATA_NVFP4_PORTABLE") || cc < 75 || mj >= 12) return t;   // 12.x: sm_120's / sm_121's own tables
++    // exact (the same text and logits with and without them, every arch emulated)
++    t.push_back({"STRATA_ATTN_STAGED", "1"});        // the INT8 chunk pass staged (cp.async from sm_80, plain copies on Turing)
++    t.push_back({"STRATA_PF_GROUP_SCRATCH", "1"});   // smaller prompt buffers: fewer borrowed expert slots
++    t.push_back({"STRATA_PF_HC_REGION", "2"});
++    t.push_back({"STRATA_KV_PREFETCH", "1"});        // KV streaming's copies on their own stream
++    t.push_back({"STRATA_PF_GRAPH", "7"});           // the prompt's QSA indexer and expert-group chains as CUDA graphs
++    t.push_back({"STRATA_GRAPH_PRIO", "1"});         // stream priorities kept in the window graphs
++    t.push_back({"STRATA_ROUTE_DB", "2"});           // router + doorbell in one launch
++    if (cc == 75) t.push_back({"STRATA_SM75_PERF", "1"});   // upstream's bitwise Turing kernels (measured on a 2080 Ti by their author)
++    if (cc == 89) {   // Ada: the kernel switches of upstream's sm_86 table (bitwise there, the same code on 8.9; RTX 40 had no table)
++        t.push_back({"STRATA_SIDE_MIXER", "2"});
++        t.push_back({"STRATA_ATTN_DAILY", "1"});
++        t.push_back({"STRATA_GR_UP75", "1"});
++        t.push_back({"STRATA_GU_SWIGLU", "1"});
++        t.push_back({"STRATA_QSA_ROWS", "1"});
++        t.push_back({"STRATA_B6_MMVQ_ROWS", "1"});
++    }
++    // rounding (KL at the 5090's on/off level)
++    t.push_back({"STRATA_HC_Q8", "1"});              // the 8-bit hyper-connection read (int8 + fp32: any sm_75+)
++    t.push_back({"STRATA_PREFILL_EQUAL", "2"});
++    t.push_back({"STRATA_PF_HC_INJ", "1"});
++    if (cc >= 80) {
++        t.push_back({"STRATA_GDN_TC", "1"});         // the prompt's DeltaNet scan on tensor cores (99 KB plan on 8.6 / 8.9)
++        t.push_back({"STRATA_GDN_CONVL2", "2"});
++        t.push_back({"STRATA_GDN_TC_NP", "1"});
++        t.push_back({"STRATA_QSA_I8", "1"});         // int8 m16n8k32 block scores
++        // f16-accumulate GEMMs: twice the f32-accumulate rate on GeForce / RTX workstation parts only (8.6, 8.9); the same
++        // rate on A100 / H100 / B200, so no gain there for the rounding
++        if (cc == 86 || cc == 89) t.push_back({"STRATA_DENSE_F16C", "1"});
++    }
++    return t;
++}
++
++std::vector<std::pair<std::string, std::string>> nv_default_env(int major, int minor, bool defaults026) {
++    auto t = arch_table(major, minor, defaults026);
++    for (const auto& kv : nv_portable_env(major, minor, defaults026)) {
++        bool have = false;
++        for (const auto& o : t) have = have || o.first == kv.first;
++        if (!have) t.push_back(kv);
++    }
++    return t;
++}
+ 
+ std::vector<std::string> apply_nv_defaults(int major, int minor) {
+     const int mj = strata::cc_major_of(major), mn = strata::cc_minor_of(minor);
+-    std::vector<std::string> set;
++    std::vector<std::string> set, port;
++    const auto pt = nv_portable_env(major, minor, strata::qwen_defaults_026());
+     for (const auto& kv : nv_default_env(major, minor)) {
+         if (std::getenv(kv.first.c_str()) != nullptr) continue;   // the user's setting wins, whatever it is
+ #if defined(_WIN32)
+@@ -183,7 +240,15 @@ std::vector<std::string> apply_nv_defaults(int major, int minor) {
+ #else
+         setenv(kv.first.c_str(), kv.second.c_str(), 0);
+ #endif
+-        set.push_back(kv.first);
++        bool p = false;
++        for (const auto& o : pt) p = p || o.first == kv.first;
++        (p ? port : set).push_back(kv.first);
++    }
++    if (!port.empty()) {
++        std::fprintf(stderr, "strata: sm_%d%d (strata-nvfp4): %zu switches of the RTX 50 set on by default (STRATA_NVFP4_PORTABLE=0 turns them off, "
++                             "as does STRATA_DEFAULTS=026; a switch you set is kept): ", mj, mn, port.size());
++        for (size_t i = 0; i < port.size(); ++i) std::fprintf(stderr, "%s%s", i ? " " : "", port[i].c_str() + 7);
++        std::fprintf(stderr, "\n");
+     }
+     if (!set.empty()) {
+         const bool sm86 = mj == 8;
+diff --git a/src/core/nv_defaults_test.cpp b/src/core/nv_defaults_test.cpp
+index 2bdfb3bd9..36cb641f4 100644
+--- a/src/core/nv_defaults_test.cpp
++++ b/src/core/nv_defaults_test.cpp
+@@ -3,6 +3,7 @@
+ #include "strata/core/nv_chunk.hpp"
+ #include "strata/core/nv_defaults.hpp"
+ 
++#include <algorithm>
+ #include <cstdio>
+ #include <cstdlib>
+ #include <string>
+@@ -59,12 +60,25 @@ int main() {
+     // sm_120 (RTX 50): strata-nvfp4's table (hc8, equal chunks, GDN TC: 5 switches), none with STRATA_DEFAULTS=026; sm_100 gets nothing
+     CHECK(nv_default_env(12, 0, false).size() == 29);
+     CHECK(nv_default_env(12, 0, true).empty());
+-    CHECK(nv_default_env(10, 0, false).empty());
+-    CHECK(nv_default_env(8, 9, false).empty());
+-    CHECK(nv_default_env(7, 5, false).empty());
++    // strata-nvfp4 multiarch: the portable part of the sm_120 set on 7.5 - 11.x, never on 12.x, below 7.5, under 026 or STRATA_NVFP4_PORTABLE=0
++    unset("STRATA_NVFP4_PORTABLE");
++    CHECK(nv_portable_env(12, 0, false).empty() && nv_portable_env(12, 1, false).empty() && nv_portable_env(6, 0, false).empty());
++    CHECK(nv_portable_env(7, 5, false).size() == 11 && find(nv_portable_env(7, 5, false), "STRATA_SM75_PERF"));
++    CHECK(nv_portable_env(8, 9, false).size() == 21 && find(nv_portable_env(8, 9, false), "STRATA_DENSE_F16C"));
++    CHECK(nv_portable_env(8, 0, false).size() == 14 && !find(nv_portable_env(8, 0, false), "STRATA_DENSE_F16C"));
++    CHECK(!find(nv_portable_env(7, 5, false), "STRATA_QSA_I8") && !find(nv_portable_env(9, 0, false), "STRATA_DENSE_TC"));
++    CHECK(nv_portable_env(8, 9, true).empty());
++    CHECK(nv_default_env(10, 0, false) == nv_portable_env(10, 0, false));
++    CHECK(nv_default_env(8, 9, false) == nv_portable_env(8, 9, false));
++    CHECK(nv_default_env(7, 5, false) == nv_portable_env(7, 5, false));
++    CHECK(nv_default_env(8, 9, true).empty() && nv_default_env(7, 5, true).empty());
++    put("STRATA_NVFP4_PORTABLE", "0");
++    CHECK(nv_default_env(8, 9, false).empty() && nv_portable_env(8, 6, false).empty());
++    unset("STRATA_NVFP4_PORTABLE");
+     {
+         const auto a = nv_default_env(8, 6, false), b = nv_default_env(8, 6, true);
+-        CHECK(!a.empty() && a == b);               // STRATA_DEFAULTS=026 does not touch the 2026-10 sm_86 table
++        CHECK(b.size() == 8 && a.size() == 8 + 15);   // the sm_86 table, then the portable set (none of its names repeats)
++        CHECK(std::equal(b.begin(), b.end(), a.begin()));   // STRATA_DEFAULTS=026 does not touch the 2026-10 sm_86 table
+         const auto p = nv_default_env(6, 0, false), q = nv_default_env(6, 0, true);
+         CHECK(!p.empty() && p == q);
+         CHECK(!find(a, "STRATA_PF_FUSED") && !find(p, "STRATA_PF_FUSED"));
+diff --git a/src/kernels/cuda/fused_gr.cu b/src/kernels/cuda/fused_gr.cu
+index 33b2a8463..8c64fc54b 100644
+--- a/src/kernels/cuda/fused_gr.cu
++++ b/src/kernels/cuda/fused_gr.cu
+@@ -3997,6 +3997,31 @@ void fused_gr_v3_print_resources() {
+     one("up T4 pf3", (const void*) gr_up_v3_kernel<1, 4, true, 3>, 0);
+ #endif
+ }
++#if !defined(__HIPCC__)
++// multiarch: the gated read's down blocks are placed before the combine they wait for and spin there (2 a multiprocessor,
++// 128 registers x 256 threads: every register of the SM).  On a card whose SMs they fill - 220 blocks against 2 x 110
++// (RTX 5080, 5070, 5060, RTX PRO 5000) - the combine finds no room, the gate times out after 2 s and every later read
++// takes stale inputs.  Taken only where they leave half an SM's worth of room per SM for the combine (the 5090: 340 - 220).
++static bool gated_read_fits() {
++    static int fit[64];   // 0 unknown, 1 yes, 2 no
++    int dev = 0;
++    if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { cudaGetLastError(); return false; }
++    if (fit[dev] == 0) {
++        int sms = 0, occ = 0;
++        const int grid = (hc8::NRG + 1) * hc8::NS;
++        const bool ok = cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev) == cudaSuccess &&
++                        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, hc8::hc8_down_kernel<kFusedGrMaxT, 2>, THREADS, 0) == cudaSuccess;
++        if (!ok) cudaGetLastError();
++        sms = strata::sms_of(sms);   // STRATA_EMULATE_SMS (tests only)
++        const char* force = std::getenv("STRATA_EARLY_READ_FIT");   // =0: skip this check (tests: the failure it prevents)
++        fit[dev] = (ok && occ * sms >= grid + sms / 2) || (force != nullptr && force[0] == '0') ? 1 : 2;
++        if (fit[dev] == 2 && std::getenv("STRATA_EARLY_READ") != nullptr && std::atoi(std::getenv("STRATA_EARLY_READ")) != 0)
++            std::fprintf(stderr, "strata: STRATA_EARLY_READ: off on this card (%d SMs x %d blocks of its read against %d: they would fill "
++                                 "every SM before the combine they wait for)\n", sms, occ, grid);
++    }
++    return fit[dev] == 1;
++}
++#endif
+ bool fused_gr_read_gated_ok(const FusedGrArgs* a, int n_tok) {
+ #if defined(__HIPCC__)
+     (void) a; (void) n_tok;
+@@ -4004,7 +4029,7 @@ bool fused_gr_read_gated_ok(const FusedGrArgs* a, int n_tok) {
+ #else
+     return a != nullptr && n_tok >= 1 && n_tok <= kFusedGrMaxT && a[0].q8_down != nullptr && a[0].q8_up != nullptr &&
+            hc8_is_split(a[0].q8_down) && hc8_is_split(a[0].q8_up) && a[0].w_inject != nullptr &&
+-           hc8::hc8_down_variant() != 1 && hc8::hc8_up_variant() == 1;
++           hc8::hc8_down_variant() != 1 && hc8::hc8_up_variant() == 1 && gated_read_fits();
+ #endif
+ }
+ bool fused_gr_read_multi_gated(const FusedGrArgs* a, int n_tok, float* xn_scratch, const unsigned* gate, unsigned gate_n,
+diff --git a/src/kernels/cuda/gdn_mid.cu b/src/kernels/cuda/gdn_mid.cu
+index 85b49208a..d3a363b9e 100644
+--- a/src/kernels/cuda/gdn_mid.cu
++++ b/src/kernels/cuda/gdn_mid.cu
+@@ -16,6 +16,7 @@
+ #undef FZ_DEV_ONLY
+ 
+ #include "strata/kernels/gdn_mid.hpp"
++#include "strata/core/emulate.hpp"
+ 
+ #include <cuda_fp16.h>
+ #include <cuda_runtime.h>
+@@ -522,6 +523,7 @@ int mid_grid() {
+         int dev = 0, sms = 0, optin = 0;
+         cudaGetDevice(&dev);
+         cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
++        sms = strata::sms_of(sms);   // STRATA_EMULATE_SMS (tests only): its grid waits for every CTA
+         cudaDeviceGetAttribute(&optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
+         int major = 0;
+         cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
+diff --git a/src/kernels/cuda/q80_vhead.cu b/src/kernels/cuda/q80_vhead.cu
+index 305c49da5..3027c7f59 100644
+--- a/src/kernels/cuda/q80_vhead.cu
++++ b/src/kernels/cuda/q80_vhead.cu
+@@ -247,7 +247,7 @@ template <int NC>
+ __global__ void __launch_bounds__(WPB * WARP) q80p_rows_kernel(const uint8_t* __restrict__ w, const Q81Block* x,
+                                                                float* y, int n_out, int per_block, const int* k,
+                                                                VScratch* vs) {
+-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
++#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 750   // multiarch: Turing too (the one sm_80 instruction, redux, has a shuffle twin below)
+     extern __shared__ __align__(16) int4 xe[];
+     __shared__ uint32_t list[kListCap];
+     __shared__ int cnt;
+@@ -339,7 +339,7 @@ __device__ __forceinline__ void screen_load(const uint8_t* __restrict__ row, int
+ template <int NC>
+ __global__ void __launch_bounds__(WPB * WARP) q80p_screen_kernel(const uint8_t* __restrict__ w, const Q81Block* x,
+                                                                  float* y, int n_out, const int* k, VScratch* vs) {
+-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
++#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 750   // multiarch: Turing too (the one sm_80 instruction, redux, has a shuffle twin below)
+     __shared__ __align__(16) int4 sy[NC][2][kBlocks];   // a column's codes per block, in two halves
+     __shared__ __align__(16) float4 sc[NC][kBlocks];    // {4 d, -31.625 sum q, 1.5 d sum |q|, 0}
+     __shared__ float wmax[WPB][NC];
+@@ -455,7 +455,16 @@ __global__ void __launch_bounds__(WPB * WARP) q80p_screen_kernel(const uint8_t*
+ #pragma unroll
+         for (int i = 0; i < VHIST / 32; ++i) v[i] = __ldcg(&vs->hist[c][i * 32 + lane]);
+ #pragma unroll
+-        for (int i = 0; i < VHIST / 32; ++i) tot[i] = __reduce_add_sync(0xffffffffu, v[i]);
++        for (int i = 0; i < VHIST / 32; ++i) {
++#if __CUDA_ARCH__ >= 800
++            tot[i] = __reduce_add_sync(0xffffffffu, v[i]);
++#else   // Turing: the same integer sum by shuffles
++            unsigned s = v[i];
++#pragma unroll
++            for (int o = 16; o > 0; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
++            tot[i] = s;
++#endif
++        }
+         unsigned run = 0, row_v = 0;
+         int rw = -1;
+ #pragma unroll
+@@ -539,12 +548,15 @@ bool arch_ok() {
+     if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { (void) cudaGetLastError(); return false; }
+     int v = ok[dev].load(std::memory_order_relaxed);
+     if (v == 0) {
+-        int major = 0;
+-        if (cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) != cudaSuccess) { (void) cudaGetLastError(); major = 0; }
++        int major = 0, minor = 0;
++        if (cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) != cudaSuccess ||
++            cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev) != cudaSuccess) { (void) cudaGetLastError(); major = minor = 0; }
+         cudaFuncAttributes fa{};
+-        const bool built = cudaFuncGetAttributes(&fa, q80p_rows_kernel<1>) == cudaSuccess && fa.binaryVersion >= 80;
++        // ptxVersion too (as the PDL and cluster probes check): a 75-virtual build JITs to the card's binary version, and only the
++        // PTX version tells that the kernels are trap stubs (a pre-sm_75 build; the STRATA_EMULATE_CC tests JIT older PTX)
++        const bool built = cudaFuncGetAttributes(&fa, q80p_rows_kernel<1>) == cudaSuccess && fa.ptxVersion >= 75 && fa.binaryVersion >= 75;
+         if (!built) (void) cudaGetLastError();
+-        v = major >= 8 && built ? 1 : 2;
++        v = major * 10 + minor >= 75 && built ? 1 : 2;
+         ok[dev].store(v, std::memory_order_relaxed);
+     }
+     return v == 1;
+diff --git a/src/kernels/cuda/verify_kernels.cu b/src/kernels/cuda/verify_kernels.cu
+index 678f58e2c..57919a3c6 100644
+--- a/src/kernels/cuda/verify_kernels.cu
++++ b/src/kernels/cuda/verify_kernels.cu
+@@ -3,6 +3,8 @@
+ // The per-token arithmetic of every kernel here is transcribed from its single-token original (fused_gdn.cu,
+ // elementwise.cu) with the same operation order, so a verify window reproduces plain decode bit for bit.
+ #include "strata/kernels/verify_kernels.hpp"
++
++#include <thread>
+ #include "strata/core/bw_dense_defaults.hpp"
+ #include "strata/core/geometry.hpp"
+ #include "strata/core/emulate.hpp"
+@@ -1920,4 +1922,62 @@ bool pdl_launch_ok(const void* kernel, cudaStream_t stream) {
+ }
+ #endif
+ 
++// ---- multiarch tests (STRATA_EMULATE_SMS=N, emulate.hpp): a smaller card of the same generation.  One block a multiprocessor
++// holds every register (1024 threads x 64) and nearly all shared memory of the SMs past the first N, in 50 ms launches
++// relaunched by a host thread for the life of the process (a device-wide sync in the engine waits at most one launch).
++// Speeds mean nothing then; what it shows is whether co-resident waits (a gated read beside its combine) still finish.
++#if !defined(__HIPCC__)
++namespace {
++__global__ void __launch_bounds__(1024, 1) sm_hog_kernel(unsigned* out, unsigned long long ns) {
++    extern __shared__ unsigned hog_smem[];
++    unsigned long long t0, t1;
++    asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t0));
++    unsigned r[48];
++#pragma unroll
++    for (int i = 0; i < 48; ++i) r[i] = threadIdx.x * (i + 1);
++    do {
++#pragma unroll
++        for (int i = 0; i < 48; i += 8)
++            asm volatile("" : "+r"(r[i]), "+r"(r[i + 1]), "+r"(r[i + 2]), "+r"(r[i + 3]), "+r"(r[i + 4]), "+r"(r[i + 5]),
++                         "+r"(r[i + 6]), "+r"(r[i + 7]));
++        __nanosleep(10000);
++        asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t1));
++    } while (t1 - t0 < ns);
++    unsigned s = 0;
++#pragma unroll
++    for (int i = 0; i < 48; ++i) s += r[i];
++    if (s == 0xfffffffeu) { hog_smem[threadIdx.x] = s; out[threadIdx.x] = hog_smem[threadIdx.x ^ 1]; }
++}
++}  // namespace
++
++int sm_hog_start(int keep_sms) {
++    int dev = 0, sms = 0, smem = 0;
++    if (cudaGetDevice(&dev) != cudaSuccess || cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev) != cudaSuccess ||
++        cudaDeviceGetAttribute(&smem, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev) != cudaSuccess) { cudaGetLastError(); return 0; }
++    const int n = sms - keep_sms;
++    if (keep_sms < 1 || n < 1) return 0;
++    cudaFuncAttributes fa{};
++    int occ = 0;
++    unsigned* out = nullptr;
++    cudaStream_t s = nullptr;
++    if (cudaFuncSetAttribute(sm_hog_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem) != cudaSuccess ||
++        cudaFuncGetAttributes(&fa, sm_hog_kernel) != cudaSuccess ||
++        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, sm_hog_kernel, 1024, (size_t) smem) != cudaSuccess || occ != 1 ||
++        cudaMalloc((void**) &out, 1024 * sizeof(unsigned)) != cudaSuccess ||
++        cudaStreamCreateWithPriority(&s, cudaStreamNonBlocking, 0) != cudaSuccess) { cudaGetLastError(); return 0; }
++    std::fprintf(stderr, "strata: STRATA_EMULATE_SMS=%d (a test mode): %d of %d multiprocessors held by an idle kernel (%d registers a thread, "
++                         "%d B of shared memory a block, 50 ms launches)\n", keep_sms, n, sms, fa.numRegs, smem);
++    std::thread([=] {
++        cudaSetDevice(dev);
++        cudaStreamCaptureMode mode = cudaStreamCaptureModeRelaxed;   // the engine's captures never forbid this thread's calls
++        cudaThreadExchangeStreamCaptureMode(&mode);
++        for (;;) {
++            sm_hog_kernel<<<(unsigned) n, 1024, (size_t) smem, s>>>(out, 50000000ull);
++            if (cudaStreamSynchronize(s) != cudaSuccess) { cudaGetLastError(); return; }
++        }
++    }).detach();
++    return n;
++}
++#endif
++
+ }  // namespace strata::kernels
+diff --git a/src/program/generate.cpp b/src/program/generate.cpp
+index 4493465a6..2ca5d57ae 100644
+--- a/src/program/generate.cpp
++++ b/src/program/generate.cpp
+@@ -6108,6 +6108,9 @@ int main(int argc, char** argv) {
+         std::fprintf(stderr, "strata generate: GPU %d: %s, compute capability %d.%d%s\n", dev, name,
+                      strata::cc_major_of(p.major), strata::cc_minor_of(p.minor),
+                      strata::emulated_cc() ? " (STRATA_EMULATE_CC: a test mode, the card is emulated)" : "");
++#if !defined(STRATA_USE_HIP) && !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)
++        if (strata::emulated_sms() > 0 && dev == 0) strata::kernels::sm_hog_start(strata::emulated_sms());   // multiarch tests only
++#endif
+ #if !defined(STRATA_HIP_GFX906) && !defined(STRATA_GPU_METAL)   // a CUDA toolkit mismatch; the gfx906 HIP build has no CUDART_VERSION
+         {   // #542: a build whose libcudart is older than its headers (a CUDA 13 kit with a dangling libcudart.so that
+             // CMake resolved to the system's CUDA 12 one) reads cudaDeviceProp shifted - silently, and slowly

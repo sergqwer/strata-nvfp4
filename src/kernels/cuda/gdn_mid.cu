@@ -16,6 +16,7 @@
 #undef FZ_DEV_ONLY
 
 #include "strata/kernels/gdn_mid.hpp"
+#include "strata/core/emulate.hpp"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -522,6 +523,7 @@ int mid_grid() {
         int dev = 0, sms = 0, optin = 0;
         cudaGetDevice(&dev);
         cudaDeviceGetAttribute(&sms, cudaDevAttrMultiProcessorCount, dev);
+        sms = strata::sms_of(sms);   // STRATA_EMULATE_SMS (tests only): its grid waits for every CTA
         cudaDeviceGetAttribute(&optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
         int major = 0;
         cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);

@@ -247,7 +247,7 @@ template <int NC>
 __global__ void __launch_bounds__(WPB * WARP) q80p_rows_kernel(const uint8_t* __restrict__ w, const Q81Block* x,
                                                                float* y, int n_out, int per_block, const int* k,
                                                                VScratch* vs) {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 750   // multiarch: Turing too (the one sm_80 instruction, redux, has a shuffle twin below)
     extern __shared__ __align__(16) int4 xe[];
     __shared__ uint32_t list[kListCap];
     __shared__ int cnt;
@@ -339,7 +339,7 @@ __device__ __forceinline__ void screen_load(const uint8_t* __restrict__ row, int
 template <int NC>
 __global__ void __launch_bounds__(WPB * WARP) q80p_screen_kernel(const uint8_t* __restrict__ w, const Q81Block* x,
                                                                  float* y, int n_out, const int* k, VScratch* vs) {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 750   // multiarch: Turing too (the one sm_80 instruction, redux, has a shuffle twin below)
     __shared__ __align__(16) int4 sy[NC][2][kBlocks];   // a column's codes per block, in two halves
     __shared__ __align__(16) float4 sc[NC][kBlocks];    // {4 d, -31.625 sum q, 1.5 d sum |q|, 0}
     __shared__ float wmax[WPB][NC];
@@ -455,7 +455,16 @@ __global__ void __launch_bounds__(WPB * WARP) q80p_screen_kernel(const uint8_t* 
 #pragma unroll
         for (int i = 0; i < VHIST / 32; ++i) v[i] = __ldcg(&vs->hist[c][i * 32 + lane]);
 #pragma unroll
-        for (int i = 0; i < VHIST / 32; ++i) tot[i] = __reduce_add_sync(0xffffffffu, v[i]);
+        for (int i = 0; i < VHIST / 32; ++i) {
+#if __CUDA_ARCH__ >= 800
+            tot[i] = __reduce_add_sync(0xffffffffu, v[i]);
+#else   // Turing: the same integer sum by shuffles
+            unsigned s = v[i];
+#pragma unroll
+            for (int o = 16; o > 0; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
+            tot[i] = s;
+#endif
+        }
         unsigned run = 0, row_v = 0;
         int rw = -1;
 #pragma unroll
@@ -539,12 +548,15 @@ bool arch_ok() {
     if (cudaGetDevice(&dev) != cudaSuccess || dev < 0 || dev >= 64) { (void) cudaGetLastError(); return false; }
     int v = ok[dev].load(std::memory_order_relaxed);
     if (v == 0) {
-        int major = 0;
-        if (cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) != cudaSuccess) { (void) cudaGetLastError(); major = 0; }
+        int major = 0, minor = 0;
+        if (cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev) != cudaSuccess ||
+            cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev) != cudaSuccess) { (void) cudaGetLastError(); major = minor = 0; }
         cudaFuncAttributes fa{};
-        const bool built = cudaFuncGetAttributes(&fa, q80p_rows_kernel<1>) == cudaSuccess && fa.binaryVersion >= 80;
+        // ptxVersion too (as the PDL and cluster probes check): a 75-virtual build JITs to the card's binary version, and only the
+        // PTX version tells that the kernels are trap stubs (a pre-sm_75 build; the STRATA_EMULATE_CC tests JIT older PTX)
+        const bool built = cudaFuncGetAttributes(&fa, q80p_rows_kernel<1>) == cudaSuccess && fa.ptxVersion >= 75 && fa.binaryVersion >= 75;
         if (!built) (void) cudaGetLastError();
-        v = major >= 8 && built ? 1 : 2;
+        v = major * 10 + minor >= 75 && built ? 1 : 2;
         ok[dev].store(v, std::memory_order_relaxed);
     }
     return v == 1;
