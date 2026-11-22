@@ -400,6 +400,24 @@ Tried and dropped:
 - The adaptive tier's swaps spread over every round (24 a round instead of 96 every 4): 1.2% fewer rounds/s.
   Without the tier decode drops 23%. High process priority: no change.
 
+### Two GPUs under Windows: 8 GiB pinned again (2026-11-22, release 0.2.15-nvfp4.8)
+
+0.2.15-nvfp4.7 on the two RTX 5060 Ti: the 62 GiB limit held and the driver refused nothing (34.17 + 27.45 = 61.62
+GiB pinned), every GPU answered right after the pin, and yet after the arena loaded `cudaMemGetInfo` failed on both cards
+("out of memory"): no expert cache, the start hung. Both adapters showed 65.05 GiB of their 115.14 GiB non-local budget
+in use, the whole pin on each: together 130 GiB, over the budget either one reported.
+
+- Not the commit limit (RAM + page file): on the RTX 5090 `cudaHostRegister` of 8 GiB (normal or large pages) added
+  0.0 GiB of commit, while a 4 GiB `cudaMalloc` added 4.07 GiB.
+- On that PC `STRATA_PIN_TOTAL_GIB=48` (about 51 GiB in use per adapter, 102 GiB together) started.
+  `STRATA_ARENA_PIN_PER_STAGE=0`, the portable pin with its 8 GiB limit for a multi-GPU split under WDDM (#253, as
+  upstream), started too and decoded no slower by the user's account: 40+ tokens/s from the first tokens, against a
+  climb to ~44 by the end of the answer with 48 GiB, whose bigger pinned share leaves the VRAM cache a little less.
+
+So since 0.2.15-nvfp4.8 the registration per stage is off by default: under Windows (and WSL2) a split over several GPUs
+pins at most 8 GiB again. `STRATA_ARENA_PIN_PER_STAGE=1` turns it on, with the limits of 0.2.15-nvfp4.7 below (62 GiB in
+all, a refusal written down and the engine started again). One GPU and Linux are unchanged.
+
 ### Two GPUs under Windows: one limit of about 64 GiB for all the GPUs (2026-11-21, release 0.2.15-nvfp4.7)
 
 0.2.15-nvfp4.6 (below) did not help the two RTX 5060 Ti. Its first start on that PC, with the stages taking turns, was

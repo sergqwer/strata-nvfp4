@@ -6169,7 +6169,8 @@ int main(int argc, char** argv) {
                          pin_env == 0 ? "the whole expert arena is pinned" : "the expert arena's pinning is capped");
         else if (pin_wddm_cap)
             std::fprintf(stderr, "strata generate: multi-GPU under WDDM: at most 8 GiB of the expert arena is pinned "
-                                 "(STRATA_ARENA_PIN_GIB changes it)\n");
+                                 "(STRATA_ARENA_PIN_GIB changes it; STRATA_ARENA_PIN_PER_STAGE=1 pins each GPU's layers "
+                                 "in its own context instead)\n");
         return pin_env >= 0 ? (uint64_t) pin_env << 30 : pin_wddm_cap ? (8ull << 30) : 0;
     };
     // extras/wddm-pin: per-stage registration.  Each stage's layers are registered in ITS device's context without
@@ -6177,13 +6178,15 @@ int main(int argc, char** argv) {
     // (non-local) segment - a portable pin is mapped into every context and charged to every adapter, which is why
     // a split under WDDM was capped at 8 GiB in all (#253).  The cap is now per stage: STRATA_ARENA_PIN_GIB=N GiB
     // each (0: none), unset under WDDM 8 GiB each (as much per adapter as the portable cap charged each before).
-    // Default on under WDDM on a multi-GPU layer split; STRATA_ARENA_PIN_PER_STAGE=1 forces it on any split (Linux,
-    // --split-device 0: one context, the same code path), =0 keeps the portable registration.  True: the arena's slices
-    // have their owners (set_arena_slice_devices) and the open takes no cap of its own.
+    // Off by default since 0.2.15-nvfp4.8 (it was on under WDDM on a multi-GPU layer split): two RTX 5060 Ti under
+    // Windows charged EVERY pinned byte to both adapters, so the two adapters' sum crossed the 115 GiB budget each
+    // reported (2 x 65 GiB with 61.6 GiB pinned) and the cards could no longer read their free memory - no expert cache,
+    // the start hung.  The portable registration with its 8 GiB cap (#253, as in upstream) started there and decoded no
+    // slower.  STRATA_ARENA_PIN_PER_STAGE=1 turns it on, on any split (Linux, --split-device 0: one context, the same code
+    // path).  True: the arena's slices have their owners (set_arena_slice_devices) and the open takes no cap of its own.
     auto arena_per_stage = [&]() -> bool {
         const int per_stage_env = strata::core::arena_pin_per_stage_env();
-        if (split_at.empty() || !(multi_gpu || split_same) || o.mmap_experts ||
-            !(per_stage_env == 1 || (per_stage_env == -1 && multi_gpu && under_wddm())))
+        if (split_at.empty() || !(multi_gpu || split_same) || o.mmap_experts || per_stage_env != 1)
             return false;
         int d0 = 0;
         if (cudaGetDevice(&d0) != cudaSuccess) { (void) cudaGetLastError(); d0 = 0; }
@@ -6299,8 +6302,8 @@ int main(int argc, char** argv) {
         }
         strata::core::set_arena_slice_devices(owner, caps, stage_of_l, whys, live);
         std::fprintf(stderr, "strata generate: expert arena: registered per stage, each stage's layers in its own CUDA "
-                             "context (not portable; STRATA_ARENA_PIN_PER_STAGE=%s); the cap per GPU: %s\n",
-                     per_stage_env == 1 ? "1" : "unset: multi-GPU under WDDM", capsum.c_str());
+                             "context (not portable; STRATA_ARENA_PIN_PER_STAGE=1); the cap per GPU: %s\n",
+                     capsum.c_str());
         return true;
     };
     // extras/wddm-pin: each split GPU's adapter, its shared (non-local) WDDM segment before and after the arena opens -

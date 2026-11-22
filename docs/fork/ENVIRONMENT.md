@@ -108,7 +108,7 @@ the measurements:
 
 ## All environment variables
 
-Every variable the code of 0.2.15-nvfp4.7 reads, collected by a scan of `src/`, `include/`,
+Every variable the code of 0.2.15-nvfp4.8 reads, collected by a scan of `src/`, `include/`,
 `metal/src/`, `sycl/src/` (the engine, with `tools/settings_register.py`'s own scan), `strata_control/`, `serve/`,
 `setup.py`, `tools/` and `release/`, one table per area. Many are upstream's, and many apply only to one backend.
 
@@ -1056,7 +1056,7 @@ Every variable the code of 0.2.15-nvfp4.7 reads, collected by a scan of `src/`, 
 | `STRATA_ARENA_LOCK` | unset |  | (no description in the code) | `src/core/pinned.cu`, `sycl/src/core/pinned.dp.cpp` |
 | `STRATA_ARENA_MMAP` | off |  | Writes experts.bin for mmap experts; user-facing storage option, off unless set. (from the settings register) | `src/core/expert_source.cpp`, `src/program/generate.cpp`, `sycl/src/core/expert_source.cpp` +1 |
 | `STRATA_ARENA_PIN_GIB` | unset |  | (no description in the code) | `src/core/pinned.cu`, `sycl/src/core/pinned.dp.cpp` |
-| `STRATA_ARENA_PIN_PER_STAGE` | unset |  | (no description in the code) | `src/core/pinned.cu` |
+| `STRATA_ARENA_PIN_PER_STAGE` | unset |  | `1`: a layer split pins each GPU's layers in its own CUDA context (not portable), under Windows up to each adapter's budget and 62 GiB in all. Unset or `0`: the portable pin, at most 8 GiB on a multi-GPU split under Windows/WSL2 (the default since 0.2.15-nvfp4.8; before it the per-stage pin was the default there) | `src/program/generate.cpp` |
 | `STRATA_ARENA_PIN_SPREAD` | on |  | (no description in the code) | `src/program/generate.cpp` |
 | `STRATA_ARENA_RAM_FALLBACK` | unset |  | A hand-set `--ple-io ram` and a shared arena file are kept as asked (warn only), STRATA_ARENA_RAM_FALLBACK=0 is the old behaviour. (from the code comment) | `src/program/generate.cpp` |
 | `STRATA_ARENA_RAM_WAIT_S` | 20.0 |  | STRATA_ARENA_RAM_WAIT_S changes the seconds (0 loads at once, as before this wait). (from the code comment) | `src/core/expert_source.cpp` |

@@ -57,8 +57,8 @@ constexpr int kArenaPinRefusedExit = 75;
 bool arena_pin_record_read(const std::string& file, const std::string& key, uint64_t& pinned, std::string& when);
 /// Writes `pinned` for `key` (the key's earlier line goes); false when the file cannot be written.
 bool arena_pin_record_write(const std::string& file, const std::string& key, uint64_t pinned);
-/// STRATA_ARENA_PIN_PER_STAGE: 1 forces the per-stage registration on a layer split (any OS, also --split-device 0),
-/// 0 keeps the portable one; -1 unset (the engine decides: on under WDDM on a multi-GPU layer split).
+/// STRATA_ARENA_PIN_PER_STAGE: 1 turns the per-stage registration on, on a layer split (any OS, also --split-device 0);
+/// 0 or -1 (unset) keep the portable one (since 0.2.15-nvfp4.8 also under WDDM: 8 GiB on a multi-GPU split).
 int arena_pin_per_stage_env();
 
 /// #243 / extras/wddm-pin: the WDDM shared (non-local) segment of CUDA device `dev`'s adapter - its budget and this

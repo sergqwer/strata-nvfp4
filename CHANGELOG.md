@@ -4,6 +4,20 @@ Every release of Strata NVFP4, the newest first. Each version links to its GitHu
 changed in it; [docs/NVFP4.md](docs/NVFP4.md) has the measurements behind each one. Back to the
 [README](README.md); this page replaces its What's new list.
 
+## 0.2.15-nvfp4.8
+
+Released 2026-11-22: [release page](https://github.com/sergqwer/strata-nvfp4/releases/tag/v0.2.15-nvfp4.8).
+
+- **Two or more GPUs under Windows pin 8 GiB of experts again, as upstream does (0.2.15-nvfp4.8).** On the two RTX
+  5060 Ti, 0.2.15-nvfp4.7 still did not start: with 61.6 GiB pinned the cards could no longer read their free memory.
+  Windows charged every pinned byte to both cards, and their sum crossed the budget each card reported. The pinning per
+  card (0.2.15-nvfp4.6-.7) is now off by default; the portable pin with its 8 GiB limit started on that PC and decoded no
+  slower. `STRATA_ARENA_PIN_PER_STAGE=1` turns the pinning per card back on
+  ([details](docs/NVFP4.md#two-gpus-under-windows-8-gib-pinned-again-2026-11-22-release-0215-nvfp48)).
+- **The same text.** One GPU and Linux are unchanged.
+- **Update:** close the server. In a clone run `UPDATE.bat`; in the release folder run `update.cmd`. No new model
+  files. A `"STRATA_ARENA_PIN_PER_STAGE": "0"` added to a config can stay or go: it is now the default.
+
 ## 0.2.15-nvfp4.7
 
 Released 2026-11-21: [release page](https://github.com/sergqwer/strata-nvfp4/releases/tag/v0.2.15-nvfp4.7).
